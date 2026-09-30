@@ -1,4 +1,4 @@
-# JNP Matching v0.4
+# JNP Matching v0.5
 
 Deze versie verwijdert de memoriaal-workaround uit het write-pad.
 
@@ -16,3 +16,7 @@ Zet ze niet tegelijk aan tijdens de eerste tests.
 
 ## Belangrijk
 De AllocationRule werkt alleen als toekomstige bankomschrijvingen het herkenningswoord bevatten, standaard `TD` (bijv. `TD48451`). Bestaande 1360-regels worden alleen geanalyseerd en moeten voorlopig handmatig in Exact worden verwerkt.
+
+
+## v0.5 fix
+De verzameldebiteur-GUID wordt eerst opgelost via ReceivablesList en daarna via TransactionLines. De CRM Accounts lookup is alleen nog fallback. Dit voorkomt de fout waarbij accountcode 100100 via crm/Accounts niet werd gevonden.

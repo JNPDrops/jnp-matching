@@ -37,7 +37,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="0.4.0")
+app = FastAPI(title="JNP Matching", version="0.5.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -172,15 +172,67 @@ def money(value: Any) -> Decimal:
 
 
 async def find_collective_debtor() -> dict[str, Any]:
-    params = {
+    """Resolve the Exact account GUID for the webshop collective debtor.
+
+    Exact exposes the same account through several resources. In this administration
+    the CRM Accounts lookup by Code can return no rows, while ReceivablesList and
+    TransactionLines do expose AccountId/Account for the same debtor. Resolve from
+    financial data first and only use CRM Accounts as a fallback.
+    """
+
+    # 1) Preferred: open receivables. This is already known to expose AccountId and
+    # AccountCode in this administration. Multiple receivables may exist, but they
+    # must all point to the same account GUID.
+    receivable_params = {
+        "$filter": f"AccountCode eq '{COLLECTIVE_DEBTOR_CODE}'",
+        "$select": "AccountId,AccountCode,AccountName",
+        "$top": "50",
+    }
+    receivables = _extract_results(await exact_get("read/financial/ReceivablesList", receivable_params))
+    receivable_ids = {str(r.get("AccountId") or "").strip() for r in receivables if r.get("AccountId")}
+    if len(receivable_ids) == 1:
+        first = receivables[0]
+        return {
+            "ID": next(iter(receivable_ids)),
+            "Code": str(first.get("AccountCode") or COLLECTIVE_DEBTOR_CODE),
+            "Name": str(first.get("AccountName") or ""),
+            "Source": "ReceivablesList",
+        }
+    if len(receivable_ids) > 1:
+        raise HTTPException(409, f"Meerdere Exact account-ID's gevonden voor code {COLLECTIVE_DEBTOR_CODE} in ReceivablesList.")
+
+    # 2) Fallback: transaction lines. This also exposes the account GUID as Account.
+    tx_params = {
+        "$filter": f"AccountCode eq '{COLLECTIVE_DEBTOR_CODE}'",
+        "$select": "Account,AccountCode,AccountName",
+        "$top": "50",
+    }
+    tx_rows = _extract_results(await exact_get("financialtransaction/TransactionLines", tx_params))
+    tx_ids = {str(r.get("Account") or "").strip() for r in tx_rows if r.get("Account")}
+    if len(tx_ids) == 1:
+        first = tx_rows[0]
+        return {
+            "ID": next(iter(tx_ids)),
+            "Code": str(first.get("AccountCode") or COLLECTIVE_DEBTOR_CODE),
+            "Name": str(first.get("AccountName") or ""),
+            "Source": "TransactionLines",
+        }
+    if len(tx_ids) > 1:
+        raise HTTPException(409, f"Meerdere Exact account-ID's gevonden voor code {COLLECTIVE_DEBTOR_CODE} in TransactionLines.")
+
+    # 3) Last fallback: CRM Accounts. Kept for administrations where Code filtering
+    # works normally on this endpoint.
+    crm_params = {
         "$filter": f"Code eq '{COLLECTIVE_DEBTOR_CODE}'",
         "$select": "ID,Code,Name,Status,IsSales",
         "$top": "2",
     }
-    rows = _extract_results(await exact_get("crm/Accounts", params))
-    if len(rows) != 1:
-        raise HTTPException(409, f"Verwacht precies 1 Exact account met code {COLLECTIVE_DEBTOR_CODE}, gevonden: {len(rows)}.")
-    return rows[0]
+    crm_rows = _extract_results(await exact_get("crm/Accounts", crm_params))
+    if len(crm_rows) == 1:
+        crm_rows[0]["Source"] = "crm/Accounts"
+        return crm_rows[0]
+
+    raise HTTPException(409, f"Kon Exact account {COLLECTIVE_DEBTOR_CODE} niet eenduidig naar een account-ID herleiden.")
 
 
 async def find_receivable(order_number: str) -> list[dict[str, Any]]:
@@ -430,7 +482,7 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "version": "0.4.0", "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
+    return {"ok": True, "division": DIVISION, "version": "0.5.0", "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
 
 
 @app.get("/", response_class=HTMLResponse)

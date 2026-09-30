@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -26,12 +27,14 @@ COLLECTIVE_DEBTOR_CODE = os.getenv("COLLECTIVE_DEBTOR_CODE", "100100")
 ORDER_REF_PREFIX = os.getenv("ORDER_REF_PREFIX", "TD")
 TOKEN_STORE_PATH = Path(os.getenv("TOKEN_STORE_PATH", "./exact_tokens.json"))
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-change-me")
+ENABLE_MATCH_WRITES = os.getenv("ENABLE_MATCH_WRITES", "false").lower() == "true"
 
 AUTH_URL = f"{BASE_URL}/api/oauth2/auth"
 TOKEN_URL = f"{BASE_URL}/api/oauth2/token"
 API_V1 = f"{BASE_URL}/api/v1"
+MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="0.1.0")
+app = FastAPI(title="JNP Matching", version="0.2.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -97,7 +100,6 @@ async def _access_token() -> str:
 
 
 def _extract_results(payload: Any) -> list[dict[str, Any]]:
-    # Exact Online commonly returns OData v3 shapes: {"d":{"results":[...]}}
     if isinstance(payload, dict):
         d = payload.get("d", payload)
         if isinstance(d, dict) and isinstance(d.get("results"), list):
@@ -105,6 +107,14 @@ def _extract_results(payload: Any) -> list[dict[str, Any]]:
         if isinstance(d, list):
             return d
     return []
+
+
+def _extract_entity(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        d = payload.get("d", payload)
+        if isinstance(d, dict):
+            return d
+    return {}
 
 
 async def exact_get(path: str, params: dict[str, str] | None = None) -> Any:
@@ -124,19 +134,35 @@ async def exact_get(path: str, params: dict[str, str] | None = None) -> Any:
     return resp.json()
 
 
-ORDER_PATTERNS = [
-    re.compile(r"(?i)\b(?:TD\s*#?\s*)?(\d{4,10})\b"),
-]
+async def exact_post(path: str, payload: dict[str, Any]) -> Any:
+    token = await _access_token()
+    async with httpx.AsyncClient(timeout=45) as client:
+        resp = await client.post(
+            f"{API_V1}/{DIVISION}/{path.lstrip('/')}",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+        )
+    if resp.status_code == 401:
+        tokens = _load_tokens() or {}
+        await _refresh_tokens(tokens)
+        return await exact_post(path, payload)
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, f"Exact POST error: {resp.text[:1200]}")
+    if not resp.text.strip():
+        return {}
+    return resp.json()
 
 
 def extract_order_number(description: str | None) -> str | None:
     if not description:
         return None
-    # Strongest pattern first: explicit ORDER/TD/# marker.
     explicit = re.search(r"(?i)(?:order\s*(?:td\s*)?#?|\btd\s*#?|#)\s*(\d{4,10})\b", description)
     if explicit:
         return explicit.group(1)
-    # For the observed bank format "SURNAME FIRSTNAME 48451", accept a trailing 4-10 digit token.
     trailing = re.search(r"\b(\d{4,10})\s*$", description.strip())
     return trailing.group(1) if trailing else None
 
@@ -148,19 +174,25 @@ def money(value: Any) -> Decimal:
         return Decimal("0.00")
 
 
+def exact_date(value: Any) -> str:
+    if not value:
+        return ""
+    s = str(value)
+    m = re.search(r"Date\((\d+)\)", s)
+    if m:
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc).date().isoformat()
+    return s[:10]
+
+
 async def find_receivable(order_number: str) -> list[dict[str, Any]]:
     expected_ref = f"{ORDER_REF_PREFIX}{order_number}"
-    # Search first on the webshop reference only. In some Exact administrations
-    # AccountCode on ReceivablesList does not equal the visible debtor number,
-    # which made valid webshop invoices disappear from the result set.
     params = {
         "$filter": f"YourRef eq '{expected_ref}'",
-        "$select": "AccountCode,AccountName,Amount,AmountInTransit,CurrencyCode,Description,EntryNumber,InvoiceDate,InvoiceNumber,JournalCode,YourRef",
+        "$select": "Account,AccountCode,AccountName,Amount,AmountInTransit,CurrencyCode,Description,EntryNumber,InvoiceDate,InvoiceNumber,JournalCode,YourRef",
     }
     data = await exact_get("read/financial/ReceivablesList", params)
     rows = _extract_results(data)
-
-    # Prefer the configured collective debtor when Exact returns its code.
     debtor_rows = [r for r in rows if str(r.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE]
     return debtor_rows if debtor_rows else rows
 
@@ -169,12 +201,46 @@ async def bank_lines(limit: int = 100) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 500))
     params = {
         "$filter": f"GLAccountCode eq '{SUSPENSE_GL_CODE}'",
-        "$select": "ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,GLAccountCode,GLAccountDescription,OurRef,Modified",
+        "$select": "ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,GLAccount,GLAccountCode,GLAccountDescription,OurRef,Modified",
         "$orderby": "Modified desc",
         "$top": str(limit),
     }
     data = await exact_get("financialtransaction/BankEntryLines", params)
     return _extract_results(data)
+
+
+async def bank_line_by_id(bank_line_id: str) -> dict[str, Any]:
+    params = {
+        "$filter": f"ID eq guid'{bank_line_id}'",
+        "$select": "ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,GLAccount,GLAccountCode,GLAccountDescription,OurRef,Modified",
+        "$top": "1",
+    }
+    rows = _extract_results(await exact_get("financialtransaction/BankEntryLines", params))
+    if len(rows) != 1:
+        raise HTTPException(404, "Bankregel niet meer gevonden in Exact.")
+    return rows[0]
+
+
+async def transaction_lines(entry_number: int) -> list[dict[str, Any]]:
+    params = {
+        "$filter": f"EntryNumber eq {int(entry_number)}",
+        "$select": "ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,Currency,FinancialPeriod,FinancialYear,GLAccount,GLAccountCode,GLAccountDescription,JournalCode,YourRef",
+    }
+    return _extract_results(await exact_get("financialtransaction/TransactionLines", params))
+
+
+async def general_journals() -> list[dict[str, Any]]:
+    params = {
+        "$filter": "Type eq 90 and IsBlocked eq false",
+        "$select": "Code,Description,Currency,IsBlocked,Type",
+        "$orderby": "Code",
+    }
+    rows = _extract_results(await exact_get("financial/Journals", params))
+    if rows:
+        return rows
+    # Some Exact tenants expose booleans differently; fall back and filter locally.
+    params = {"$filter": "Type eq 90", "$select": "Code,Description,Currency,IsBlocked,Type", "$orderby": "Code"}
+    return [r for r in _extract_results(await exact_get("financial/Journals", params)) if not r.get("IsBlocked")]
 
 
 async def run_dry_match(limit: int = 100) -> list[dict[str, Any]]:
@@ -218,9 +284,200 @@ async def run_dry_match(limit: int = 100) -> list[dict[str, Any]]:
     return rows
 
 
+async def build_match_plan(bank_line_id: str) -> dict[str, Any]:
+    bank = await bank_line_by_id(bank_line_id)
+    if str(bank.get("GLAccountCode") or "") != SUSPENSE_GL_CODE:
+        raise HTTPException(409, "Bankregel staat niet meer op de tussenrekening; niets doen.")
+    order_no = extract_order_number(bank.get("Description"))
+    if not order_no:
+        raise HTTPException(409, "Geen ordernummer herkenbaar in de bankomschrijving.")
+    receivables = await find_receivable(order_no)
+    if len(receivables) != 1:
+        raise HTTPException(409, f"Verwacht precies 1 openstaande post, gevonden: {len(receivables)}.")
+    rec = receivables[0]
+    bank_amount = money(bank.get("AmountDC"))
+    rec_amount = money(rec.get("Amount"))
+    if bank_amount <= 0 or rec_amount <= 0 or bank_amount != rec_amount:
+        raise HTTPException(409, f"Bedragen sluiten niet exact: bank {bank_amount}, openstaand {rec_amount}.")
+
+    bank_txs = await transaction_lines(int(bank["EntryNumber"]))
+    bank_suspense = [t for t in bank_txs if str(t.get("GLAccountCode") or "") == SUSPENSE_GL_CODE and abs(money(t.get("AmountDC"))) == bank_amount]
+    if len(bank_suspense) != 1:
+        raise HTTPException(409, f"Kon de unieke 1360-transactieregel niet bepalen ({len(bank_suspense)} kandidaten).")
+    bank_tx = bank_suspense[0]
+
+    inv_txs = await transaction_lines(int(rec["EntryNumber"]))
+    debtor_candidates = [t for t in inv_txs if str(t.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE and abs(money(t.get("AmountDC"))) == rec_amount]
+    if len(debtor_candidates) != 1:
+        account_guid = str(rec.get("Account") or "")
+        debtor_candidates = [t for t in inv_txs if account_guid and str(t.get("Account") or "") == account_guid and abs(money(t.get("AmountDC"))) == rec_amount]
+    if len(debtor_candidates) != 1:
+        raise HTTPException(409, f"Kon de unieke debiteurenregel van de factuur niet bepalen ({len(debtor_candidates)} kandidaten).")
+    invoice_tx = debtor_candidates[0]
+
+    if not invoice_tx.get("GLAccount") or not invoice_tx.get("Account"):
+        raise HTTPException(409, "Debiteurenregel mist GLAccount of Account GUID.")
+    if not bank_tx.get("GLAccount"):
+        raise HTTPException(409, "Bankregel mist GLAccount GUID voor tussenrekening.")
+
+    bank_reverse = -money(bank_tx.get("AmountDC"))
+    debtor_payment = -money(invoice_tx.get("AmountDC"))
+    if bank_reverse + debtor_payment != Decimal("0.00"):
+        raise HTTPException(409, f"Voorgestelde memoriaalboeking is niet in balans ({bank_reverse} + {debtor_payment}).")
+
+    return {
+        "bank": bank,
+        "order_number": order_no,
+        "expected_ref": f"{ORDER_REF_PREFIX}{order_no}",
+        "receivable": rec,
+        "bank_tx": bank_tx,
+        "invoice_tx": invoice_tx,
+        "amount": bank_amount,
+        "journal_year": int(bank_tx.get("FinancialYear")),
+        "journal_period": int(bank_tx.get("FinancialPeriod")),
+        "date": exact_date(bank_tx.get("Date") or bank.get("Date")),
+        "currency": bank_tx.get("Currency") or rec.get("CurrencyCode") or "EUR",
+        "suspense_gl_guid": bank_tx.get("GLAccount"),
+        "suspense_gl_code": bank_tx.get("GLAccountCode"),
+        "debtor_gl_guid": invoice_tx.get("GLAccount"),
+        "debtor_gl_code": invoice_tx.get("GLAccountCode"),
+        "debtor_account_guid": invoice_tx.get("Account"),
+        "debtor_account_code": invoice_tx.get("AccountCode") or COLLECTIVE_DEBTOR_CODE,
+        "bank_reverse_amount": bank_reverse,
+        "debtor_payment_amount": debtor_payment,
+    }
+
+
+def _odata_post_entity(payload: Any) -> dict[str, Any]:
+    entity = _extract_entity(payload)
+    if entity:
+        return entity
+    return payload if isinstance(payload, dict) else {}
+
+
+async def create_allocation_journal(plan: dict[str, Any], journal_code: str) -> dict[str, Any]:
+    description = f"JNP match {plan['expected_ref']} / bank {plan['bank'].get('EntryNumber')}"
+    body = {
+        "JournalCode": journal_code,
+        "FinancialYear": plan["journal_year"],
+        "FinancialPeriod": plan["journal_period"],
+        "Currency": plan["currency"],
+        "GeneralJournalEntryLines": [
+            {
+                "Date": plan["date"],
+                "Description": description,
+                "GLAccount": plan["suspense_gl_guid"],
+                "AmountFC": float(plan["bank_reverse_amount"]),
+            },
+            {
+                "Date": plan["date"],
+                "Description": description,
+                "GLAccount": plan["debtor_gl_guid"],
+                "Account": plan["debtor_account_guid"],
+                "AmountFC": float(plan["debtor_payment_amount"]),
+            },
+        ],
+    }
+    created = _odata_post_entity(await exact_post("generaljournalentry/GeneralJournalEntries", body))
+    if not created.get("EntryNumber"):
+        raise HTTPException(502, f"Exact maakte de memoriaalboeking aan maar gaf geen EntryNumber terug: {created}")
+    return created
+
+
+def build_matchsets_xml(plan: dict[str, Any], allocation: dict[str, Any], allocation_tx: dict[str, Any]) -> bytes:
+    root = ET.Element("eExact", {
+        "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
+        "xsi:noNamespaceSchemaLocation": "eExact-XML.xsd",
+    })
+    matchsets = ET.SubElement(root, "MatchSets")
+    matchset = ET.SubElement(matchsets, "MatchSet")
+    ET.SubElement(matchset, "GLAccount", {"code": str(plan["debtor_gl_code"])})
+    ET.SubElement(matchset, "Account", {"code": str(plan["debtor_account_code"])})
+    lines = ET.SubElement(matchset, "MatchLines")
+    invoice_tx = plan["invoice_tx"]
+    ET.SubElement(lines, "MatchLine", {
+        "finyear": str(invoice_tx["FinancialYear"]),
+        "finperiod": str(invoice_tx["FinancialPeriod"]),
+        "journal": str(invoice_tx["JournalCode"]),
+        "entry": str(invoice_tx["EntryNumber"]),
+        "amountdc": f"{money(invoice_tx['AmountDC']):.2f}",
+    })
+    ET.SubElement(lines, "MatchLine", {
+        "finyear": str(allocation_tx["FinancialYear"]),
+        "finperiod": str(allocation_tx["FinancialPeriod"]),
+        "journal": str(allocation_tx["JournalCode"]),
+        "entry": str(allocation_tx["EntryNumber"]),
+        "amountdc": f"{money(allocation_tx['AmountDC']):.2f}",
+    })
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+async def upload_matchset(xml_payload: bytes) -> str:
+    token = await _access_token()
+    async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
+        resp = await client.post(
+            MATCHSETS_URL,
+            params={"Topic": "MatchSets", "_Division_": str(DIVISION)},
+            content=xml_payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/xml; charset=utf-8",
+                "Accept": "application/xml,text/xml,*/*",
+            },
+        )
+    if resp.status_code == 401:
+        tokens = _load_tokens() or {}
+        await _refresh_tokens(tokens)
+        return await upload_matchset(xml_payload)
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, f"MatchSets upload failed: {resp.text[:1200]}")
+    text = resp.text.strip()
+    # Empty <Messages/> is the normal success response. Any actual Message is treated as an error.
+    try:
+        parsed = ET.fromstring(text) if text else None
+        messages = parsed.findall(".//Message") if parsed is not None else []
+        if messages:
+            details = " | ".join(" ".join((m.itertext())).strip() for m in messages)
+            raise HTTPException(409, f"Exact MatchSets melding: {details}")
+    except ET.ParseError:
+        if "error" in text.lower():
+            raise HTTPException(409, f"Exact MatchSets antwoord: {text[:1200]}")
+    return text
+
+
+async def execute_match(bank_line_id: str, journal_code: str) -> dict[str, Any]:
+    if not ENABLE_MATCH_WRITES:
+        raise HTTPException(403, "Schrijven staat nog op slot. Zet ENABLE_MATCH_WRITES=true pas na controle van de preview.")
+    journals = {str(j.get("Code")): j for j in await general_journals()}
+    if journal_code not in journals:
+        raise HTTPException(409, "Gekozen memoriaaldagboek is niet beschikbaar of geblokkeerd.")
+
+    # Full revalidation immediately before any write.
+    plan = await build_match_plan(bank_line_id)
+    allocation = await create_allocation_journal(plan, journal_code)
+    allocation_entry = int(allocation["EntryNumber"])
+    allocation_txs = await transaction_lines(allocation_entry)
+    debtor_lines = [t for t in allocation_txs if str(t.get("GLAccountCode") or "") == str(plan["debtor_gl_code"]) and str(t.get("Account") or "") == str(plan["debtor_account_guid"]) and money(t.get("AmountDC")) == plan["debtor_payment_amount"]]
+    if len(debtor_lines) != 1:
+        raise HTTPException(502, f"Memoriaalboeking {allocation_entry} is aangemaakt, maar de debiteurenregel kon niet uniek worden teruggelezen. STOP en controleer Exact handmatig.")
+    allocation_tx = debtor_lines[0]
+    xml_payload = build_matchsets_xml(plan, allocation, allocation_tx)
+    response_text = await upload_matchset(xml_payload)
+    return {
+        "ok": True,
+        "order": plan["order_number"],
+        "bank_entry": plan["bank"].get("EntryNumber"),
+        "invoice_entry": plan["invoice_tx"].get("EntryNumber"),
+        "allocation_entry": allocation_entry,
+        "journal": journal_code,
+        "amount": str(plan["amount"]),
+        "matchsets_response": response_text[:500],
+    }
+
+
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "mode": "read-only dry-run"}
+    return {"ok": True, "division": DIVISION, "mode": "write-capable" if ENABLE_MATCH_WRITES else "write-locked"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -232,6 +489,7 @@ async def home(request: Request):
         "division": DIVISION,
         "suspense": SUSPENSE_GL_CODE,
         "debtor": COLLECTIVE_DEBTOR_CODE,
+        "writes_enabled": ENABLE_MATCH_WRITES,
     })
 
 
@@ -281,7 +539,7 @@ async def api_status():
         )
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, resp.text[:800])
-    return {"configured_division": DIVISION, "exact_current_me": resp.json()}
+    return {"configured_division": DIVISION, "writes_enabled": ENABLE_MATCH_WRITES, "exact_current_me": resp.json()}
 
 
 @app.get("/api/dry-run")
@@ -301,4 +559,27 @@ async def dry_run(limit: int = 100):
 @app.get("/dry-run", response_class=HTMLResponse)
 async def dry_run_page(request: Request, limit: int = 100):
     results = await run_dry_match(limit)
-    return templates.TemplateResponse("dry_run.html", {"request": request, "results": results, "limit": limit})
+    return templates.TemplateResponse("dry_run.html", {
+        "request": request,
+        "results": results,
+        "limit": limit,
+        "writes_enabled": ENABLE_MATCH_WRITES,
+    })
+
+
+@app.get("/match/{bank_line_id}", response_class=HTMLResponse)
+async def match_preview(request: Request, bank_line_id: str):
+    plan = await build_match_plan(bank_line_id)
+    journals = await general_journals()
+    return templates.TemplateResponse("match_preview.html", {
+        "request": request,
+        "plan": plan,
+        "journals": journals,
+        "writes_enabled": ENABLE_MATCH_WRITES,
+    })
+
+
+@app.post("/match/{bank_line_id}/execute", response_class=HTMLResponse)
+async def match_execute_page(request: Request, bank_line_id: str, journal_code: str):
+    result = await execute_match(bank_line_id, journal_code)
+    return templates.TemplateResponse("match_done.html", {"request": request, "result": result})

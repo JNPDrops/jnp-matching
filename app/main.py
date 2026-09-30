@@ -174,65 +174,66 @@ def money(value: Any) -> Decimal:
 async def find_collective_debtor() -> dict[str, Any]:
     """Resolve the Exact account GUID for the webshop collective debtor.
 
-    Exact exposes the same account through several resources. In this administration
-    the CRM Accounts lookup by Code can return no rows, while ReceivablesList and
-    TransactionLines do expose AccountId/Account for the same debtor. Resolve from
-    financial data first and only use CRM Accounts as a fallback.
+    In this administration, server-side filtering ReceivablesList by AccountCode
+    is not reliable, while the returned rows do contain AccountId + AccountCode.
+    Therefore we deliberately fetch a bounded set and filter client-side.
+    This keeps the GUID dynamic and avoids hardcoding an Exact account ID.
     """
 
-    # 1) Preferred: open receivables. This is already known to expose AccountId and
-    # AccountCode in this administration. Multiple receivables may exist, but they
-    # must all point to the same account GUID.
+    # 1) Preferred: scan open receivables and filter locally on AccountCode.
     receivable_params = {
-        "$filter": f"AccountCode eq '{COLLECTIVE_DEBTOR_CODE}'",
-        "$select": "AccountId,AccountCode,AccountName",
-        "$top": "50",
+        "$select": "AccountId,AccountCode,AccountName,EntryNumber,YourRef",
+        "$top": "1000",
     }
     receivables = _extract_results(await exact_get("read/financial/ReceivablesList", receivable_params))
-    receivable_ids = {str(r.get("AccountId") or "").strip() for r in receivables if r.get("AccountId")}
+    matching = [
+        r for r in receivables
+        if str(r.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE
+        and r.get("AccountId")
+    ]
+    receivable_ids = {str(r.get("AccountId") or "").strip() for r in matching}
     if len(receivable_ids) == 1:
-        first = receivables[0]
+        first = matching[0]
         return {
             "ID": next(iter(receivable_ids)),
             "Code": str(first.get("AccountCode") or COLLECTIVE_DEBTOR_CODE),
             "Name": str(first.get("AccountName") or ""),
-            "Source": "ReceivablesList",
+            "Source": "ReceivablesList client-side scan",
+            "Evidence": f"Entry {first.get('EntryNumber')} / {first.get('YourRef')}",
         }
     if len(receivable_ids) > 1:
         raise HTTPException(409, f"Meerdere Exact account-ID's gevonden voor code {COLLECTIVE_DEBTOR_CODE} in ReceivablesList.")
 
-    # 2) Fallback: transaction lines. This also exposes the account GUID as Account.
+    # 2) Fallback: scan recent financial transaction lines and filter locally.
     tx_params = {
-        "$filter": f"AccountCode eq '{COLLECTIVE_DEBTOR_CODE}'",
-        "$select": "Account,AccountCode,AccountName",
-        "$top": "50",
+        "$select": "Account,AccountCode,AccountName,EntryNumber,YourRef",
+        "$top": "1000",
+        "$orderby": "EntryNumber desc",
     }
     tx_rows = _extract_results(await exact_get("financialtransaction/TransactionLines", tx_params))
-    tx_ids = {str(r.get("Account") or "").strip() for r in tx_rows if r.get("Account")}
+    tx_matching = [
+        r for r in tx_rows
+        if str(r.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE
+        and r.get("Account")
+    ]
+    tx_ids = {str(r.get("Account") or "").strip() for r in tx_matching}
     if len(tx_ids) == 1:
-        first = tx_rows[0]
+        first = tx_matching[0]
         return {
             "ID": next(iter(tx_ids)),
             "Code": str(first.get("AccountCode") or COLLECTIVE_DEBTOR_CODE),
             "Name": str(first.get("AccountName") or ""),
-            "Source": "TransactionLines",
+            "Source": "TransactionLines client-side scan",
+            "Evidence": f"Entry {first.get('EntryNumber')} / {first.get('YourRef')}",
         }
     if len(tx_ids) > 1:
         raise HTTPException(409, f"Meerdere Exact account-ID's gevonden voor code {COLLECTIVE_DEBTOR_CODE} in TransactionLines.")
 
-    # 3) Last fallback: CRM Accounts. Kept for administrations where Code filtering
-    # works normally on this endpoint.
-    crm_params = {
-        "$filter": f"Code eq '{COLLECTIVE_DEBTOR_CODE}'",
-        "$select": "ID,Code,Name,Status,IsSales",
-        "$top": "2",
-    }
-    crm_rows = _extract_results(await exact_get("crm/Accounts", crm_params))
-    if len(crm_rows) == 1:
-        crm_rows[0]["Source"] = "crm/Accounts"
-        return crm_rows[0]
-
-    raise HTTPException(409, f"Kon Exact account {COLLECTIVE_DEBTOR_CODE} niet eenduidig naar een account-ID herleiden.")
+    raise HTTPException(
+        409,
+        f"Kon Exact account {COLLECTIVE_DEBTOR_CODE} niet dynamisch naar een account-ID herleiden. "
+        "Gebruik /diagnose/48451 om de brondata te controleren.",
+    )
 
 
 async def find_receivable(order_number: str) -> list[dict[str, Any]]:
@@ -354,13 +355,13 @@ async def allocation_rules() -> list[dict[str, Any]]:
 
 async def allocation_rule_preview() -> dict[str, Any]:
     account = await find_collective_debtor()
-    existing = await allocation_rules()
-    same = [r for r in existing if str(r.get("Account") or "").lower() == str(account["ID"]).lower() and str(r.get("Words") or "").strip().lower() == ALLOCATION_WORDS.strip().lower()]
+    all_rules = await allocation_rules()
+    same = [r for r in all_rules if str(r.get("Account") or "").lower() == str(account["ID"]).lower() and str(r.get("Words") or "").strip().lower() == ALLOCATION_WORDS.strip().lower()]
     return {
         "account": account,
         "words": ALLOCATION_WORDS,
         "existing": same,
-        "all_rules_count": len(existing),
+        "all_rules_count": len(all_rules),
         "payload": {"Account": account["ID"], "Words": ALLOCATION_WORDS},
     }
 

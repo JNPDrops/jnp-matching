@@ -25,10 +25,9 @@ DIVISION = int(os.getenv("EXACT_DIVISION", "3977752"))
 SUSPENSE_GL_CODE = os.getenv("SUSPENSE_GL_CODE", "1360")
 COLLECTIVE_DEBTOR_CODE = os.getenv("COLLECTIVE_DEBTOR_CODE", "100100")
 ORDER_REF_PREFIX = os.getenv("ORDER_REF_PREFIX", "TD")
-ALLOCATION_WORDS = os.getenv("ALLOCATION_WORDS", "TD")
 TOKEN_STORE_PATH = Path(os.getenv("TOKEN_STORE_PATH", "./exact_tokens.json"))
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-change-me")
-ENABLE_ALLOCATION_RULE_WRITES = os.getenv("ENABLE_ALLOCATION_RULE_WRITES", "false").lower() == "true"
+ENABLE_ORDER_RULE_WRITES = os.getenv("ENABLE_ORDER_RULE_WRITES", os.getenv("ENABLE_ALLOCATION_RULE_WRITES", "false")).lower() == "true"
 ENABLE_DIRECT_MATCH_WRITES = os.getenv("ENABLE_DIRECT_MATCH_WRITES", "false").lower() == "true"
 
 AUTH_URL = f"{BASE_URL}/api/oauth2/auth"
@@ -37,7 +36,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="0.6.0")
+app = FastAPI(title="JNP Matching", version="0.9.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -337,7 +336,7 @@ async def diagnose_receivable(order_number: str) -> dict[str, Any]:
         "transaction_lines_interesting": [pick(r) for r in tx_rows],
         "transaction_lines_raw": tx_rows,
         "writes_enabled": {
-            "allocation_rule": ENABLE_ALLOCATION_RULE_WRITES,
+            "order_rule": ENABLE_ORDER_RULE_WRITES,
             "direct_match": ENABLE_DIRECT_MATCH_WRITES,
         },
     }
@@ -353,27 +352,84 @@ async def allocation_rules() -> list[dict[str, Any]]:
         raise
 
 
-async def allocation_rule_preview() -> dict[str, Any]:
+async def open_webshop_receivables(limit: int = 500) -> list[dict[str, Any]]:
+    """Return open webshop receivables for the collective debtor.
+
+    The bank description is expected to contain only the numeric WooCommerce order
+    number. Exact sales entries use YourRef TD<order>. We therefore create one
+    allocation rule per open order, with Words=<order number>.
+    """
+    params = {
+        "$select": "AccountId,AccountCode,AccountName,Amount,CurrencyCode,Description,EntryNumber,InvoiceDate,InvoiceNumber,JournalCode,YourRef",
+        "$top": str(max(1, min(limit, 1000))),
+    }
+    rows = _extract_results(await exact_get("read/financial/ReceivablesList", params))
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if str(r.get("AccountCode") or "").strip() != COLLECTIVE_DEBTOR_CODE:
+            continue
+        m = re.fullmatch(rf"{re.escape(ORDER_REF_PREFIX)}(\d{{4,10}})", str(r.get("YourRef") or "").strip(), re.I)
+        if not m:
+            continue
+        item = dict(r)
+        item["OrderNumber"] = m.group(1)
+        out.append(item)
+    return out
+
+
+async def order_rule_status(limit: int = 500) -> dict[str, Any]:
     account = await find_collective_debtor()
+    receivables = await open_webshop_receivables(limit)
     all_rules = await allocation_rules()
-    same = [r for r in all_rules if str(r.get("Account") or "").lower() == str(account["ID"]).lower() and str(r.get("Words") or "").strip().lower() == ALLOCATION_WORDS.strip().lower()]
+    account_id = str(account["ID"]).lower()
+    rules_by_word: dict[str, dict[str, Any]] = {}
+    for rule in all_rules:
+        if str(rule.get("Account") or "").lower() != account_id:
+            continue
+        word = str(rule.get("Words") or "").strip()
+        if word:
+            rules_by_word[word] = rule
+    items = []
+    for rec in receivables:
+        order_no = rec["OrderNumber"]
+        items.append({
+            "order_number": order_no,
+            "your_ref": rec.get("YourRef"),
+            "entry_number": rec.get("EntryNumber"),
+            "amount": str(money(rec.get("Amount"))),
+            "currency": rec.get("CurrencyCode") or "EUR",
+            "rule_exists": order_no in rules_by_word,
+            "rule_id": (rules_by_word.get(order_no) or {}).get("ID"),
+            "payload": {"Account": account["ID"], "Words": order_no},
+        })
     return {
         "account": account,
-        "words": ALLOCATION_WORDS,
-        "existing": same,
+        "items": items,
+        "open_count": len(items),
+        "missing_count": sum(1 for i in items if not i["rule_exists"]),
         "all_rules_count": len(all_rules),
-        "payload": {"Account": account["ID"], "Words": ALLOCATION_WORDS},
     }
 
 
-async def create_allocation_rule() -> dict[str, Any]:
-    if not ENABLE_ALLOCATION_RULE_WRITES:
-        raise HTTPException(403, "AllocationRule schrijven staat op slot.")
-    preview = await allocation_rule_preview()
-    if preview["existing"]:
-        return {"ok": True, "created": False, "message": "Regel bestond al.", "rule": preview["existing"][0]}
-    created = _extract_entity(await exact_beta_post("cashflow/AllocationRule", preview["payload"]))
-    return {"ok": True, "created": True, "message": "AllocationRule aangemaakt.", "rule": created}
+async def create_order_rule(order_number: str) -> dict[str, Any]:
+    if not ENABLE_ORDER_RULE_WRITES:
+        raise HTTPException(403, "Order-toewijzingsregels schrijven staat op slot.")
+    if not re.fullmatch(r"\d{4,10}", order_number):
+        raise HTTPException(400, "Ongeldig ordernummer.")
+    account = await find_collective_debtor()
+    recs = await find_receivable(order_number)
+    if len(recs) != 1:
+        raise HTTPException(409, f"Verwacht precies 1 openstaande post voor TD{order_number}, gevonden: {len(recs)}.")
+    if str(recs[0].get("AccountCode") or "").strip() != COLLECTIVE_DEBTOR_CODE:
+        raise HTTPException(409, "Openstaande post staat niet op de verzameldebiteur.")
+    existing = await allocation_rules()
+    account_id = str(account["ID"]).lower()
+    for rule in existing:
+        if str(rule.get("Account") or "").lower() == account_id and str(rule.get("Words") or "").strip() == order_number:
+            return {"ok": True, "created": False, "message": "Regel bestond al.", "rule": rule, "order_number": order_number}
+    payload = {"Account": account["ID"], "Words": order_number}
+    created = _extract_entity(await exact_beta_post("cashflow/AllocationRule", payload))
+    return {"ok": True, "created": True, "message": "Order-toewijzingsregel aangemaakt.", "rule": created, "order_number": order_number}
 
 
 async def run_legacy_dry_run(limit: int = 100) -> list[dict[str, Any]]:
@@ -539,15 +595,15 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "version": "0.7.0", "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
+    return {"ok": True, "division": DIVISION, "version": "0.9.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
 
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse("index.html", {
         "request": request, "connected": _load_tokens() is not None, "division": DIVISION,
-        "suspense": SUSPENSE_GL_CODE, "debtor": COLLECTIVE_DEBTOR_CODE, "allocation_words": ALLOCATION_WORDS,
-        "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES,
+        "suspense": SUSPENSE_GL_CODE, "debtor": COLLECTIVE_DEBTOR_CODE,
+        "order_rule_writes": ENABLE_ORDER_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES,
     })
 
 
@@ -589,16 +645,23 @@ async def allocated_page(request: Request, limit: int = 100):
     return templates.TemplateResponse("allocated.html", {"request": request, "results": await run_allocated_dry_run(limit), "limit": limit, "writes_enabled": ENABLE_DIRECT_MATCH_WRITES})
 
 
-@app.get("/allocation-rule", response_class=HTMLResponse)
-async def allocation_rule_page(request: Request):
-    preview = await allocation_rule_preview()
-    return templates.TemplateResponse("allocation_rule.html", {"request": request, "preview": preview, "writes_enabled": ENABLE_ALLOCATION_RULE_WRITES})
+@app.get("/allocation-rule")
+async def allocation_rule_redirect():
+    return RedirectResponse("/order-rules")
 
 
-@app.post("/allocation-rule/create", response_class=HTMLResponse)
-async def allocation_rule_create_page(request: Request):
-    result = await create_allocation_rule()
-    return templates.TemplateResponse("allocation_rule_done.html", {"request": request, "result": result})
+@app.get("/order-rules", response_class=HTMLResponse)
+async def order_rules_page(request: Request, limit: int = 500):
+    status = await order_rule_status(limit)
+    return templates.TemplateResponse("order_rules.html", {
+        "request": request, "status": status, "writes_enabled": ENABLE_ORDER_RULE_WRITES,
+    })
+
+
+@app.post("/order-rules/{order_number}/create", response_class=HTMLResponse)
+async def order_rule_create_page(request: Request, order_number: str):
+    result = await create_order_rule(order_number)
+    return templates.TemplateResponse("order_rule_done.html", {"request": request, "result": result})
 
 
 @app.get("/direct-match/{bank_line_id}", response_class=HTMLResponse)

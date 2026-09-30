@@ -1,0 +1,10 @@
+<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Orderregels</title><style>body{font-family:system-ui,Arial;max-width:1100px;margin:40px auto;padding:0 20px}code{background:#f4f4f4;padding:2px 5px}.warn{padding:12px;background:#fff8df;border:1px solid #c88900}.ok{color:#087a34;font-weight:700}table{border-collapse:collapse;width:100%;font-size:14px}th,td{border-bottom:1px solid #ddd;padding:8px;text-align:left}button{padding:7px 10px}</style></head><body>
+<p><a href="/">← terug</a></p><h1>Order-specifieke toewijzingsregels</h1>
+<p>Account: <strong>{{ status.account.Code }} — {{ status.account.Name }}</strong> · GUID <code>{{ status.account.ID }}</code></p>
+<div class="warn"><strong>Waarom per order?</strong> De bank bevat bijvoorbeeld <code>VERCAIGNE BO 48451</code>, terwijl Exact <code>TD48451</code> gebruikt. Daarom is de veilige regel <code>Words = 48451</code>, niet <code>Words = TD</code>.</div>
+<p>Open webshopposten: <strong>{{ status.open_count }}</strong> · ontbrekende regels: <strong>{{ status.missing_count }}</strong> · totaal AllocationRules in API: {{ status.all_rules_count }}</p>
+{% if not writes_enabled %}<p>Schrijven staat op slot. Laat dit zo voor de eerste controle. Variabele: <code>ENABLE_ORDER_RULE_WRITES=false</code>.</p>{% endif %}
+<table><thead><tr><th>Order</th><th>Exact ref.</th><th>Entry</th><th>Bedrag</th><th>Regel</th><th>Actie</th></tr></thead><tbody>
+{% for i in status.items %}<tr><td><strong>{{ i.order_number }}</strong></td><td>{{ i.your_ref }}</td><td>{{ i.entry_number }}</td><td>{{ i.currency }} {{ i.amount }}</td><td>{% if i.rule_exists %}<span class="ok">bestaat</span>{% else %}ontbreekt{% endif %}</td><td>{% if not i.rule_exists and writes_enabled %}<form method="post" action="/order-rules/{{ i.order_number }}/create"><button onclick="return confirm('Regel voor order {{ i.order_number }} echt aanmaken in Exact?')">Maak alleen deze regel</button></form>{% else %}—{% endif %}</td></tr>{% endfor %}
+</tbody></table>
+</body></html>

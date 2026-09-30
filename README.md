@@ -1,11 +1,18 @@
 # JNP Matching v0.4
 
-Fix voor de previewfout `Kon de unieke 1360-transactieregel niet bepalen (0 kandidaten)`.
+Deze versie verwijdert de memoriaal-workaround uit het write-pad.
 
-De dry-run werkt op `BankEntryLines`; daarom gebruikt de preview nu exact dezelfde bankregel als bron in plaats van te proberen de 1360-regel opnieuw terug te vinden via `TransactionLines`.
+## Nieuwe flow
+1. Exact AllocationRule wijst toekomstige bankregels met `TD` in de omschrijving toe aan verzameldebiteur `100100`.
+2. JNP Matching leest alleen bankregels die al aan `100100` zijn toegewezen.
+3. De matcher zoekt de openstaande post via `TD{ordernummer}` en controleert exact bedrag + unieke match.
+4. Alleen daarna kan Exact XML MatchSets de twee bestaande debiteurenregels direct afletteren.
 
-Voor inkomende webshopbetalingen geldt in de preview:
-- 1360: debet voor het ontvangen bedrag
-- debiteur: credit voor hetzelfde bedrag
+## Veiligheidslocks
+- `ENABLE_ALLOCATION_RULE_WRITES=false`
+- `ENABLE_DIRECT_MATCH_WRITES=false`
 
-`ENABLE_MATCH_WRITES` blijft standaard `false`. Zet dit nog niet aan voordat de preview van order 48451 is gecontroleerd.
+Zet ze niet tegelijk aan tijdens de eerste tests.
+
+## Belangrijk
+De AllocationRule werkt alleen als toekomstige bankomschrijvingen het herkenningswoord bevatten, standaard `TD` (bijv. `TD48451`). Bestaande 1360-regels worden alleen geanalyseerd en moeten voorlopig handmatig in Exact worden verwerkt.

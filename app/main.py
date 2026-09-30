@@ -25,13 +25,16 @@ DIVISION = int(os.getenv("EXACT_DIVISION", "3977752"))
 SUSPENSE_GL_CODE = os.getenv("SUSPENSE_GL_CODE", "1360")
 COLLECTIVE_DEBTOR_CODE = os.getenv("COLLECTIVE_DEBTOR_CODE", "100100")
 ORDER_REF_PREFIX = os.getenv("ORDER_REF_PREFIX", "TD")
+ALLOCATION_WORDS = os.getenv("ALLOCATION_WORDS", "TD")
 TOKEN_STORE_PATH = Path(os.getenv("TOKEN_STORE_PATH", "./exact_tokens.json"))
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-change-me")
-ENABLE_MATCH_WRITES = os.getenv("ENABLE_MATCH_WRITES", "false").lower() == "true"
+ENABLE_ALLOCATION_RULE_WRITES = os.getenv("ENABLE_ALLOCATION_RULE_WRITES", "false").lower() == "true"
+ENABLE_DIRECT_MATCH_WRITES = os.getenv("ENABLE_DIRECT_MATCH_WRITES", "false").lower() == "true"
 
 AUTH_URL = f"{BASE_URL}/api/oauth2/auth"
 TOKEN_URL = f"{BASE_URL}/api/oauth2/token"
 API_V1 = f"{BASE_URL}/api/v1"
+API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
 app = FastAPI(title="JNP Matching", version="0.4.0")
@@ -117,28 +120,13 @@ def _extract_entity(payload: Any) -> dict[str, Any]:
     return {}
 
 
-async def exact_get(path: str, params: dict[str, str] | None = None) -> Any:
+async def _request_json(method: str, url: str, params=None, payload=None) -> Any:
     token = await _access_token()
     async with httpx.AsyncClient(timeout=45) as client:
-        resp = await client.get(
-            f"{API_V1}/{DIVISION}/{path.lstrip('/')}",
+        resp = await client.request(
+            method,
+            url,
             params=params,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        )
-    if resp.status_code == 401:
-        tokens = _load_tokens() or {}
-        await _refresh_tokens(tokens)
-        return await exact_get(path, params)
-    if resp.status_code >= 400:
-        raise HTTPException(resp.status_code, f"Exact API error: {resp.text[:800]}")
-    return resp.json()
-
-
-async def exact_post(path: str, payload: dict[str, Any]) -> Any:
-    token = await _access_token()
-    async with httpx.AsyncClient(timeout=45) as client:
-        resp = await client.post(
-            f"{API_V1}/{DIVISION}/{path.lstrip('/')}",
             json=payload,
             headers={
                 "Authorization": f"Bearer {token}",
@@ -147,14 +135,23 @@ async def exact_post(path: str, payload: dict[str, Any]) -> Any:
             },
         )
     if resp.status_code == 401:
-        tokens = _load_tokens() or {}
-        await _refresh_tokens(tokens)
-        return await exact_post(path, payload)
+        await _refresh_tokens(_load_tokens() or {})
+        return await _request_json(method, url, params, payload)
     if resp.status_code >= 400:
-        raise HTTPException(resp.status_code, f"Exact POST error: {resp.text[:1200]}")
-    if not resp.text.strip():
-        return {}
-    return resp.json()
+        raise HTTPException(resp.status_code, f"Exact API error: {resp.text[:1200]}")
+    return resp.json() if resp.text.strip() else {}
+
+
+async def exact_get(path: str, params: dict[str, str] | None = None) -> Any:
+    return await _request_json("GET", f"{API_V1}/{DIVISION}/{path.lstrip('/')}", params=params)
+
+
+async def exact_beta_get(path: str, params: dict[str, str] | None = None) -> Any:
+    return await _request_json("GET", f"{API_BETA}/{DIVISION}/{path.lstrip('/')}", params=params)
+
+
+async def exact_beta_post(path: str, payload: dict[str, Any]) -> Any:
+    return await _request_json("POST", f"{API_BETA}/{DIVISION}/{path.lstrip('/')}", payload=payload)
 
 
 def extract_order_number(description: str | None) -> str | None:
@@ -174,15 +171,16 @@ def money(value: Any) -> Decimal:
         return Decimal("0.00")
 
 
-def exact_date(value: Any) -> str:
-    if not value:
-        return ""
-    s = str(value)
-    m = re.search(r"Date\((\d+)\)", s)
-    if m:
-        from datetime import datetime, timezone
-        return datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc).date().isoformat()
-    return s[:10]
+async def find_collective_debtor() -> dict[str, Any]:
+    params = {
+        "$filter": f"Code eq '{COLLECTIVE_DEBTOR_CODE}'",
+        "$select": "ID,Code,Name,Status,IsSales",
+        "$top": "2",
+    }
+    rows = _extract_results(await exact_get("crm/Accounts", params))
+    if len(rows) != 1:
+        raise HTTPException(409, f"Verwacht precies 1 Exact account met code {COLLECTIVE_DEBTOR_CODE}, gevonden: {len(rows)}.")
+    return rows[0]
 
 
 async def find_receivable(order_number: str) -> list[dict[str, Any]]:
@@ -191,22 +189,29 @@ async def find_receivable(order_number: str) -> list[dict[str, Any]]:
         "$filter": f"YourRef eq '{expected_ref}'",
         "$select": "AccountId,AccountCode,AccountName,Amount,AmountInTransit,CurrencyCode,Description,EntryNumber,InvoiceDate,InvoiceNumber,JournalCode,YourRef",
     }
-    data = await exact_get("read/financial/ReceivablesList", params)
-    rows = _extract_results(data)
+    rows = _extract_results(await exact_get("read/financial/ReceivablesList", params))
     debtor_rows = [r for r in rows if str(r.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE]
     return debtor_rows if debtor_rows else rows
 
 
-async def bank_lines(limit: int = 100) -> list[dict[str, Any]]:
-    limit = max(1, min(limit, 500))
+async def bank_lines_on_suspense(limit: int = 100) -> list[dict[str, Any]]:
     params = {
         "$filter": f"GLAccountCode eq '{SUSPENSE_GL_CODE}'",
         "$select": "ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,GLAccount,GLAccountCode,GLAccountDescription,OurRef,Modified",
         "$orderby": "Modified desc",
-        "$top": str(limit),
+        "$top": str(max(1, min(limit, 500))),
     }
-    data = await exact_get("financialtransaction/BankEntryLines", params)
-    return _extract_results(data)
+    return _extract_results(await exact_get("financialtransaction/BankEntryLines", params))
+
+
+async def allocated_bank_lines(limit: int = 100) -> list[dict[str, Any]]:
+    params = {
+        "$filter": f"AccountCode eq '{COLLECTIVE_DEBTOR_CODE}'",
+        "$select": "ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,GLAccount,GLAccountCode,GLAccountDescription,OurRef,Modified",
+        "$orderby": "Modified desc",
+        "$top": str(max(1, min(limit, 500))),
+    }
+    return _extract_results(await exact_get("financialtransaction/BankEntryLines", params))
 
 
 async def bank_line_by_id(bank_line_id: str) -> dict[str, Any]:
@@ -221,19 +226,6 @@ async def bank_line_by_id(bank_line_id: str) -> dict[str, Any]:
     return rows[0]
 
 
-
-
-async def bank_entry_header(entry_id: str) -> dict[str, Any]:
-    params = {
-        "$filter": f"EntryID eq guid'{entry_id}'",
-        "$select": "EntryID,EntryNumber,FinancialPeriod,FinancialYear,JournalCode,JournalDescription,Currency,Status,StatusDescription",
-        "$top": "1",
-    }
-    rows = _extract_results(await exact_get("financialtransaction/BankEntries", params))
-    if len(rows) != 1:
-        raise HTTPException(409, f"Kon de bankboeking-header niet uniek bepalen ({len(rows)} kandidaten).")
-    return rows[0]
-
 async def transaction_lines(entry_number: int) -> list[dict[str, Any]]:
     params = {
         "$filter": f"EntryNumber eq {int(entry_number)}",
@@ -242,187 +234,154 @@ async def transaction_lines(entry_number: int) -> list[dict[str, Any]]:
     return _extract_results(await exact_get("financialtransaction/TransactionLines", params))
 
 
-async def general_journals() -> list[dict[str, Any]]:
-    params = {
-        "$filter": "Type eq 90 and IsBlocked eq false",
-        "$select": "Code,Description,Currency,IsBlocked,Type",
-        "$orderby": "Code",
+async def allocation_rules() -> list[dict[str, Any]]:
+    # Exact exposes AllocationRule as a beta endpoint and entity name is singular.
+    try:
+        return _extract_results(await exact_beta_get("cashflow/AllocationRule", {"$select": "ID,Account,AccountBankAccount,GLAccount,Words,Costcenter,Costunit,VATCode"}))
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return []
+        raise
+
+
+async def allocation_rule_preview() -> dict[str, Any]:
+    account = await find_collective_debtor()
+    existing = await allocation_rules()
+    same = [r for r in existing if str(r.get("Account") or "").lower() == str(account["ID"]).lower() and str(r.get("Words") or "").strip().lower() == ALLOCATION_WORDS.strip().lower()]
+    return {
+        "account": account,
+        "words": ALLOCATION_WORDS,
+        "existing": same,
+        "all_rules_count": len(existing),
+        "payload": {"Account": account["ID"], "Words": ALLOCATION_WORDS},
     }
-    rows = _extract_results(await exact_get("financial/Journals", params))
-    if rows:
-        return rows
-    # Some Exact tenants expose booleans differently; fall back and filter locally.
-    params = {"$filter": "Type eq 90", "$select": "Code,Description,Currency,IsBlocked,Type", "$orderby": "Code"}
-    return [r for r in _extract_results(await exact_get("financial/Journals", params)) if not r.get("IsBlocked")]
 
 
-async def run_dry_match(limit: int = 100) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for bank in await bank_lines(limit):
-        description = bank.get("Description") or ""
-        order_no = extract_order_number(description)
-        bank_amount = money(bank.get("AmountDC"))
+async def create_allocation_rule() -> dict[str, Any]:
+    if not ENABLE_ALLOCATION_RULE_WRITES:
+        raise HTTPException(403, "AllocationRule schrijven staat op slot.")
+    preview = await allocation_rule_preview()
+    if preview["existing"]:
+        return {"ok": True, "created": False, "message": "Regel bestond al.", "rule": preview["existing"][0]}
+    created = _extract_entity(await exact_beta_post("cashflow/AllocationRule", preview["payload"]))
+    return {"ok": True, "created": True, "message": "AllocationRule aangemaakt.", "rule": created}
+
+
+async def run_legacy_dry_run(limit: int = 100) -> list[dict[str, Any]]:
+    rows = []
+    for bank in await bank_lines_on_suspense(limit):
+        order_no = extract_order_number(bank.get("Description"))
+        amount = money(bank.get("AmountDC"))
         result = {
-            "bank_entry": bank.get("EntryNumber"),
-            "bank_line_id": bank.get("ID"),
-            "description": description,
-            "bank_amount": str(bank_amount),
-            "order_number": order_no,
-            "expected_ref": f"{ORDER_REF_PREFIX}{order_no}" if order_no else None,
-            "receivable_entry": None,
-            "receivable_amount": None,
-            "status": "REVIEW_NO_ORDER",
-            "reason": "No webshop order number recognized in bank description.",
+            "bank_entry": bank.get("EntryNumber"), "bank_line_id": bank.get("ID"),
+            "description": bank.get("Description") or "", "bank_amount": str(amount),
+            "order_number": order_no, "expected_ref": f"{ORDER_REF_PREFIX}{order_no}" if order_no else None,
+            "receivable_entry": None, "receivable_amount": None,
+            "status": "REVIEW_NO_ORDER", "reason": "Geen webshopordernummer herkend.",
         }
-        if not order_no:
-            rows.append(result)
-            continue
-        receivables = await find_receivable(order_no)
-        if len(receivables) == 0:
-            result.update(status="REVIEW_NOT_FOUND", reason="No matching open receivable found.")
-        elif len(receivables) > 1:
-            result.update(status="REVIEW_MULTIPLE", reason=f"{len(receivables)} matching open receivables found.")
-        else:
-            rec = receivables[0]
-            rec_amount = money(rec.get("Amount"))
-            result["receivable_entry"] = rec.get("EntryNumber")
-            result["receivable_amount"] = str(rec_amount)
-            result["journal"] = rec.get("JournalCode")
-            result["account_code"] = rec.get("AccountCode")
-            if bank_amount == rec_amount:
-                result.update(status="READY", reason="Unique reference match and exact amount match.")
+        if order_no:
+            recs = await find_receivable(order_no)
+            if len(recs) == 1:
+                rec_amount = money(recs[0].get("Amount"))
+                result.update(receivable_entry=recs[0].get("EntryNumber"), receivable_amount=str(rec_amount))
+                if rec_amount == amount:
+                    result.update(status="BACKLOG_READY", reason="Match gevonden, maar bankregel staat nog op 1360; alleen handmatig verwerken in Exact.")
+                else:
+                    result.update(status="REVIEW_AMOUNT", reason="Bedrag wijkt af.")
+            elif len(recs) == 0:
+                result.update(status="REVIEW_NOT_FOUND", reason="Geen openstaande post gevonden.")
             else:
-                result.update(status="REVIEW_AMOUNT", reason=f"Amount differs: bank {bank_amount} vs receivable {rec_amount}.")
+                result.update(status="REVIEW_MULTIPLE", reason=f"{len(recs)} openstaande posten gevonden.")
         rows.append(result)
     return rows
 
 
-async def build_match_plan(bank_line_id: str) -> dict[str, Any]:
+async def run_allocated_dry_run(limit: int = 100) -> list[dict[str, Any]]:
+    rows = []
+    for bank in await allocated_bank_lines(limit):
+        order_no = extract_order_number(bank.get("Description"))
+        bank_amount = abs(money(bank.get("AmountDC")))
+        result = {
+            "bank_entry": bank.get("EntryNumber"), "bank_line_id": bank.get("ID"),
+            "description": bank.get("Description") or "", "bank_amount": str(bank_amount),
+            "order_number": order_no, "expected_ref": f"{ORDER_REF_PREFIX}{order_no}" if order_no else None,
+            "receivable_entry": None, "receivable_amount": None,
+            "status": "REVIEW_NO_ORDER", "reason": "Geen webshopordernummer herkend.",
+        }
+        if not order_no:
+            rows.append(result); continue
+        recs = await find_receivable(order_no)
+        if len(recs) == 0:
+            result.update(status="REVIEW_NOT_FOUND", reason="Geen openstaande post gevonden (mogelijk al afgeletterd).")
+        elif len(recs) > 1:
+            result.update(status="REVIEW_MULTIPLE", reason=f"{len(recs)} openstaande posten gevonden.")
+        else:
+            rec = recs[0]
+            rec_amount = abs(money(rec.get("Amount")))
+            result.update(receivable_entry=rec.get("EntryNumber"), receivable_amount=str(rec_amount))
+            if bank_amount == rec_amount:
+                result.update(status="READY_DIRECT", reason="Bank is al aan verzameldebiteur toegewezen; directe aflettering mogelijk.")
+            else:
+                result.update(status="REVIEW_AMOUNT", reason=f"Bedrag wijkt af: bank {bank_amount} vs openstaand {rec_amount}.")
+        rows.append(result)
+    return rows
+
+
+async def build_direct_match_plan(bank_line_id: str) -> dict[str, Any]:
     bank = await bank_line_by_id(bank_line_id)
-    if str(bank.get("GLAccountCode") or "") != SUSPENSE_GL_CODE:
-        raise HTTPException(409, "Bankregel staat niet meer op de tussenrekening; niets doen.")
+    if str(bank.get("AccountCode") or "").strip() != COLLECTIVE_DEBTOR_CODE:
+        raise HTTPException(409, "Bankregel is niet aan de verzameldebiteur toegewezen; directe match is geblokkeerd.")
     order_no = extract_order_number(bank.get("Description"))
     if not order_no:
         raise HTTPException(409, "Geen ordernummer herkenbaar in de bankomschrijving.")
-    receivables = await find_receivable(order_no)
-    if len(receivables) != 1:
-        raise HTTPException(409, f"Verwacht precies 1 openstaande post, gevonden: {len(receivables)}.")
-    rec = receivables[0]
-    bank_amount = money(bank.get("AmountDC"))
-    rec_amount = money(rec.get("Amount"))
-    if bank_amount <= 0 or rec_amount <= 0 or bank_amount != rec_amount:
-        raise HTTPException(409, f"Bedragen sluiten niet exact: bank {bank_amount}, openstaand {rec_amount}.")
+    recs = await find_receivable(order_no)
+    if len(recs) != 1:
+        raise HTTPException(409, f"Verwacht precies 1 openstaande post, gevonden: {len(recs)}.")
+    rec = recs[0]
+    amount = abs(money(bank.get("AmountDC")))
+    if amount != abs(money(rec.get("Amount"))):
+        raise HTTPException(409, "Bankbedrag en openstaand bedrag zijn niet exact gelijk.")
 
-    # The BankEntryLines endpoint already gives us the exact 1360 allocation line
-    # selected in the dry-run. TransactionLines does not always expose the bank
-    # allocation as a separate 1360 line, so do not try to rediscover it there.
-    if not bank.get("GLAccount") or str(bank.get("GLAccountCode") or "") != SUSPENSE_GL_CODE:
-        raise HTTPException(409, "De geselecteerde bankregel mist de 1360-grootboekreferentie.")
-    bank_header = await bank_entry_header(str(bank.get("EntryID")))
+    bank_txs = await transaction_lines(int(bank["EntryNumber"]))
+    bank_candidates = [t for t in bank_txs if str(t.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE and abs(money(t.get("AmountDC"))) == amount]
+    if len(bank_candidates) != 1:
+        raise HTTPException(409, f"Kon de unieke debiteurenregel van de bankboeking niet bepalen ({len(bank_candidates)} kandidaten).")
+    bank_tx = bank_candidates[0]
 
-    inv_txs = await transaction_lines(int(rec["EntryNumber"]))
-    debtor_candidates = [t for t in inv_txs if str(t.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE and abs(money(t.get("AmountDC"))) == rec_amount]
-    if len(debtor_candidates) != 1:
+    invoice_txs = await transaction_lines(int(rec["EntryNumber"]))
+    invoice_candidates = [t for t in invoice_txs if str(t.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE and abs(money(t.get("AmountDC"))) == amount]
+    if len(invoice_candidates) != 1:
         account_guid = str(rec.get("AccountId") or "")
-        debtor_candidates = [t for t in inv_txs if account_guid and str(t.get("Account") or "") == account_guid and abs(money(t.get("AmountDC"))) == rec_amount]
-    if len(debtor_candidates) != 1:
-        raise HTTPException(409, f"Kon de unieke debiteurenregel van de factuur niet bepalen ({len(debtor_candidates)} kandidaten).")
-    invoice_tx = debtor_candidates[0]
+        invoice_candidates = [t for t in invoice_txs if account_guid and str(t.get("Account") or "") == account_guid and abs(money(t.get("AmountDC"))) == amount]
+    if len(invoice_candidates) != 1:
+        raise HTTPException(409, f"Kon de unieke debiteurenregel van de verkooppost niet bepalen ({len(invoice_candidates)} kandidaten).")
+    invoice_tx = invoice_candidates[0]
 
-    if not invoice_tx.get("GLAccount") or not invoice_tx.get("Account"):
-        raise HTTPException(409, "Debiteurenregel mist GLAccount of Account GUID.")
-    # V1 only handles incoming webshop receipts. In Exact the imported bank line
-    # is positive, while the 1360 counter-entry is a credit. Clearing 1360
-    # therefore requires a positive (debit) allocation and a negative debtor line.
-    bank_reverse = bank_amount
-    debtor_payment = -money(invoice_tx.get("AmountDC"))
-    if bank_reverse + debtor_payment != Decimal("0.00"):
-        raise HTTPException(409, f"Voorgestelde memoriaalboeking is niet in balans ({bank_reverse} + {debtor_payment}).")
+    if str(bank_tx.get("GLAccountCode") or "") != str(invoice_tx.get("GLAccountCode") or ""):
+        raise HTTPException(409, "Bankregel en verkooppost staan niet op dezelfde debiteuren-grootboekrekening.")
+    if money(bank_tx.get("AmountDC")) + money(invoice_tx.get("AmountDC")) != Decimal("0.00"):
+        raise HTTPException(409, f"Debiteurenregels salderen niet naar nul: {bank_tx.get('AmountDC')} + {invoice_tx.get('AmountDC')}.")
 
     return {
-        "bank": bank,
-        "order_number": order_no,
-        "expected_ref": f"{ORDER_REF_PREFIX}{order_no}",
-        "receivable": rec,
-        "bank_header": bank_header,
-        "invoice_tx": invoice_tx,
-        "amount": bank_amount,
-        "journal_year": int(bank_header.get("FinancialYear")),
-        "journal_period": int(bank_header.get("FinancialPeriod")),
-        "date": exact_date(bank.get("Date")),
-        "currency": bank_header.get("Currency") or rec.get("CurrencyCode") or "EUR",
-        "suspense_gl_guid": bank.get("GLAccount"),
-        "suspense_gl_code": bank.get("GLAccountCode"),
-        "debtor_gl_guid": invoice_tx.get("GLAccount"),
-        "debtor_gl_code": invoice_tx.get("GLAccountCode"),
-        "debtor_account_guid": invoice_tx.get("Account"),
+        "bank": bank, "bank_tx": bank_tx, "invoice_tx": invoice_tx,
+        "receivable": rec, "order_number": order_no, "expected_ref": f"{ORDER_REF_PREFIX}{order_no}",
+        "amount": amount, "debtor_gl_code": invoice_tx.get("GLAccountCode"),
         "debtor_account_code": invoice_tx.get("AccountCode") or COLLECTIVE_DEBTOR_CODE,
-        "bank_reverse_amount": bank_reverse,
-        "debtor_payment_amount": debtor_payment,
     }
 
 
-def _odata_post_entity(payload: Any) -> dict[str, Any]:
-    entity = _extract_entity(payload)
-    if entity:
-        return entity
-    return payload if isinstance(payload, dict) else {}
-
-
-async def create_allocation_journal(plan: dict[str, Any], journal_code: str) -> dict[str, Any]:
-    description = f"JNP match {plan['expected_ref']} / bank {plan['bank'].get('EntryNumber')}"
-    body = {
-        "JournalCode": journal_code,
-        "FinancialYear": plan["journal_year"],
-        "FinancialPeriod": plan["journal_period"],
-        "Currency": plan["currency"],
-        "GeneralJournalEntryLines": [
-            {
-                "Date": plan["date"],
-                "Description": description,
-                "GLAccount": plan["suspense_gl_guid"],
-                "AmountFC": float(plan["bank_reverse_amount"]),
-            },
-            {
-                "Date": plan["date"],
-                "Description": description,
-                "GLAccount": plan["debtor_gl_guid"],
-                "Account": plan["debtor_account_guid"],
-                "AmountFC": float(plan["debtor_payment_amount"]),
-            },
-        ],
-    }
-    created = _odata_post_entity(await exact_post("generaljournalentry/GeneralJournalEntries", body))
-    if not created.get("EntryNumber"):
-        raise HTTPException(502, f"Exact maakte de memoriaalboeking aan maar gaf geen EntryNumber terug: {created}")
-    return created
-
-
-def build_matchsets_xml(plan: dict[str, Any], allocation: dict[str, Any], allocation_tx: dict[str, Any]) -> bytes:
-    root = ET.Element("eExact", {
-        "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
-        "xsi:noNamespaceSchemaLocation": "eExact-XML.xsd",
-    })
-    matchsets = ET.SubElement(root, "MatchSets")
-    matchset = ET.SubElement(matchsets, "MatchSet")
-    ET.SubElement(matchset, "GLAccount", {"code": str(plan["debtor_gl_code"])})
-    ET.SubElement(matchset, "Account", {"code": str(plan["debtor_account_code"])})
-    lines = ET.SubElement(matchset, "MatchLines")
-    invoice_tx = plan["invoice_tx"]
-    ET.SubElement(lines, "MatchLine", {
-        "finyear": str(invoice_tx["FinancialYear"]),
-        "finperiod": str(invoice_tx["FinancialPeriod"]),
-        "journal": str(invoice_tx["JournalCode"]),
-        "entry": str(invoice_tx["EntryNumber"]),
-        "amountdc": f"{money(invoice_tx['AmountDC']):.2f}",
-    })
-    ET.SubElement(lines, "MatchLine", {
-        "finyear": str(allocation_tx["FinancialYear"]),
-        "finperiod": str(allocation_tx["FinancialPeriod"]),
-        "journal": str(allocation_tx["JournalCode"]),
-        "entry": str(allocation_tx["EntryNumber"]),
-        "amountdc": f"{money(allocation_tx['AmountDC']):.2f}",
-    })
+def build_direct_match_xml(plan: dict[str, Any]) -> bytes:
+    root = ET.Element("eExact", {"xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance", "xsi:noNamespaceSchemaLocation": "eExact-XML.xsd"})
+    ms = ET.SubElement(ET.SubElement(root, "MatchSets"), "MatchSet")
+    ET.SubElement(ms, "GLAccount", {"code": str(plan["debtor_gl_code"])})
+    ET.SubElement(ms, "Account", {"code": str(plan["debtor_account_code"])})
+    lines = ET.SubElement(ms, "MatchLines")
+    for tx in [plan["invoice_tx"], plan["bank_tx"]]:
+        ET.SubElement(lines, "MatchLine", {
+            "finyear": str(tx["FinancialYear"]), "finperiod": str(tx["FinancialPeriod"]),
+            "journal": str(tx["JournalCode"]), "entry": str(tx["EntryNumber"]),
+            "amountdc": f"{money(tx['AmountDC']):.2f}",
+        })
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
@@ -433,167 +392,105 @@ async def upload_matchset(xml_payload: bytes) -> str:
             MATCHSETS_URL,
             params={"Topic": "MatchSets", "_Division_": str(DIVISION)},
             content=xml_payload,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/xml; charset=utf-8",
-                "Accept": "application/xml,text/xml,*/*",
-            },
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/xml; charset=utf-8", "Accept": "application/xml,text/xml,*/*"},
         )
     if resp.status_code == 401:
-        tokens = _load_tokens() or {}
-        await _refresh_tokens(tokens)
+        await _refresh_tokens(_load_tokens() or {})
         return await upload_matchset(xml_payload)
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, f"MatchSets upload failed: {resp.text[:1200]}")
     text = resp.text.strip()
-    # Empty <Messages/> is the normal success response. Any actual Message is treated as an error.
     try:
         parsed = ET.fromstring(text) if text else None
         messages = parsed.findall(".//Message") if parsed is not None else []
         if messages:
-            details = " | ".join(" ".join((m.itertext())).strip() for m in messages)
-            raise HTTPException(409, f"Exact MatchSets melding: {details}")
+            details = " | ".join(" ".join(m.itertext()).strip() for m in messages)
+            if "lines matched" not in details.lower():
+                raise HTTPException(409, f"Exact MatchSets melding: {details}")
     except ET.ParseError:
         if "error" in text.lower():
             raise HTTPException(409, f"Exact MatchSets antwoord: {text[:1200]}")
     return text
 
 
-async def execute_match(bank_line_id: str, journal_code: str) -> dict[str, Any]:
-    if not ENABLE_MATCH_WRITES:
-        raise HTTPException(403, "Schrijven staat nog op slot. Zet ENABLE_MATCH_WRITES=true pas na controle van de preview.")
-    journals = {str(j.get("Code")): j for j in await general_journals()}
-    if journal_code not in journals:
-        raise HTTPException(409, "Gekozen memoriaaldagboek is niet beschikbaar of geblokkeerd.")
-
-    # Full revalidation immediately before any write.
-    plan = await build_match_plan(bank_line_id)
-    allocation = await create_allocation_journal(plan, journal_code)
-    allocation_entry = int(allocation["EntryNumber"])
-    allocation_txs = await transaction_lines(allocation_entry)
-    debtor_lines = [t for t in allocation_txs if str(t.get("GLAccountCode") or "") == str(plan["debtor_gl_code"]) and str(t.get("Account") or "") == str(plan["debtor_account_guid"]) and money(t.get("AmountDC")) == plan["debtor_payment_amount"]]
-    if len(debtor_lines) != 1:
-        raise HTTPException(502, f"Memoriaalboeking {allocation_entry} is aangemaakt, maar de debiteurenregel kon niet uniek worden teruggelezen. STOP en controleer Exact handmatig.")
-    allocation_tx = debtor_lines[0]
-    xml_payload = build_matchsets_xml(plan, allocation, allocation_tx)
-    response_text = await upload_matchset(xml_payload)
+async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
+    if not ENABLE_DIRECT_MATCH_WRITES:
+        raise HTTPException(403, "Direct afletteren staat op slot.")
+    plan = await build_direct_match_plan(bank_line_id)  # full revalidation immediately before write
+    response = await upload_matchset(build_direct_match_xml(plan))
+    # Idempotency check: after a successful match, the receivable should no longer be open.
+    still_open = await find_receivable(plan["order_number"])
     return {
-        "ok": True,
-        "order": plan["order_number"],
-        "bank_entry": plan["bank"].get("EntryNumber"),
-        "invoice_entry": plan["invoice_tx"].get("EntryNumber"),
-        "allocation_entry": allocation_entry,
-        "journal": journal_code,
-        "amount": str(plan["amount"]),
-        "matchsets_response": response_text[:500],
+        "ok": len(still_open) == 0,
+        "order": plan["order_number"], "bank_entry": plan["bank_tx"].get("EntryNumber"),
+        "invoice_entry": plan["invoice_tx"].get("EntryNumber"), "amount": str(plan["amount"]),
+        "still_open_count": len(still_open), "matchsets_response": response[:500],
     }
 
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "mode": "write-capable" if ENABLE_MATCH_WRITES else "write-locked"}
+    return {"ok": True, "division": DIVISION, "version": "0.4.0", "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
 
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    connected = _load_tokens() is not None
     return templates.TemplateResponse("index.html", {
-        "request": request,
-        "connected": connected,
-        "division": DIVISION,
-        "suspense": SUSPENSE_GL_CODE,
-        "debtor": COLLECTIVE_DEBTOR_CODE,
-        "writes_enabled": ENABLE_MATCH_WRITES,
+        "request": request, "connected": _load_tokens() is not None, "division": DIVISION,
+        "suspense": SUSPENSE_GL_CODE, "debtor": COLLECTIVE_DEBTOR_CODE, "allocation_words": ALLOCATION_WORDS,
+        "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES,
     })
 
 
 @app.get("/login")
 async def login(request: Request):
     _require_config()
-    state = os.urandom(24).hex()
-    request.session["oauth_state"] = state
-    query = urlencode({
-        "client_id": CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-        "response_type": "code",
-        "state": state,
-    })
+    state = os.urandom(24).hex(); request.session["oauth_state"] = state
+    query = urlencode({"client_id": CLIENT_ID, "redirect_uri": REDIRECT_URI, "response_type": "code", "state": state})
     return RedirectResponse(f"{AUTH_URL}?{query}")
 
 
 @app.get("/oauth/callback")
 async def oauth_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
     _require_config()
-    if error:
-        raise HTTPException(400, f"Exact authorization failed: {error}")
+    if error: raise HTTPException(400, f"Exact authorization failed: {error}")
     expected_state = request.session.pop("oauth_state", None)
-    if not code or not state or state != expected_state:
-        raise HTTPException(400, "Invalid OAuth callback/state.")
+    if not code or not state or state != expected_state: raise HTTPException(400, "Invalid OAuth callback/state.")
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(TOKEN_URL, data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": REDIRECT_URI,
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-        })
-    if resp.status_code >= 400:
-        raise HTTPException(resp.status_code, f"Exact token exchange failed: {resp.text[:500]}")
-    _save_tokens(resp.json())
-    return RedirectResponse("/")
-
-
-@app.get("/api/status")
-async def api_status():
-    token = await _access_token()
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{API_V1}/current/Me",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        )
-    if resp.status_code >= 400:
-        raise HTTPException(resp.status_code, resp.text[:800])
-    return {"configured_division": DIVISION, "writes_enabled": ENABLE_MATCH_WRITES, "exact_current_me": resp.json()}
-
-
-@app.get("/api/dry-run")
-async def dry_run(limit: int = 100):
-    return {
-        "mode": "read-only",
-        "division": DIVISION,
-        "rules": {
-            "suspense_gl": SUSPENSE_GL_CODE,
-            "collective_debtor": COLLECTIVE_DEBTOR_CODE,
-            "reference": f"{ORDER_REF_PREFIX}{{order_number}}",
-        },
-        "results": await run_dry_match(limit),
-    }
+        resp = await client.post(TOKEN_URL, data={"grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT_URI, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET})
+    if resp.status_code >= 400: raise HTTPException(resp.status_code, f"Exact token exchange failed: {resp.text[:500]}")
+    _save_tokens(resp.json()); return RedirectResponse("/")
 
 
 @app.get("/dry-run", response_class=HTMLResponse)
 async def dry_run_page(request: Request, limit: int = 100):
-    results = await run_dry_match(limit)
-    return templates.TemplateResponse("dry_run.html", {
-        "request": request,
-        "results": results,
-        "limit": limit,
-        "writes_enabled": ENABLE_MATCH_WRITES,
-    })
+    return templates.TemplateResponse("dry_run.html", {"request": request, "results": await run_legacy_dry_run(limit), "limit": limit})
 
 
-@app.get("/match/{bank_line_id}", response_class=HTMLResponse)
-async def match_preview(request: Request, bank_line_id: str):
-    plan = await build_match_plan(bank_line_id)
-    journals = await general_journals()
-    return templates.TemplateResponse("match_preview.html", {
-        "request": request,
-        "plan": plan,
-        "journals": journals,
-        "writes_enabled": ENABLE_MATCH_WRITES,
-    })
+@app.get("/allocated", response_class=HTMLResponse)
+async def allocated_page(request: Request, limit: int = 100):
+    return templates.TemplateResponse("allocated.html", {"request": request, "results": await run_allocated_dry_run(limit), "limit": limit, "writes_enabled": ENABLE_DIRECT_MATCH_WRITES})
 
 
-@app.post("/match/{bank_line_id}/execute", response_class=HTMLResponse)
-async def match_execute_page(request: Request, bank_line_id: str, journal_code: str):
-    result = await execute_match(bank_line_id, journal_code)
-    return templates.TemplateResponse("match_done.html", {"request": request, "result": result})
+@app.get("/allocation-rule", response_class=HTMLResponse)
+async def allocation_rule_page(request: Request):
+    preview = await allocation_rule_preview()
+    return templates.TemplateResponse("allocation_rule.html", {"request": request, "preview": preview, "writes_enabled": ENABLE_ALLOCATION_RULE_WRITES})
+
+
+@app.post("/allocation-rule/create", response_class=HTMLResponse)
+async def allocation_rule_create_page(request: Request):
+    result = await create_allocation_rule()
+    return templates.TemplateResponse("allocation_rule_done.html", {"request": request, "result": result})
+
+
+@app.get("/direct-match/{bank_line_id}", response_class=HTMLResponse)
+async def direct_match_preview_page(request: Request, bank_line_id: str):
+    plan = await build_direct_match_plan(bank_line_id)
+    return templates.TemplateResponse("direct_match_preview.html", {"request": request, "plan": plan, "writes_enabled": ENABLE_DIRECT_MATCH_WRITES})
+
+
+@app.post("/direct-match/{bank_line_id}/execute", response_class=HTMLResponse)
+async def direct_match_execute_page(request: Request, bank_line_id: str):
+    result = await execute_direct_match(bank_line_id)
+    return templates.TemplateResponse("direct_match_done.html", {"request": request, "result": result})

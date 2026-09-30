@@ -189,7 +189,7 @@ async def find_receivable(order_number: str) -> list[dict[str, Any]]:
     expected_ref = f"{ORDER_REF_PREFIX}{order_number}"
     params = {
         "$filter": f"YourRef eq '{expected_ref}'",
-        "$select": "Account,AccountCode,AccountName,Amount,AmountInTransit,CurrencyCode,Description,EntryNumber,InvoiceDate,InvoiceNumber,JournalCode,YourRef",
+        "$select": "AccountId,AccountCode,AccountName,Amount,AmountInTransit,CurrencyCode,Description,EntryNumber,InvoiceDate,InvoiceNumber,JournalCode,YourRef",
     }
     data = await exact_get("read/financial/ReceivablesList", params)
     rows = _extract_results(data)
@@ -309,7 +309,7 @@ async def build_match_plan(bank_line_id: str) -> dict[str, Any]:
     inv_txs = await transaction_lines(int(rec["EntryNumber"]))
     debtor_candidates = [t for t in inv_txs if str(t.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE and abs(money(t.get("AmountDC"))) == rec_amount]
     if len(debtor_candidates) != 1:
-        account_guid = str(rec.get("Account") or "")
+        account_guid = str(rec.get("AccountId") or "")
         debtor_candidates = [t for t in inv_txs if account_guid and str(t.get("Account") or "") == account_guid and abs(money(t.get("AmountDC"))) == rec_amount]
     if len(debtor_candidates) != 1:
         raise HTTPException(409, f"Kon de unieke debiteurenregel van de factuur niet bepalen ({len(debtor_candidates)} kandidaten).")

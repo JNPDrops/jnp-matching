@@ -1,0 +1,5 @@
+<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Match uitgevoerd</title>
+<style>body{font-family:system-ui,Arial,sans-serif;max-width:800px;margin:40px auto;padding:0 20px}.ok{padding:14px;border:1px solid #087a34;background:#eefaf2}code{background:#f4f4f4;padding:2px 4px;border-radius:4px}</style></head><body>
+<div class="ok"><h1>Verwerking uitgevoerd</h1><p>Order <strong>{{ result.order }}</strong> · € {{ result.amount }}</p></div>
+<ul><li>Bank entry: <code>{{ result.bank_entry }}</code></li><li>Factuur entry: <code>{{ result.invoice_entry }}</code></li><li>Nieuwe memoriaal entry: <code>{{ result.allocation_entry }}</code></li><li>Dagboek: <code>{{ result.journal }}</code></li></ul>
+<p><a href="/dry-run?limit=100">Terug naar dry-run</a></p></body></html>

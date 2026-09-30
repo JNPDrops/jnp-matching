@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JNP Matching</title>
+<style>body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:40px auto;padding:0 20px}a.button{display:inline-block;padding:10px 14px;border:1px solid #111;border-radius:8px;text-decoration:none;color:#111}code{background:#f4f4f4;padding:2px 5px;border-radius:4px}.ok{color:#087a34}.warn{color:#a04b00}.danger{color:#a40000;font-weight:700}</style></head>
+<body><h1>JNP Matching</h1><p>Matcher voor webshopbetalingen in Exact Online.</p>
+<p>Division: <code>{{ division }}</code> · Tussenrekening: <code>{{ suspense }}</code> · Verzameldebiteur: <code>{{ debtor }}</code></p>
+{% if connected %}<p class="ok">Exact Online token gevonden.</p><p><a class="button" href="/dry-run?limit=100">Start dry-run</a> &nbsp; <a href="/api/status">API status</a></p>
+{% else %}<p class="warn">Exact Online is nog niet gekoppeld.</p><p><a class="button" href="/login">Koppel Exact Online</a></p>{% endif %}
+{% if writes_enabled %}<p class="danger">Schrijven naar Exact staat AAN. Alleen READY-regels kunnen via een expliciete bevestiging worden verwerkt.</p>{% else %}<p class="warn"><strong>Veiligheidslock:</strong> schrijven staat UIT. Je kunt wel de volledige boekings-preview bekijken. Zet pas na controle <code>ENABLE_MATCH_WRITES=true</code> in Render.</p>{% endif %}
+</body></html>

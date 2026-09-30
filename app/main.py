@@ -297,6 +297,7 @@ async def diagnose_receivable(order_number: str) -> dict[str, Any]:
     # the known YourRef, including every field that can identify the debtor account.
     raw_params = {
         "$filter": f"YourRef eq '{expected_ref}'",
+        "$select": "AccountId,AccountCode,AccountName,Amount,AmountInTransit,CurrencyCode,Description,EntryNumber,InvoiceDate,InvoiceNumber,JournalCode,YourRef",
         "$top": "10",
     }
     raw_payload = await exact_get("read/financial/ReceivablesList", raw_params)
@@ -308,6 +309,7 @@ async def diagnose_receivable(order_number: str) -> dict[str, Any]:
         if entry_number is not None:
             tx_params = {
                 "$filter": f"EntryNumber eq {int(entry_number)}",
+                "$select": "ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,Currency,FinancialPeriod,FinancialYear,GLAccount,GLAccountCode,GLAccountDescription,JournalCode,YourRef",
                 "$top": "50",
             }
             tx_payload = await exact_get("financialtransaction/TransactionLines", tx_params)
@@ -536,7 +538,7 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "version": "0.6.0", "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
+    return {"ok": True, "division": DIVISION, "version": "0.7.0", "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
 
 
 @app.get("/", response_class=HTMLResponse)

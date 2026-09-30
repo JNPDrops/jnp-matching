@@ -37,7 +37,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="0.5.0")
+app = FastAPI(title="JNP Matching", version="0.6.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -286,6 +286,60 @@ async def transaction_lines(entry_number: int) -> list[dict[str, Any]]:
     return _extract_results(await exact_get("financialtransaction/TransactionLines", params))
 
 
+async def diagnose_receivable(order_number: str) -> dict[str, Any]:
+    """Read-only diagnostic: expose the raw Exact fields for one open receivable
+    and its transaction lines, so we can identify the exact account GUID/field names
+    used by this administration without guessing.
+    """
+    expected_ref = f"{ORDER_REF_PREFIX}{order_number}"
+
+    # Do not filter by AccountCode here. We want the raw record Exact returns for
+    # the known YourRef, including every field that can identify the debtor account.
+    raw_params = {
+        "$filter": f"YourRef eq '{expected_ref}'",
+        "$top": "10",
+    }
+    raw_payload = await exact_get("read/financial/ReceivablesList", raw_params)
+    rows = _extract_results(raw_payload)
+
+    tx_rows: list[dict[str, Any]] = []
+    if rows:
+        entry_number = rows[0].get("EntryNumber")
+        if entry_number is not None:
+            tx_params = {
+                "$filter": f"EntryNumber eq {int(entry_number)}",
+                "$top": "50",
+            }
+            tx_payload = await exact_get("financialtransaction/TransactionLines", tx_params)
+            tx_rows = _extract_results(tx_payload)
+
+    interesting_keys = [
+        "Account", "AccountId", "AccountCode", "AccountName",
+        "EntryID", "EntryNumber", "InvoiceNumber", "JournalCode",
+        "GLAccount", "GLAccountCode", "GLAccountDescription",
+        "YourRef", "Description", "Amount", "AmountDC", "CurrencyCode",
+    ]
+
+    def pick(d: dict[str, Any]) -> dict[str, Any]:
+        return {k: d.get(k) for k in interesting_keys if k in d}
+
+    return {
+        "division": DIVISION,
+        "order_number": order_number,
+        "expected_ref": expected_ref,
+        "receivables_count": len(rows),
+        "receivables_interesting": [pick(r) for r in rows],
+        "receivables_raw": rows,
+        "transaction_lines_count": len(tx_rows),
+        "transaction_lines_interesting": [pick(r) for r in tx_rows],
+        "transaction_lines_raw": tx_rows,
+        "writes_enabled": {
+            "allocation_rule": ENABLE_ALLOCATION_RULE_WRITES,
+            "direct_match": ENABLE_DIRECT_MATCH_WRITES,
+        },
+    }
+
+
 async def allocation_rules() -> list[dict[str, Any]]:
     # Exact exposes AllocationRule as a beta endpoint and entity name is singular.
     try:
@@ -482,7 +536,7 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "version": "0.5.0", "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
+    return {"ok": True, "division": DIVISION, "version": "0.6.0", "allocation_rule_writes": ENABLE_ALLOCATION_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -512,6 +566,14 @@ async def oauth_callback(request: Request, code: str | None = None, state: str |
         resp = await client.post(TOKEN_URL, data={"grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT_URI, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET})
     if resp.status_code >= 400: raise HTTPException(resp.status_code, f"Exact token exchange failed: {resp.text[:500]}")
     _save_tokens(resp.json()); return RedirectResponse("/")
+
+
+@app.get("/diagnose/{order_number}")
+async def diagnose_order(order_number: str):
+    # Strictly read-only endpoint. It makes only GET requests to Exact.
+    if not re.fullmatch(r"\d{4,10}", order_number):
+        raise HTTPException(400, "Ordernummer moet uit 4-10 cijfers bestaan.")
+    return await diagnose_receivable(order_number)
 
 
 @app.get("/dry-run", response_class=HTMLResponse)

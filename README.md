@@ -1,22 +1,12 @@
-# JNP Matching v0.5
+# JNP Matching v0.6
 
-Deze versie verwijdert de memoriaal-workaround uit het write-pad.
+Read-only diagnostic release.
 
-## Nieuwe flow
-1. Exact AllocationRule wijst toekomstige bankregels met `TD` in de omschrijving toe aan verzameldebiteur `100100`.
-2. JNP Matching leest alleen bankregels die al aan `100100` zijn toegewezen.
-3. De matcher zoekt de openstaande post via `TD{ordernummer}` en controleert exact bedrag + unieke match.
-4. Alleen daarna kan Exact XML MatchSets de twee bestaande debiteurenregels direct afletteren.
+New endpoint: `/diagnose/48451`
 
-## Veiligheidslocks
+It only performs GET requests to Exact Online and shows the raw `ReceivablesList` record for `TD48451` plus the related `TransactionLines`. This lets us identify the exact debtor account GUID/field names used in this Exact administration without guessing.
+
+Keep both write flags disabled:
+
 - `ENABLE_ALLOCATION_RULE_WRITES=false`
 - `ENABLE_DIRECT_MATCH_WRITES=false`
-
-Zet ze niet tegelijk aan tijdens de eerste tests.
-
-## Belangrijk
-De AllocationRule werkt alleen als toekomstige bankomschrijvingen het herkenningswoord bevatten, standaard `TD` (bijv. `TD48451`). Bestaande 1360-regels worden alleen geanalyseerd en moeten voorlopig handmatig in Exact worden verwerkt.
-
-
-## v0.5 fix
-De verzameldebiteur-GUID wordt eerst opgelost via ReceivablesList en daarna via TransactionLines. De CRM Accounts lookup is alleen nog fallback. Dit voorkomt de fout waarbij accountcode 100100 via crm/Accounts niet werd gevonden.

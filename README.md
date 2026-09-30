@@ -1,20 +1,11 @@
-# JNP Matching v0.2
+# JNP Matching v0.4
 
-Exact Online matcher voor webshopbetalingen.
+Fix voor de previewfout `Kon de unieke 1360-transactieregel niet bepalen (0 kandidaten)`.
 
-## Veilige opbouw
+De dry-run werkt op `BankEntryLines`; daarom gebruikt de preview nu exact dezelfde bankregel als bron in plaats van te proberen de 1360-regel opnieuw terug te vinden via `TransactionLines`.
 
-- Dry-run: bankregels op 1360 -> ordernummer -> `TD{order}` -> openstaande post.
-- Preview: leest de daadwerkelijke transactieregels en toont de boeking die nodig is.
-- Write lock: standaard `ENABLE_MATCH_WRITES=false`.
-- Write route (na expliciet inschakelen):
-  1. maakt een algemene journaalboeking: debet 1360 / credit debiteurenrekening + verzameldebiteur;
-  2. lettert de nieuwe debiteurenregel af tegen de openstaande verkooppost via Exact XML `MatchSets`.
+Voor inkomende webshopbetalingen geldt in de preview:
+- 1360: debet voor het ontvangen bedrag
+- debiteur: credit voor hetzelfde bedrag
 
-## Waarom een extra memoriaalboeking?
-
-De Exact REST resource voor bestaande `BankEntryLines` ondersteunt geen normale PUT om een bestaande bankregel van 1360 naar een debiteur te verplaatsen. Daarom wordt de bankboeking zelf niet aangepast. De tussenrekening wordt via een transparante memoriaalboeking leeggemaakt en vervolgens wordt de debiteurenregel afgeletterd.
-
-## Belangrijk
-
-Laat `ENABLE_MATCH_WRITES=false` totdat de preview van minimaal één READY-regel boekhoudkundig is gecontroleerd. Gebruik daarna eerst één kleine betaling als productieproef.
+`ENABLE_MATCH_WRITES` blijft standaard `false`. Zet dit nog niet aan voordat de preview van order 48451 is gecontroleerd.

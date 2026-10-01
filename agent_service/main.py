@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from openai import OpenAI
 
-app = FastAPI(title="JNP Development Agent", version="1.0.0")
+app = FastAPI(title="JNP Development Agent", version="1.1.0")
 
 TARGET_URL = os.getenv("TARGET_URL", "https://jnp-matching.onrender.com").rstrip("/")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "JNPDrops/jnp-matching")
@@ -25,6 +25,9 @@ GOLDEN_ORDER = os.getenv("GOLDEN_ORDER", "48451")
 GOLDEN_BANK_LINE_ID = os.getenv("GOLDEN_BANK_LINE_ID", "591003b9-cfb0-4158-b23c-fdc106801a5e")
 GOLDEN_RECEIVABLE_ENTRY = int(os.getenv("GOLDEN_RECEIVABLE_ENTRY", "26722659"))
 GOLDEN_AMOUNT = os.getenv("GOLDEN_AMOUNT", "78.60")
+
+
+DEFAULT_RESEARCH_GOAL = """Investigate the safest supported way in Exact Online to take one already imported existing BankEntryLine that is still on suspense G/L 1360 with no debtor account, assign that specific bank line to debtor account 100100, and then match it directly against the already identified open receivable, without creating a general-journal/memorial entry. The golden case is bank line GUID 591003b9-cfb0-4158-b23c-fdc106801a5e, bank entry 26205149, line 75, description VERCAIGNE BO 48451, EUR 78.60, expected receivable TD48451 / entry 26722659 / account 100100. Research only: do not execute writes and do not propose relying on undocumented destructive calls without clearly labeling them unsupported."""
 
 FORBIDDEN_CHANGED_LINE_PATTERNS = [
     r"ENABLE_.*WRITES",
@@ -154,6 +157,64 @@ def safety_check_patch(old: str, new: str) -> tuple[bool, list[str], str]:
     return not issues, issues, diff
 
 
+
+def research_exact_allocation(source: str, tests: dict[str, Any], goal: str) -> dict[str, Any]:
+    if not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(503, "OPENAI_API_KEY is not configured on the development-agent service.")
+    client = OpenAI()
+    prompt = f"""
+You are the research engineer for JNP Matching, a Dutch Exact Online bank reconciliation application.
+
+GOAL
+{goal}
+
+STRICT SAFETY RULES
+- Research and read-only diagnostics only. Never execute a write against Exact Online.
+- Do not change GitHub code in this endpoint.
+- Distinguish clearly between: officially documented API capability, third-party observations, UI-only behavior, and speculation.
+- Prefer current Exact Online documentation/support material and current API behavior.
+- Existing financial write flags must remain false.
+- A solution that closes the invoice but leaves the original bank line open is NOT acceptable.
+- A solution that creates a general journal / memorial workaround is NOT acceptable for the target design.
+- Focus on addressing one specific existing BankEntryLine by GUID/EntryID/LineNumber.
+
+CURRENT LIVE REGRESSION STATE
+{json.dumps(tests, ensure_ascii=False, indent=2)}
+
+CURRENT app/main.py
+```python
+{source}
+```
+
+Use web search to research Exact Online documentation, official support pages, current API references, and reputable technical evidence.
+Return a concise engineering report with these exact headings:
+1. Conclusion
+2. Supported public API options
+3. Unsupported / UI-only options
+4. Evidence and source URLs
+5. Safest next read-only experiment
+6. Proposed code change for diagnostics only
+7. Stop condition before any financial write
+
+Be explicit if the public API cannot perform the required allocation of an already imported bank line.
+"""
+    try:
+        resp = client.responses.create(
+            model=OPENAI_MODEL,
+            tools=[{"type": "web_search"}],
+            input=prompt,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Research model call failed: {e}")
+    return {
+        "goal": goal,
+        "report": resp.output_text,
+        "writes_executed": False,
+        "code_committed": False,
+        "apply_changes": AGENT_APPLY_CHANGES,
+    }
+
+
 def propose_fix(source: str, test_result: dict[str, Any]) -> dict[str, Any]:
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(503, "OPENAI_API_KEY is not configured on the development-agent service.")
@@ -215,7 +276,8 @@ async def home():
     <p><strong>Target:</strong> {TARGET_URL}<br><strong>Repo:</strong> {GITHUB_REPO} / {GITHUB_BRANCH}<br>
     <strong>Apply changes:</strong> {AGENT_APPLY_CHANGES}</p>
     <p><a href='/test'>Run regression tests</a></p>
-    <p>POST <code>/cycle</code> runs one development cycle. With <code>AGENT_APPLY_CHANGES=false</code> it only proposes and safety-checks a patch.</p>
+    <p>POST <code>/cycle</code> runs one regression-repair cycle. With <code>AGENT_APPLY_CHANGES=false</code> it only proposes and safety-checks a patch.</p>
+    <p>POST <code>/research</code> performs a web-backed, read-only engineering research cycle for the Exact bank-allocation problem. It never commits code or writes to Exact.</p>
     </body></html>
     """)
 
@@ -224,6 +286,26 @@ async def home():
 async def test_endpoint():
     try:
         return await run_regression_tests()
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+
+@app.post("/research")
+async def research(goal: str | None = None):
+    try:
+        tests = await run_regression_tests()
+        source, _sha = await github_get_main()
+        effective_goal = (goal or DEFAULT_RESEARCH_GOAL).strip()
+        result = research_exact_allocation(source, tests, effective_goal)
+        return {
+            "ok": True,
+            "tests_green": tests.get("ok", False),
+            "safety": tests.get("safety"),
+            **result,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, str(e))
 

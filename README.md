@@ -1,16 +1,9 @@
-# JNP Matching v1.0
+# JNP Matching v1.3 — research-capable development agent
 
-Read-only bank-first reconciliation for Exact Online division 3977752.
+Adds a dedicated read-only development research cycle to the existing JNP development agent.
 
-The primary route is `/candidates`:
-1. Read bank lines still on suspense GL 1360.
-2. Extract a possible WooCommerce order number from the bank description.
-3. Look up exactly `TD<order>` in `ReceivablesList`.
-4. Require account code 100100 and exact positive amount match.
-5. Label the row `MATCH_CANDIDATE` or a review status.
+New endpoint on `jnp-dev-agent`:
 
-No allocation rules are created and no bank or financial entries are modified by this route.
-Keep `ENABLE_ORDER_RULE_WRITES=false` and `ENABLE_DIRECT_MATCH_WRITES=false` while validating the candidate list.
+- `POST /research` — researches, with web search, how Exact Online can safely allocate one already imported BankEntryLine to debtor 100100 and then match it without a memorial/general-journal workaround. It executes no financial writes and commits no code.
 
-## v1.2 development-agent support
-v1.2 adds machine-readable read-only endpoints (`/api/candidates`, `/api/candidate/{guid}`, `/api/safety`) and a separate `agent_service` that can regression-test the live matcher and, when explicitly enabled, propose/commit repairs limited to read-only matching code. Financial write code is protected by a diff safety gate.
+Existing matching application behavior is unchanged.

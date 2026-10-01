@@ -1,30 +1,18 @@
-# JNP Development Agent
+# JNP Development Agent v1.1
 
-Separate read-only development agent for JNP Matching.
+Separate development-agent service for JNP Matching.
 
-## Safety model
-- Never writes to Exact Online.
-- Cannot change financial write paths in `app/main.py`; a diff gate rejects changes touching MatchSets, POST/execute routes, write flags, or Exact POST helpers.
-- Works on one manually triggered cycle at a time.
-- By default `AGENT_APPLY_CHANGES=false`, so it only proposes a patch.
-- Golden regression case is WooCommerce order 48451 / bank-line GUID `591003b9-cfb0-4158-b23c-fdc106801a5e` / Exact sales entry `26722659` / EUR 78.60.
+## Safe endpoints
 
-## Environment variables
-Required to propose code changes:
-- `OPENAI_API_KEY` (set directly in Render, never paste in chat)
-- `GITHUB_TOKEN` fine-grained token with Contents read/write for only `JNPDrops/jnp-matching`
+- `GET /test` — deterministic read-only regression suite.
+- `POST /cycle` — regression-repair cycle; with `AGENT_APPLY_CHANGES=false` no code is committed.
+- `POST /research` — web-backed read-only research cycle focused on the Exact Online allocation problem. It reads the live regression state and current `app/main.py`, researches current sources with OpenAI web search, and returns an engineering report. It never writes to Exact and never commits code.
 
-Recommended:
-- `TARGET_URL=https://jnp-matching.onrender.com`
-- `GITHUB_REPO=JNPDrops/jnp-matching`
-- `GITHUB_BRANCH=main`
-- `OPENAI_MODEL=gpt-5.6-sol`
-- `AGENT_APPLY_CHANGES=false`
-- `MAX_AGENT_ITERATIONS=1`
+## Required secrets
 
-## Render service
-Run this as a **separate** Render web service with auto-deploy disabled:
-- Build: `pip install -r requirements.txt`
-- Start: `uvicorn agent_service.main:app --host 0.0.0.0 --port $PORT`
+- `OPENAI_API_KEY`
+- `GITHUB_TOKEN`
 
-Keeping auto-deploy off prevents the agent from restarting itself when it commits a repair to the matching app.
+## Safety
+
+Keep `AGENT_APPLY_CHANGES=false` while using `/research`. Financial write paths remain outside autonomous modification.

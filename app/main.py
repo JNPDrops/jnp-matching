@@ -36,7 +36,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="1.1.0")
+app = FastAPI(title="JNP Matching", version="1.2.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -766,6 +766,34 @@ async def diagnose_order(order_number: str):
     if not re.fullmatch(r"\d{4,10}", order_number):
         raise HTTPException(400, "Ordernummer moet uit 4-10 cijfers bestaan.")
     return await diagnose_receivable(order_number)
+
+
+
+
+@app.get("/api/candidates")
+async def api_candidates(limit: int = 200):
+    """Machine-readable read-only candidate feed for the development agent."""
+    return await bank_first_candidates(limit)
+
+
+@app.get("/api/candidate/{bank_line_id}")
+async def api_candidate_detail(bank_line_id: str):
+    """Machine-readable read-only detail for one exact BankEntryLine."""
+    return await candidate_detail(bank_line_id)
+
+
+@app.get("/api/safety")
+async def api_safety():
+    """Expose only non-secret safety state for automated regression checks."""
+    return {
+        "version": "1.2.0",
+        "division": DIVISION,
+        "suspense_gl_code": SUSPENSE_GL_CODE,
+        "collective_debtor_code": COLLECTIVE_DEBTOR_CODE,
+        "order_ref_prefix": ORDER_REF_PREFIX,
+        "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
+        "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES,
+    }
 
 
 @app.get("/candidates", response_class=HTMLResponse)

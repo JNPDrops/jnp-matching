@@ -36,7 +36,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="1.0.0")
+app = FastAPI(title="JNP Matching", version="1.1.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -448,7 +448,11 @@ async def bank_first_candidates(limit: int = 200) -> dict[str, Any]:
         bank_amount = money(bank.get("AmountDC"))
         item: dict[str, Any] = {
             "bank_line_id": bank.get("ID"),
+            "bank_entry_id": bank.get("EntryID"),
             "bank_entry": bank.get("EntryNumber"),
+            "bank_line_number": bank.get("LineNumber"),
+            "bank_date": bank.get("Date"),
+            "bank_modified": bank.get("Modified"),
             "description": description,
             "bank_amount": str(bank_amount),
             "order_number": order_no,
@@ -499,6 +503,65 @@ async def bank_first_candidates(limit: int = 200) -> dict[str, Any]:
         "reviews": sum(1 for i in items if i["status"].startswith("REVIEW_")),
         "skipped": sum(1 for i in items if i["status"].startswith("SKIP_")),
         "limit": limit,
+    }
+
+
+async def candidate_detail(bank_line_id: str) -> dict[str, Any]:
+    """Read-only detail for one exact BankEntryLine.
+
+    Re-fetches the specific bank line by GUID, parses the order number, then
+    resolves the matching open receivable. This endpoint exists to prove that
+    we can address one bank line unambiguously even when many lines share the
+    same EntryNumber.
+    """
+    bank = await bank_line_by_id(bank_line_id)
+    description = str(bank.get("Description") or "")
+    order_no = extract_order_number(description)
+    bank_amount = money(bank.get("AmountDC"))
+    recs = await find_receivable(order_no) if order_no else []
+
+    status = "REVIEW_NO_ORDER"
+    reason = "Geen ordernummer herkend in de bankomschrijving."
+    rec = None
+    if bank_amount <= Decimal("0.00"):
+        status = "SKIP_NOT_RECEIPT"
+        reason = "Geen positieve bankontvangst; valt buiten deze eerste verkoopflow."
+    elif order_no:
+        if len(recs) == 0:
+            status = "REVIEW_NOT_FOUND"
+            reason = f"Geen openstaande post gevonden voor {ORDER_REF_PREFIX}{order_no}."
+        elif len(recs) > 1:
+            status = "REVIEW_MULTIPLE"
+            reason = f"{len(recs)} openstaande posten gevonden voor {ORDER_REF_PREFIX}{order_no}."
+        else:
+            rec = recs[0]
+            rec_amount = money(rec.get("Amount"))
+            account_code = str(rec.get("AccountCode") or "").strip()
+            if account_code != COLLECTIVE_DEBTOR_CODE:
+                status = "REVIEW_ACCOUNT"
+                reason = f"Openstaande post staat op account {account_code or 'onbekend'}, niet {COLLECTIVE_DEBTOR_CODE}."
+            elif bank_amount != rec_amount:
+                status = "REVIEW_AMOUNT"
+                reason = f"Bedrag wijkt af: bank {bank_amount} vs openstaand {rec_amount}."
+            else:
+                status = "MATCH_CANDIDATE"
+                reason = "Unieke TD-referentie op verzameldebiteur en bedrag exact gelijk."
+
+    return {
+        "bank": bank,
+        "bank_line_id": bank.get("ID"),
+        "bank_entry_id": bank.get("EntryID"),
+        "bank_entry": bank.get("EntryNumber"),
+        "bank_line_number": bank.get("LineNumber"),
+        "description": description,
+        "bank_amount": str(bank_amount),
+        "order_number": order_no,
+        "expected_ref": f"{ORDER_REF_PREFIX}{order_no}" if order_no else None,
+        "receivable": rec,
+        "receivables_count": len(recs),
+        "status": status,
+        "reason": reason,
+        "read_only": True,
     }
 
 
@@ -717,6 +780,14 @@ async def candidates_page(request: Request, limit: int = 200, only: str = "all")
     view = dict(result)
     view["items"] = items
     return templates.TemplateResponse("candidates.html", {"request": request, "result": view, "only": only})
+
+
+@app.get("/candidate/{bank_line_id}", response_class=HTMLResponse)
+async def candidate_detail_page(request: Request, bank_line_id: str):
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", bank_line_id):
+        raise HTTPException(400, "Ongeldige bankregel-GUID.")
+    detail = await candidate_detail(bank_line_id)
+    return templates.TemplateResponse("candidate_detail.html", {"request": request, "detail": detail})
 
 
 @app.get("/dry-run", response_class=HTMLResponse)

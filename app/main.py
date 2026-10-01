@@ -36,7 +36,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="0.9.0")
+app = FastAPI(title="JNP Matching", version="1.0.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -432,6 +432,76 @@ async def create_order_rule(order_number: str) -> dict[str, Any]:
     return {"ok": True, "created": True, "message": "Order-toewijzingsregel aangemaakt.", "rule": created, "order_number": order_number}
 
 
+async def bank_first_candidates(limit: int = 200) -> dict[str, Any]:
+    """Read-only bank-first reconciliation.
+
+    Start with lines that are still on the suspense account, extract a possible
+    WooCommerce order number from the bank description, then look up exactly
+    TD<order> in the open receivables. A MATCH_CANDIDATE requires one and only
+    one receivable on the collective debtor and an exact positive amount match.
+    No Exact writes are performed here.
+    """
+    items: list[dict[str, Any]] = []
+    for bank in await bank_lines_on_suspense(limit):
+        description = str(bank.get("Description") or "")
+        order_no = extract_order_number(description)
+        bank_amount = money(bank.get("AmountDC"))
+        item: dict[str, Any] = {
+            "bank_line_id": bank.get("ID"),
+            "bank_entry": bank.get("EntryNumber"),
+            "description": description,
+            "bank_amount": str(bank_amount),
+            "order_number": order_no,
+            "expected_ref": f"{ORDER_REF_PREFIX}{order_no}" if order_no else None,
+            "receivable_entry": None,
+            "receivable_amount": None,
+            "account_code": None,
+            "account_name": None,
+            "status": "REVIEW_NO_ORDER",
+            "reason": "Geen ordernummer herkend in de bankomschrijving.",
+        }
+
+        if bank_amount <= Decimal("0.00"):
+            item.update(status="SKIP_NOT_RECEIPT", reason="Geen positieve bankontvangst; valt buiten deze eerste verkoopflow.")
+            items.append(item)
+            continue
+        if not order_no:
+            items.append(item)
+            continue
+
+        recs = await find_receivable(order_no)
+        if len(recs) == 0:
+            item.update(status="REVIEW_NOT_FOUND", reason=f"Geen openstaande post gevonden voor {ORDER_REF_PREFIX}{order_no}.")
+        elif len(recs) > 1:
+            item.update(status="REVIEW_MULTIPLE", reason=f"{len(recs)} openstaande posten gevonden voor {ORDER_REF_PREFIX}{order_no}.")
+        else:
+            rec = recs[0]
+            rec_amount = money(rec.get("Amount"))
+            account_code = str(rec.get("AccountCode") or "").strip()
+            item.update(
+                receivable_entry=rec.get("EntryNumber"),
+                receivable_amount=str(rec_amount),
+                account_code=account_code,
+                account_name=rec.get("AccountName") or "",
+            )
+            if account_code != COLLECTIVE_DEBTOR_CODE:
+                item.update(status="REVIEW_ACCOUNT", reason=f"Openstaande post staat op account {account_code or 'onbekend'}, niet {COLLECTIVE_DEBTOR_CODE}.")
+            elif bank_amount != rec_amount:
+                item.update(status="REVIEW_AMOUNT", reason=f"Bedrag wijkt af: bank {bank_amount} vs openstaand {rec_amount}.")
+            else:
+                item.update(status="MATCH_CANDIDATE", reason="Unieke TD-referentie op verzameldebiteur en bedrag exact gelijk.")
+        items.append(item)
+
+    return {
+        "items": items,
+        "total": len(items),
+        "matches": sum(1 for i in items if i["status"] == "MATCH_CANDIDATE"),
+        "reviews": sum(1 for i in items if i["status"].startswith("REVIEW_")),
+        "skipped": sum(1 for i in items if i["status"].startswith("SKIP_")),
+        "limit": limit,
+    }
+
+
 async def run_legacy_dry_run(limit: int = 100) -> list[dict[str, Any]]:
     rows = []
     for bank in await bank_lines_on_suspense(limit):
@@ -595,7 +665,7 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "version": "0.9.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
+    return {"ok": True, "division": DIVISION, "version": "1.0.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -633,6 +703,20 @@ async def diagnose_order(order_number: str):
     if not re.fullmatch(r"\d{4,10}", order_number):
         raise HTTPException(400, "Ordernummer moet uit 4-10 cijfers bestaan.")
     return await diagnose_receivable(order_number)
+
+
+@app.get("/candidates", response_class=HTMLResponse)
+async def candidates_page(request: Request, limit: int = 200, only: str = "all"):
+    limit = max(1, min(limit, 500))
+    result = await bank_first_candidates(limit)
+    items = result["items"]
+    if only == "matches":
+        items = [i for i in items if i["status"] == "MATCH_CANDIDATE"]
+    elif only == "review":
+        items = [i for i in items if i["status"].startswith("REVIEW_")]
+    view = dict(result)
+    view["items"] = items
+    return templates.TemplateResponse("candidates.html", {"request": request, "result": view, "only": only})
 
 
 @app.get("/dry-run", response_class=HTMLResponse)

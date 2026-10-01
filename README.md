@@ -1,22 +1,13 @@
-# JNP Matching v0.9
+# JNP Matching v1.0
 
-Veilige Exact Online matcher voor WooCommerce-orders op verzameldebiteur 100100.
+Read-only bank-first reconciliation for Exact Online division 3977752.
 
-## Belangrijkste wijziging
-De bankomschrijving hoeft alleen het numerieke ordernummer te bevatten, bijvoorbeeld `VERCAIGNE BO 48451`. Exact gebruikt voor de salesentry `YourRef = TD48451`.
+The primary route is `/candidates`:
+1. Read bank lines still on suspense GL 1360.
+2. Extract a possible WooCommerce order number from the bank description.
+3. Look up exactly `TD<order>` in `ReceivablesList`.
+4. Require account code 100100 and exact positive amount match.
+5. Label the row `MATCH_CANDIDATE` or a review status.
 
-Daarom maakt v0.9 **geen generieke `Words=TD`-regel**. In plaats daarvan kan de app per open webshoporder een Exact AllocationRule voorbereiden:
-
-- `Account = <GUID van 100100>`
-- `Words = 48451`
-
-Nieuwe geïmporteerde bankregels die `48451` bevatten kunnen hierdoor door Exact aan verzameldebiteur 100100 worden toegewezen. Daarna kan JNP Matching direct afletteren via MatchSets.
-
-## Bestaande 1360-backlog
-De publieke REST API ondersteunt geen normale update van een reeds bestaande BankEntryLine. Voor bestaande geïmporteerde regels kan Exact na het aanmaken van de orderregels in de UI opnieuw de automatische toewijzing uitvoeren. Daarna verschijnen ze onder `/allocated` en kunnen ze direct worden gematcht.
-
-## Safety flags
-- `ENABLE_ORDER_RULE_WRITES=false`
-- `ENABLE_DIRECT_MATCH_WRITES=false`
-
-Laat beide uit totdat één orderregel en één directe match gecontroleerd zijn.
+No allocation rules are created and no bank or financial entries are modified by this route.
+Keep `ENABLE_ORDER_RULE_WRITES=false` and `ENABLE_DIRECT_MATCH_WRITES=false` while validating the candidate list.

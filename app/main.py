@@ -36,7 +36,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="1.2.0")
+app = FastAPI(title="JNP Matching", version="1.4.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -284,6 +284,148 @@ async def transaction_lines(entry_number: int) -> list[dict[str, Any]]:
         "$select": "ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,Currency,FinancialPeriod,FinancialYear,GLAccount,GLAccountCode,GLAccountDescription,JournalCode,YourRef",
     }
     return _extract_results(await exact_get("financialtransaction/TransactionLines", params))
+
+
+async def transaction_lines_by_entry_id(entry_id: str) -> list[dict[str, Any]]:
+    """Read-only lookup of accounting transaction lines for one Exact entry GUID."""
+    params = {
+        "$filter": f"EntryID eq guid'{entry_id}'",
+        "$select": "ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,Currency,FinancialPeriod,FinancialYear,GLAccount,GLAccountCode,GLAccountDescription,JournalCode,YourRef",
+        "$top": "200",
+    }
+    return _extract_results(await exact_get("financialtransaction/TransactionLines", params))
+
+
+async def bank_entry_by_id(entry_id: str) -> dict[str, Any] | None:
+    """Read-only lookup of the BankEntries parent record.
+
+    We deliberately use $top=1 without guessing a field list, because Exact's
+    BankEntries field set varies across API revisions. This endpoint never writes.
+    """
+    params = {"$filter": f"ID eq guid'{entry_id}'", "$top": "1"}
+    rows = _extract_results(await exact_get("financialtransaction/BankEntries", params))
+    return rows[0] if rows else None
+
+
+async def cashflow_receivable_by_entry(entry_number: int) -> tuple[list[dict[str, Any]], str | None]:
+    """Best-effort read-only Cashflow/Receivables enrichment.
+
+    The core diagnostic does not depend on this resource. If an Exact tenant or
+    API revision rejects one of these fields, we return the error as evidence
+    rather than failing the entire diagnostic.
+    """
+    params = {
+        "$filter": f"EntryNumber eq {int(entry_number)}",
+        "$select": "Account,AccountCode,AmountDC,Currency,Description,EntryNumber,GLAccount,GLAccountCode,Status,TransactionID,TransactionEntryID",
+        "$top": "10",
+    }
+    try:
+        return _extract_results(await exact_get("cashflow/Receivables", params)), None
+    except HTTPException as exc:
+        return [], str(exc.detail)
+
+
+async def diagnose_bank_line(bank_line_id: str, receivable_entry: int | None = None) -> dict[str, Any]:
+    """Consolidated GET-only diagnostic for one exact imported bank line.
+
+    This proves identity and allocation/matching preconditions without invoking
+    POST/PUT/DELETE, beta allocation writes, or MatchSets uploads.
+    """
+    bank = await bank_line_by_id(bank_line_id)
+    entry_id = str(bank.get("EntryID") or "")
+    if not entry_id:
+        raise HTTPException(409, "Bankregel bevat geen EntryID; diagnose kan niet eenduidig doorgaan.")
+
+    header = await bank_entry_by_id(entry_id)
+    tx_lines = await transaction_lines_by_entry_id(entry_id)
+
+    description = str(bank.get("Description") or "")
+    order_no = extract_order_number(description)
+    recs = await find_receivable(order_no) if order_no else []
+    if receivable_entry is not None:
+        recs = [r for r in recs if int(r.get("EntryNumber") or 0) == int(receivable_entry)]
+    target_rec = recs[0] if len(recs) == 1 else None
+
+    target_entry = int(target_rec.get("EntryNumber") or 0) if target_rec else int(receivable_entry or 0)
+    cashflow_recs: list[dict[str, Any]] = []
+    cashflow_error: str | None = None
+    if target_entry:
+        cashflow_recs, cashflow_error = await cashflow_receivable_by_entry(target_entry)
+
+    bank_amount = money(bank.get("AmountDC"))
+    same_amount_lines = [t for t in tx_lines if abs(money(t.get("AmountDC"))) == abs(bank_amount)]
+    same_line_number = [t for t in tx_lines if str(t.get("LineNumber")) == str(bank.get("LineNumber"))]
+    id_matches = [t for t in tx_lines if str(t.get("ID") or "").lower() == bank_line_id.lower()]
+
+    bank_account_code = str(bank.get("AccountCode") or "").strip() or None
+    bank_gl_code = str(bank.get("GLAccountCode") or "").strip() or None
+    rec_account_code = str((target_rec or {}).get("AccountCode") or "").strip() or None
+
+    receivable_gl_code = None
+    if cashflow_recs:
+        receivable_gl_code = str(cashflow_recs[0].get("GLAccountCode") or "").strip() or None
+    if not receivable_gl_code and target_entry:
+        inv_txs = await transaction_lines(target_entry)
+        debtor_txs = [t for t in inv_txs if str(t.get("AccountCode") or "").strip() == COLLECTIVE_DEBTOR_CODE]
+        if len(debtor_txs) == 1:
+            receivable_gl_code = str(debtor_txs[0].get("GLAccountCode") or "").strip() or None
+
+    requires_allocation = bank_account_code != COLLECTIVE_DEBTOR_CODE or bank_gl_code == SUSPENSE_GL_CODE
+    same_account = bank_account_code == COLLECTIVE_DEBTOR_CODE and rec_account_code == COLLECTIVE_DEBTOR_CODE
+    same_gl = bool(bank_gl_code and receivable_gl_code and bank_gl_code == receivable_gl_code)
+    uniquely_addressable = len(same_amount_lines) == 1 and len(same_line_number) == 1
+    eligible = bool(target_rec) and not requires_allocation and same_account and same_gl and uniquely_addressable
+
+    return {
+        "read_only": True,
+        "writes_executed": False,
+        "bank_line_identity": {
+            "id": bank.get("ID"),
+            "entry_id": bank.get("EntryID"),
+            "entry_number": bank.get("EntryNumber"),
+            "line_number": bank.get("LineNumber"),
+            "description": description,
+            "amount_dc": str(bank_amount),
+        },
+        "bank_header": header,
+        "bank_transaction_lines": tx_lines,
+        "same_amount_line_count": len(same_amount_lines),
+        "same_line_number_count": len(same_line_number),
+        "bank_line_id_equals_transaction_line_id": bool(id_matches),
+        "order_number": order_no,
+        "target_receivable": target_rec,
+        "target_receivable_count": len(recs),
+        "cashflow_receivables": cashflow_recs,
+        "cashflow_receivables_error": cashflow_error,
+        "allocation_state": {
+            "account_code": bank_account_code,
+            "gl_account_code": bank_gl_code,
+            "requires_allocation": requires_allocation,
+        },
+        "matchsets_preconditions": {
+            "receivable_account_code": rec_account_code,
+            "receivable_gl_account_code": receivable_gl_code,
+            "same_account": same_account,
+            "same_gl_account": same_gl,
+            "same_amount_line_count": len(same_amount_lines),
+            "same_line_number_count": len(same_line_number),
+            "uniquely_addressable_in_transaction_lines": uniquely_addressable,
+            "eligible": eligible,
+        },
+        "computed_result": {
+            "allocation_required": requires_allocation,
+            "matchsets_eligible": eligible,
+            "reason": (
+                f"Bankregel staat nog op {SUSPENSE_GL_CODE} en/of heeft debiteur {COLLECTIVE_DEBTOR_CODE} nog niet toegewezen."
+                if requires_allocation else
+                "Bankregel voldoet aan de berekende allocatievoorwaarden; verdere write-validatie blijft apart geblokkeerd."
+            ),
+        },
+        "writes_enabled": {
+            "order_rule": ENABLE_ORDER_RULE_WRITES,
+            "direct_match": ENABLE_DIRECT_MATCH_WRITES,
+        },
+    }
 
 
 async def diagnose_receivable(order_number: str) -> dict[str, Any]:
@@ -782,11 +924,19 @@ async def api_candidate_detail(bank_line_id: str):
     return await candidate_detail(bank_line_id)
 
 
+@app.get("/api/diagnostics/bank-line/{bank_line_id}")
+async def api_bank_line_diagnostic(bank_line_id: str, receivable_entry: int | None = None):
+    """GET-only consolidated Exact diagnostic. No financial writes are possible here."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", bank_line_id):
+        raise HTTPException(400, "Ongeldige bankregel-GUID.")
+    return await diagnose_bank_line(bank_line_id, receivable_entry)
+
+
 @app.get("/api/safety")
 async def api_safety():
     """Expose only non-secret safety state for automated regression checks."""
     return {
-        "version": "1.2.0",
+        "version": "1.4.0",
         "division": DIVISION,
         "suspense_gl_code": SUSPENSE_GL_CODE,
         "collective_debtor_code": COLLECTIVE_DEBTOR_CODE,

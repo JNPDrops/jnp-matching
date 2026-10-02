@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from openai import OpenAI
 
-app = FastAPI(title="JNP Development Agent", version="1.1.0")
+app = FastAPI(title="JNP Development Agent", version="1.2.0")
 
 TARGET_URL = os.getenv("TARGET_URL", "https://jnp-matching.onrender.com").rstrip("/")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "JNPDrops/jnp-matching")
@@ -118,6 +118,37 @@ async def run_regression_tests() -> dict[str, Any]:
     paynetics = [i for i in items if "PAYNETICS" in str(i.get("description") or "").upper()]
     if any(i.get("status") == "MATCH_CANDIDATE" for i in paynetics):
         failures.append("A Paynetics payout was incorrectly marked MATCH_CANDIDATE.")
+
+    # v1.4 golden diagnostic: prove the exact imported bank line remains on
+    # suspense and is not MatchSets-eligible before allocation. GET-only.
+    try:
+        diag = await fetch_json(
+            f"/api/diagnostics/bank-line/{GOLDEN_BANK_LINE_ID}?receivable_entry={GOLDEN_RECEIVABLE_ENTRY}"
+        )
+        observations.append(
+            "Golden diagnostic: " + json.dumps({
+                "allocation_state": diag.get("allocation_state"),
+                "matchsets_preconditions": diag.get("matchsets_preconditions"),
+                "computed_result": diag.get("computed_result"),
+            }, ensure_ascii=False)
+        )
+        if diag.get("read_only") is not True or diag.get("writes_executed") is not False:
+            failures.append("Golden diagnostic is not explicitly read-only.")
+        identity = diag.get("bank_line_identity") or {}
+        if str(identity.get("id") or "") != GOLDEN_BANK_LINE_ID:
+            failures.append("Golden diagnostic returned the wrong BankEntryLine ID.")
+        if int(identity.get("line_number") or 0) != 75:
+            failures.append("Golden diagnostic returned an unexpected bank line number.")
+        allocation = diag.get("allocation_state") or {}
+        if str(allocation.get("gl_account_code") or "") != "1360":
+            failures.append("Golden diagnostic no longer sees the bank line on suspense G/L 1360.")
+        if allocation.get("requires_allocation") is not True:
+            failures.append("Golden diagnostic should report allocation_required=true.")
+        computed = diag.get("computed_result") or {}
+        if computed.get("matchsets_eligible") is not False:
+            failures.append("Golden diagnostic incorrectly reports MatchSets eligibility before allocation.")
+    except Exception as exc:
+        failures.append(f"Golden read-only diagnostic failed: {exc}")
 
     bad_negative = []
     for i in items:

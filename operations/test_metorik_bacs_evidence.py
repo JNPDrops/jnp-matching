@@ -73,7 +73,8 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             else:
                 numbers = json.loads(params["filters"])[0]["value"]
                 self.assertLessEqual(len(numbers), 25)
-                rows = [{**ev["order"], "order_id": r["order_id"], "order_number": "#"+r["reference"][2:]} for r in manifest if "#"+r["reference"][2:] in numbers]
+                self.assertTrue(all(n.isdecimal() for n in numbers))
+                rows = [{**ev["order"], "order_id": r["order_id"], "order_number": "#"+r["reference"][2:]} for r in manifest if r["reference"][2:] in numbers]
                 body = {"data": rows, "pagination": {"current_page": 1, "per_page": 100, "has_more_pages": False}}
             return Mock(status_code=200, json=Mock(return_value=body))
         client.get.side_effect = respond

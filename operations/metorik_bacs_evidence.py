@@ -67,7 +67,7 @@ async def read_orders(manifest):
             batch_numbers = numbers[offset:offset + 25]
             for page in range(1, 11):
                 body = await get("/orders", {"page": page, "per_page": 100,
-                    "filters": json.dumps([{"field": "order_number", "operator": "in", "value": batch_numbers}])})
+                    "filters": json.dumps([{"field": "order_number", "operator": "in", "value": [n[1:] for n in batch_numbers]}])})
                 rows, pg = body.get("data"), body.get("pagination")
                 m.require(isinstance(rows, list) and isinstance(pg, dict)
                     and pg.get("current_page") == page and pg.get("per_page") == 100

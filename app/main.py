@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+import psycopg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -26,6 +27,7 @@ SUSPENSE_GL_CODE = os.getenv("SUSPENSE_GL_CODE", "1360")
 COLLECTIVE_DEBTOR_CODE = os.getenv("COLLECTIVE_DEBTOR_CODE", "100100")
 ORDER_REF_PREFIX = os.getenv("ORDER_REF_PREFIX", "TD")
 TOKEN_STORE_PATH = Path(os.getenv("TOKEN_STORE_PATH", "./exact_tokens.json"))
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-change-me")
 ENABLE_ORDER_RULE_WRITES = os.getenv("ENABLE_ORDER_RULE_WRITES", os.getenv("ENABLE_ALLOCATION_RULE_WRITES", "false")).lower() == "true"
 ENABLE_DIRECT_MATCH_WRITES = os.getenv("ENABLE_DIRECT_MATCH_WRITES", "false").lower() == "true"
@@ -36,7 +38,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="1.4.0")
+app = FastAPI(title="JNP Matching", version="1.6.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -51,16 +53,64 @@ def _require_config() -> None:
         raise HTTPException(500, f"Missing configuration: {', '.join(missing)}")
 
 
+def _db_connect():
+    if not DATABASE_URL:
+        return None
+    return psycopg.connect(DATABASE_URL, autocommit=True)
+
+
+def _ensure_token_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS exact_oauth_tokens (
+            singleton_key TEXT PRIMARY KEY,
+            token_json JSONB NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+
+
 def _load_tokens() -> dict[str, Any] | None:
+    if DATABASE_URL:
+        try:
+            with _db_connect() as conn:
+                _ensure_token_table(conn)
+                row = conn.execute(
+                    "SELECT token_json FROM exact_oauth_tokens WHERE singleton_key = %s",
+                    ("exact",),
+                ).fetchone()
+                if not row:
+                    return None
+                value = row[0]
+                return value if isinstance(value, dict) else json.loads(value)
+        except Exception as exc:
+            raise HTTPException(500, f"Persistent Exact token store unavailable: {type(exc).__name__}")
     if not TOKEN_STORE_PATH.exists():
         return None
     return json.loads(TOKEN_STORE_PATH.read_text())
 
 
 def _save_tokens(tokens: dict[str, Any]) -> None:
-    TOKEN_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     expires_in = int(tokens.get("expires_in", 600))
     tokens["expires_at"] = int(time.time()) + expires_in - 30
+    if DATABASE_URL:
+        try:
+            with _db_connect() as conn:
+                _ensure_token_table(conn)
+                conn.execute(
+                    """
+                    INSERT INTO exact_oauth_tokens (singleton_key, token_json, updated_at)
+                    VALUES (%s, %s::jsonb, NOW())
+                    ON CONFLICT (singleton_key)
+                    DO UPDATE SET token_json = EXCLUDED.token_json, updated_at = NOW()
+                    """,
+                    ("exact", json.dumps(tokens)),
+                )
+            return
+        except Exception as exc:
+            raise HTTPException(500, f"Persistent Exact token store unavailable: {type(exc).__name__}")
+    TOKEN_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     TOKEN_STORE_PATH.write_text(json.dumps(tokens, indent=2))
     try:
         os.chmod(TOKEN_STORE_PATH, 0o600)
@@ -870,7 +920,7 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "version": "1.0.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
+    return {"ok": True, "division": DIVISION, "version": "1.6.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -936,7 +986,7 @@ async def api_bank_line_diagnostic(bank_line_id: str, receivable_entry: int | No
 async def api_safety():
     """Expose only non-secret safety state for automated regression checks."""
     return {
-        "version": "1.4.0",
+        "version": "1.6.0",
         "division": DIVISION,
         "suspense_gl_code": SUSPENSE_GL_CODE,
         "collective_debtor_code": COLLECTIVE_DEBTOR_CODE,

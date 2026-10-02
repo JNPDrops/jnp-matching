@@ -223,7 +223,7 @@ async def balances(api, ctx):
     return sorted(rows, key=lambda r: r["HID"])
 
 
-def check_balances(before, after, moved_ids, ctx):
+def check_balances(before, after, moved_ids, ctx, accept_derived_changes=False):
     # Complete source+destination population, not only the selected balance.
     expected = copy.deepcopy(before)
     wanted = {(i["entry_number"], i["reference"]) for i in moved_ids}
@@ -237,10 +237,35 @@ def check_balances(before, after, moved_ids, ctx):
     actual = copy.deepcopy(after)
     for r in actual:
         r["AccountCode"] = r["AccountCode"].strip()
-    require(expected == actual, "Global open-post population changed; inspect audit for concurrent activity")
+    if accept_derived_changes:
+        # Only selected rows may acquire a new HID. Match by the stable invoice key,
+        # demand one row on each side, and compare every other field unchanged.
+        for key in wanted:
+            old = [r for r in expected if (r["EntryNumber"], r["YourRef"]) == key]
+            new = [r for r in actual if (r["EntryNumber"], r["YourRef"]) == key]
+            require(len(old) == len(new) == 1, "Ambiguous selected balance row")
+            require(str(new[0]["HID"]).isdigit() and int(new[0]["HID"]) > 0, "Invalid new HID")
+            old[0]["HID"] = new[0]["HID"]
+    require(sorted(expected, key=lambda r: r["HID"]) == sorted(actual, key=lambda r: r["HID"]),
+            "Global open-post population changed; inspect audit for concurrent activity")
 
 
-def check_after(before, after, ctx):
+def validate_derived_source(s, ctx):
+    """Preflight for the explicitly approved, observed Exact regeneration only."""
+    eligible(s, ctx)
+    h, c = s["header"], s["cashflow"][0]
+    condition = (c["PaymentCondition"], c["PaymentConditionDescription"], c["PaymentMethod"])
+    require(condition in (("PP", "Prepaid", "K"),
+                          (ctx["condition"]["Code"], "bacs", "B")), "Unapproved source payment condition")
+    require(c["PaymentReference"] == f"{SOURCE}/{h['EntryNumber']}", "Custom payment reference requires review")
+    for r in s["transactions"]:
+        if r["LineNumber"] == 9999:
+            require(r["DueDate"] in (None, h["DueDate"])
+                    and amount(r["AmountFC"]) == -amount(h["VATAmountFC"]),
+                    "Unrecognized VAT summary line")
+
+
+def check_after(before, after, ctx, accept_derived_changes=False):
     source_id = ctx["accounts"][SOURCE]["ID"]
     target_id = ctx["accounts"][DESTINATION]["ID"]
     expected = copy.deepcopy(before)
@@ -263,6 +288,24 @@ def check_after(before, after, ctx):
     for r in actual["open"]:
         r["AccountCode"] = r["AccountCode"].strip()
     expected["related"][0]["Customer"] = target_id
+    if accept_derived_changes:
+        validate_derived_source(before, ctx)
+        require(len(actual["cashflow"]) == len(actual["open"]) == 1, "Regenerated receivable is ambiguous")
+        c, a = expected["cashflow"][0], actual["cashflow"][0]
+        for key in ("ID", "EntryID"):
+            guid(a[key])
+            c[key] = a[key]
+        c.update(PaymentCondition=ctx["condition"]["Code"],
+                 PaymentConditionDescription="bacs", PaymentMethod="B",
+                 PaymentReference=f"{DESTINATION}/{before['header']['EntryNumber']}")
+        hid = actual["open"][0]["HID"]
+        require(str(hid).isdigit() and int(hid) > 0, "Invalid regenerated HID")
+        expected["open"][0]["HID"] = hid
+        by_id = {r["ID"]: r for r in actual["transactions"]}
+        require(len(by_id) == len(actual["transactions"]), "Duplicate financial line")
+        for r in expected["transactions"]:
+            if r["LineNumber"] == 9999 and by_id.get(r["ID"], {}).get("DueDate") is None:
+                r["DueDate"] = None
     require(expected == actual, "Post-write mismatch: stop and inspect audit; no automatic rollback")
 
 
@@ -304,40 +347,46 @@ def append_audit(f, event):
     os.fsync(f.fileno())
 
 
-async def apply(api, p, expected_sha, audit):
+async def apply(api, p, expected_sha, audit, accept_derived_changes=False):
     validate_plan(p, expected_sha)
     ctx = await context(api)
     require(ctx == p["context"], "Debtors or bacs condition changed")
     completed = []
-    append_audit(audit, {"event": "begin", "plan_sha256": expected_sha})
+    append_audit(audit, {"event": "begin", "plan_sha256": expected_sha,
+                         "accept_exact_derived_changes": accept_derived_changes})
     balance_before = await balances(api, ctx)
     append_audit(audit, {"event": "balances_before", "rows": balance_before})
     # Recheck ALL selected entries before the first write.
     for item in p["eligible"]:
         live = await snapshot(api, item["entry_id"])
         eligible(live, ctx)
+        if accept_derived_changes:
+            validate_derived_source(live, ctx)
         require(live == item["snapshot"], "Plan is stale; no write started")
     for item in p["eligible"]:
         before = await snapshot(api, item["entry_id"])
         eligible(before, ctx)
+        if accept_derived_changes:
+            validate_derived_source(before, ctx)
         require(before == item["snapshot"], "Entry changed before write")
         append_audit(audit, {"event": "write_intent", "entry_id": item["entry_id"], "before": before})
         try:
             await api.change_customer(item["entry_id"], ctx["accounts"][DESTINATION]["ID"])
             after = await snapshot(api, item["entry_id"])
             append_audit(audit, {"event": "read_after_write", "entry_id": item["entry_id"], "after": after})
-            check_after(before, after, ctx)
+            check_after(before, after, ctx, accept_derived_changes)
         except Exception:
             append_audit(audit, {"event": "halt_inspect_outcome", "entry_id": item["entry_id"], "completed": completed})
             raise
         completed.append({k: v for k, v in item.items() if k != "snapshot"})
         append_audit(audit, {"event": "verified", "entry_id": item["entry_id"]})
+        print(json.dumps({"progress": "verified", "entry_number": item["entry_number"]}), flush=True)
     # Verify the selected population once more; reruns cannot silently double-apply.
     for item in p["eligible"]:
-        check_after(item["snapshot"], await snapshot(api, item["entry_id"]), ctx)
+        check_after(item["snapshot"], await snapshot(api, item["entry_id"]), ctx, accept_derived_changes)
     balance_after = await balances(api, ctx)
     append_audit(audit, {"event": "balances_after", "rows": balance_after})
-    check_balances(balance_before, balance_after, completed, ctx)
+    check_balances(balance_before, balance_after, completed, ctx, accept_derived_changes)
     totals = {}
     for item in completed:
         totals[item["currency"]] = str(amount(totals.get(item["currency"], "0")) + amount(item["remaining"]))
@@ -365,7 +414,7 @@ async def run(args):
             p = json.loads(args.plan.read_text())
             # Existing audit file means prior attempt; never replay blindly.
             with os.fdopen(os.open(args.audit, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as audit:
-                print(json.dumps(await apply(api, p, args.expect_sha256, audit)))
+                print(json.dumps(await apply(api, p, args.expect_sha256, audit, args.accept_exact_derived_changes)))
 
 
 def main():
@@ -377,6 +426,8 @@ def main():
     a.add_argument("--plan", type=Path, required=True)
     a.add_argument("--expect-sha256", required=True)
     a.add_argument("--audit", type=Path, required=True)
+    a.add_argument("--accept-exact-derived-changes", action="store_true",
+                   help="Explicit approval for observed receivable IDs, bacs condition, generated reference and VAT-line due-date changes")
     args = parser.parse_args()
     try:
         asyncio.run(run(args))

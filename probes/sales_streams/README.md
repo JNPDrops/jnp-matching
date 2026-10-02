@@ -126,3 +126,57 @@ uitlezing veranderen. Refunddetails en volledige boekingsvergelijking volgen lat
 Officiële referenties:
 - https://woocommerce.com/document/woocommerce-rest-api/
 - https://woocommerce.github.io/woocommerce-rest-api-docs/
+
+## Metorik als alternatieve leesbron
+
+`metorik_read.py` gebruikt alleen de vaste HTTPS-host app.metorik.com en GET op
+`/api/v1/store` en `/api/v1/store/orders`. De sleutel komt uit `METORIK_API_KEY`
+in de bestaande Render-service, met Metorik-scope Reports & Data. Geen Engage-scope.
+
+```sh
+python probes/sales_streams/metorik_read.py --check
+```
+
+Deze controle leest uitsluitend winkelmetadata. Hij toont winkelnaam, platform,
+valuta en tijdzone voor identiteitscontrole; geen orders, geheimen of headers.
+Een succesvolle check bewijst nog geen volledige orderuitlezing of synchronisatie.
+Pas na controle van de winkelnaam kan een beperkte steekproef worden gelezen:
+
+```sh
+python probes/sales_streams/metorik_read.py --expect-store 'EXACTE NAAM UIT CHECK' --sample-limit 50 --mapping probes/sales_streams/mapping.example.json
+```
+
+De steekproef omvat de laatste orders op aanmaakdatum, maximaal 500. Paginering en
+unieke bron-ID's worden gecontroleerd; gewijzigde records tijdens uitlezen blijven
+mogelijk. Persoonsvelden uit het API-antwoord worden direct weggefilterd. De API
+ondersteunt hier geen gedocumenteerde veldselectie; volledige records worden wel
+ontvangen in het procesgeheugen, maar niet opgeslagen of gelogd.
+
+Alle uitkomsten blijven REVIEW: Metorik-order-ID versus WooCommerce-ID, oorspronkelijke
+valuta/bedragsemantiek en refunddetails zijn nog niet onafhankelijk gecontroleerd.
+Een niet-nul total_refunds is uitsluitend een beoordelingssignaal, nooit een
+nagebouwde creditboeking. Een nul is geen bewijs van complete refundhistorie.
+Geen Exact-mutaties, nieuwe webroute, startup-hook of achtergrondtaak.
+
+Officiële bron (geraadpleegd 2 oktober 2026): https://metorik.dev/
+
+## Vervolg: actuele openstaande posten in Exact per betaalstroom
+
+Op verzoek van de gebruiker wordt de onderzoeksvraag uitgebreid naar de thans
+openstaande debiteurenposten. Dit is nog niet geïmplementeerd of live uitgevoerd.
+De basispopulatie moet een actuele, volledig gepagineerde Exact-uitlezing zijn
+voor administratie 3977752, met datum/tijd van uitlezing en daadwerkelijk
+restbedrag per unieke post. Gebruik niet het WooCommerce-ordertotaal als restsaldo.
+
+Koppel op bewezen orderreferentie/identiteit; behoud Exact-post-ID, debiteurcode,
+valuta, oorspronkelijke bedrag, openstaand bedrag en orderreferentie. Markeer
+ontbrekende/meervoudige referenties, deelbetalingen, credits en conflicterende
+betaalmethoden voor beoordeling. Posten buiten de webshop mogen niet stilzwijgend
+onder een webshop-betaalstroom vallen. Totaliseer restbedragen per valuta en
+betaalstroom, inclusief onbekend, en reconcilieer met de bronpopulatie.
+
+Een indelingsrapport is geen wijziging van een geboekte debiteur. Vóór aanpassing
+binnen Exact moeten de nieuwe debiteuren, ondersteunde wijzigingsroute, gevolgen
+voor bestaande afletteringen en de concrete betrokken posten worden vastgesteld.
+De bestaande operationele bankroute en Xcore blijven actief. Geen automatische
+herboeking, aflettering, undo, verwijdering of herimport in deze leesproef.

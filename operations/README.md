@@ -93,3 +93,23 @@ Officiële routes en velden, geraadpleegd 2 oktober 2026:
 ```sh
 python -m unittest operations.test_bacs_debtor_transfer -v
 ```
+# Aanvullende eenmalige selectie: bewezen Metorik-bacs
+
+Na expliciete toestemming voor de overige bacs-webshoporders kan `plan` een
+`--metorik-manifest /tmp/approved-bacs.json` ontvangen. Dit is een lijst met uitsluitend
+`entry_id`, `reference` (TD-nummer) en `order_id`. Het manifest bevat geen geheimen en
+wordt niet in Git opgeslagen. Er is geen brede selectie van alle Prepaid-boekingen.
+
+De planner leest de genoemde orders opnieuw uit de bestaande Metorik-winkel
+TheDrops.eu, zonder filter op betaalmethode. Iedere referentie en order-ID moeten
+uniek overeenkomen; de betaalmethode moet exact `bacs` zijn. Valuta, factuurdatum,
+oorspronkelijk bedrag, refundstatus en Exact-restbedrag worden gecontroleerd.
+Vóór uitvoering wordt de Metorik-bewijsset opnieuw gelezen. De bestaande controles
+op Exact-status, één volledig open post, btw, boekingsregels en totaalsaldi blijven
+gelden. Deelbetaalde/afgeletterde posten worden afzonderlijk gerapporteerd.
+
+De enige wijziging blijft `SalesEntries.Customer`. Een aanwezige Exact-betaalconditie
+PP blijft PP; de nacontrole verwacht dat Exact de opnieuw gegenereerde cashflow aan
+de ongewijzigde verkoopconditie koppelt. `--accept-exact-derived-changes` blijft
+nodig voor de expliciet goedgekeurde nevenwijzigingen. Dit voegt geen automatische
+verwerking, webhook, Plisio-route, infrastructuur of aflettering toe.

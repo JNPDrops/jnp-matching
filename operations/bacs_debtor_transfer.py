@@ -178,12 +178,16 @@ async def snapshot(api, entry_id):
     return result
 
 
-def eligible(s, ctx):
+def eligible(s, ctx, order_evidence=None):
     """Conservative executor subset; all other open bacs sales entries are reported."""
     h = s["header"]
     source_id = ctx["accounts"][SOURCE]["ID"]
     require(h["Customer"] == source_id, "Debtor is no longer 100100")
-    require(h["PaymentCondition"] == ctx["condition"]["Code"], "Sales entry is not bacs")
+    if order_evidence is None:
+        require(h["PaymentCondition"] == ctx["condition"]["Code"], "Sales entry is not bacs")
+    else:
+        from operations.metorik_bacs_evidence import validate_evidence
+        validate_evidence(s, order_evidence)
     ref = h["YourRef"]
     require(isinstance(ref, str) and re.fullmatch(r"TD[0-9]{4,10}", ref), "Unproven webshop reference")
     require(h["Description"] == "Order TD #" + ref[2:], "Webshop description does not match reference")
@@ -250,9 +254,9 @@ def check_balances(before, after, moved_ids, ctx, accept_derived_changes=False):
             "Global open-post population changed; inspect audit for concurrent activity")
 
 
-def validate_derived_source(s, ctx):
+def validate_derived_source(s, ctx, order_evidence=None):
     """Preflight for the explicitly approved, observed Exact regeneration only."""
-    eligible(s, ctx)
+    eligible(s, ctx, order_evidence)
     h, c = s["header"], s["cashflow"][0]
     condition = (c["PaymentCondition"], c["PaymentConditionDescription"], c["PaymentMethod"])
     require(condition in (("PP", "Prepaid", "K"),
@@ -265,7 +269,7 @@ def validate_derived_source(s, ctx):
                     "Unrecognized VAT summary line")
 
 
-def check_after(before, after, ctx, accept_derived_changes=False):
+def check_after(before, after, ctx, accept_derived_changes=False, order_evidence=None):
     source_id = ctx["accounts"][SOURCE]["ID"]
     target_id = ctx["accounts"][DESTINATION]["ID"]
     expected = copy.deepcopy(before)
@@ -289,14 +293,17 @@ def check_after(before, after, ctx, accept_derived_changes=False):
         r["AccountCode"] = r["AccountCode"].strip()
     expected["related"][0]["Customer"] = target_id
     if accept_derived_changes:
-        validate_derived_source(before, ctx)
+        validate_derived_source(before, ctx, order_evidence)
         require(len(actual["cashflow"]) == len(actual["open"]) == 1, "Regenerated receivable is ambiguous")
         c, a = expected["cashflow"][0], actual["cashflow"][0]
         for key in ("ID", "EntryID"):
             guid(a[key])
             c[key] = a[key]
-        c.update(PaymentCondition=ctx["condition"]["Code"],
-                 PaymentConditionDescription="bacs", PaymentMethod="B",
+        condition = ctx["condition"]
+        if order_evidence is not None and before["header"]["PaymentCondition"] == "PP":
+            condition = ctx["metorik_prepaid_condition"]
+        c.update(PaymentCondition=condition["Code"],
+                 PaymentConditionDescription=condition["Description"], PaymentMethod=condition["PaymentMethod"],
                  PaymentReference=f"{DESTINATION}/{before['header']['EntryNumber']}")
         hid = actual["open"][0]["HID"]
         require(str(hid).isdigit() and int(hid) > 0, "Invalid regenerated HID")
@@ -350,6 +357,16 @@ def append_audit(f, event):
 async def apply(api, p, expected_sha, audit, accept_derived_changes=False):
     validate_plan(p, expected_sha)
     ctx = await context(api)
+    if "metorik_evidence" in p:
+        from operations.metorik_bacs_evidence import verify_again, prepaid_context, item_evidence
+        await prepaid_context(api, ctx)
+        await verify_again(p["metorik_evidence"])
+        for item in p["eligible"]:
+            require(item.get("order_evidence") == item_evidence(p["metorik_evidence"], item["entry_id"]),
+                    "Planned order evidence does not match live-verified manifest")
+    else:
+        require(all("order_evidence" not in item for item in p["eligible"]),
+                "Order evidence requires a live-verified manifest")
     require(ctx == p["context"], "Debtors or bacs condition changed")
     completed = []
     append_audit(audit, {"event": "begin", "plan_sha256": expected_sha,
@@ -359,38 +376,39 @@ async def apply(api, p, expected_sha, audit, accept_derived_changes=False):
     # Recheck ALL selected entries before the first write.
     for item in p["eligible"]:
         live = await snapshot(api, item["entry_id"])
-        eligible(live, ctx)
+        eligible(live, ctx, item.get("order_evidence"))
         if accept_derived_changes:
-            validate_derived_source(live, ctx)
+            validate_derived_source(live, ctx, item.get("order_evidence"))
         require(live == item["snapshot"], "Plan is stale; no write started")
     for item in p["eligible"]:
         before = await snapshot(api, item["entry_id"])
-        eligible(before, ctx)
+        eligible(before, ctx, item.get("order_evidence"))
         if accept_derived_changes:
-            validate_derived_source(before, ctx)
+            validate_derived_source(before, ctx, item.get("order_evidence"))
         require(before == item["snapshot"], "Entry changed before write")
         append_audit(audit, {"event": "write_intent", "entry_id": item["entry_id"], "before": before})
         try:
             await api.change_customer(item["entry_id"], ctx["accounts"][DESTINATION]["ID"])
             after = await snapshot(api, item["entry_id"])
             append_audit(audit, {"event": "read_after_write", "entry_id": item["entry_id"], "after": after})
-            check_after(before, after, ctx, accept_derived_changes)
+            check_after(before, after, ctx, accept_derived_changes, item.get("order_evidence"))
         except Exception:
             append_audit(audit, {"event": "halt_inspect_outcome", "entry_id": item["entry_id"], "completed": completed})
             raise
-        completed.append({k: v for k, v in item.items() if k != "snapshot"})
+        completed.append({k: v for k, v in item.items() if k not in ("snapshot", "order_evidence")})
         append_audit(audit, {"event": "verified", "entry_id": item["entry_id"]})
         print(json.dumps({"progress": "verified", "entry_number": item["entry_number"]}), flush=True)
     # Verify the selected population once more; reruns cannot silently double-apply.
     for item in p["eligible"]:
-        check_after(item["snapshot"], await snapshot(api, item["entry_id"]), ctx, accept_derived_changes)
+        check_after(item["snapshot"], await snapshot(api, item["entry_id"]), ctx, accept_derived_changes, item.get("order_evidence"))
     balance_after = await balances(api, ctx)
     append_audit(audit, {"event": "balances_after", "rows": balance_after})
     check_balances(balance_before, balance_after, completed, ctx, accept_derived_changes)
     totals = {}
     for item in completed:
         totals[item["currency"]] = str(amount(totals.get(item["currency"], "0")) + amount(item["remaining"]))
-    result = {"moved": completed, "preserved_open_totals": totals, "review": p["review"], "verified_at": utcnow()}
+    result = {"moved": completed, "preserved_open_totals": totals,
+              "review": [{k: v for k, v in i.items() if k != "snapshot"} for i in p["review"]], "verified_at": utcnow()}
     append_audit(audit, {"event": "complete", **result})
     return result
 
@@ -406,10 +424,15 @@ async def run(args):
         except BlockingIOError:
             raise Stop("Another bacs transfer is running") from None
         if args.action == "plan":
-            result = await plan(api)
+            if args.metorik_manifest:
+                from operations.metorik_bacs_evidence import evidence_plan
+                result = await evidence_plan(api, json.loads(args.metorik_manifest.read_text()))
+            else:
+                result = await plan(api)
             private_write(args.output, result)
-            print(json.dumps({**{k: v for k, v in result.items() if k not in ("context", "eligible")},
-                "eligible": [{k: v for k, v in i.items() if k != "snapshot"} for i in result["eligible"]]}))
+            print(json.dumps({**{k: v for k, v in result.items() if k not in ("context", "eligible", "review", "metorik_evidence")},
+                "review": [{k: v for k, v in i.items() if k != "snapshot"} for i in result["review"]],
+                "eligible": [{k: v for k, v in i.items() if k not in ("snapshot", "order_evidence")} for i in result["eligible"]]}))
         else:
             p = json.loads(args.plan.read_text())
             # Existing audit file means prior attempt; never replay blindly.
@@ -422,6 +445,8 @@ def main():
     sub = parser.add_subparsers(dest="action", required=True)
     p = sub.add_parser("plan")
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--metorik-manifest", type=Path,
+                   help="Explicit approved entry/order IDs; verify bacs against live Metorik before selecting")
     a = sub.add_parser("apply")
     a.add_argument("--plan", type=Path, required=True)
     a.add_argument("--expect-sha256", required=True)

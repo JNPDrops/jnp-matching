@@ -461,4 +461,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Keep Stop identity shared with the evidence module when invoked with -m.
+    from operations.bacs_debtor_transfer import main as cli_main
+    cli_main()

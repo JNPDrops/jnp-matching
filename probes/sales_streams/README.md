@@ -74,3 +74,55 @@ blijvend tarief). Dit is hoogstens vermijdbare abonnementslast bij volledige
 vervanging, geen bewezen nettobesparing. Onderhoud, hosting, API-wijzigingen,
 monitoring en herstelwerk tellen mee. Voor deze offline proef is geen nieuwe
 infrastructuur of betaald abonnement aangemaakt.
+
+## Aanvulling: WooCommerce lezen vanuit de bestaande Render-service
+
+`woo_read.py` is een afzonderlijke GET-only client naast de offline proef hierboven.
+Hij wordt niet bij startup uitgevoerd en voegt geen openbare route toe. Hij gebruikt
+het al bestaande projectpakket `httpx==0.28.1`.
+
+Stel uitsluitend op de bestaande `jnp-matching` service in:
+
+- `WOO_BASE_URL`: de canonieke HTTPS-webshop-URL (eventuele WordPress-subdirectory,
+  geen `/wp-admin` of `/wp-json`, geen queryparameters).
+- `WOO_CONSUMER_KEY`: afzonderlijke WooCommerce-consumersleutel.
+- `WOO_CONSUMER_SECRET`: bijbehorend geheim.
+
+Maak de sleutel via WooCommerce > Instellingen > Geavanceerd > REST API aan,
+met beschrijving `JNP Matching leesproef`, toegang **Read/Lezen** en een gebruiker
+met de noodzakelijke orderleestoegang. Gebruik niet de sleutel van Xcore.
+De scope moet in WooCommerce worden gecontroleerd: een GET-test bewijst niet
+of een sleutel ook schrijfrechten heeft. Voer waarden rechtstreeks in Render in,
+nooit in GitHub, screenshots of chat. Beperk de sleutel tot deze service.
+
+Bewaar eerst met Save only. Pas na gecontroleerd samenvoegen/deployen van deze
+code is de client op Render beschikbaar. In de Render Shell, vanuit de repo-root:
+
+```sh
+python probes/sales_streams/woo_read.py --check
+```
+
+Dit doet één GET op orders met alleen ID als aangevraagd veld en toont uitsluitend
+verbindingsstatus, geen orderdetails. Daarna kan een expliciet gekozen venster:
+
+```sh
+python probes/sales_streams/woo_read.py --after 2026-09-01T00:00:00 --before 2026-09-02T00:00:00 --mapping probes/sales_streams/mapping.example.json
+```
+
+Het voorbeeldvenster is geen opdracht voor een live uitlezing. Datumfilters volgen
+WooCommerce-orderaanmaak, niet bankdatum. Controleer de tijdzone en grenssemantiek
+van de winkel voordat perioden boekhoudkundig worden vergeleken.
+
+HTTPS met certificaatcontrole en Basic Auth in de Authorization-header; sleutels
+komen niet in URL's. Redirects worden geweigerd, foutbodies niet gelogd. De bestemming
+is uitsluitend serverconfiguratie, nooit een publiek requestparameter. Sleutels niet
+in de dev-agent zetten. Er is geen aanvraag naar Exact en geen financiële schrijfcode.
+
+Pagina-aantallen, recordaantallen en unieke IDs worden gecontroleerd. Bij meer dan
+20 pagina's standaard, gewijzigde aantallen of incomplete respons wordt geen
+rapport uitgegeven. Dit is geen transactionele snapshot; orders kunnen tijdens de
+uitlezing veranderen. Refunddetails en volledige boekingsvergelijking volgen later.
+
+Officiële referenties:
+- https://woocommerce.com/document/woocommerce-rest-api/
+- https://woocommerce.github.io/woocommerce-rest-api-docs/

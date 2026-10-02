@@ -1,0 +1,5 @@
+{
+  "bacs": {"stream": null, "debtor_code": null, "confirmed": false},
+  "plisio": {"stream": null, "debtor_code": null, "confirmed": false},
+  "cointopay_cc": {"stream": null, "debtor_code": null, "confirmed": false}
+}

@@ -1,0 +1,6 @@
+[
+  {"id":900001,"number":"900001","payment_method":"bacs","status":"completed","currency":"EUR","total":"12.50","refunds":[]},
+  {"id":900002,"number":"900002","payment_method":"plisio","status":"completed","currency":"EUR","total":"20.00","refunds":[]},
+  {"id":900003,"number":"900003","payment_method":"cointopay_cc","status":"completed","currency":"EUR","total":"30.00","refunds":[{"id":900009,"total":"-5.00"}]},
+  {"id":900004,"number":"900004","payment_method":"unknown_demo","status":"completed","currency":"EUR","total":"40.00","refunds":[]}
+]

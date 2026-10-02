@@ -31,6 +31,7 @@ if os.getenv("JNP_MARKER_TEST_SNAPSHOT") == "20261002-A":
                 "$select": "Code,Type,Currency,BankAccountIBAN,IsBlocked",
                 "$filter": "Type eq 12", "$top": "100"
             }))
+            print("JNP_MARKER_TEST_JOURNALS " + json.dumps([{ "code": j.get("Code"), "iban_suffix": str(j.get("BankAccountIBAN") or "")[-4:], "is_blocked": j.get("IsBlocked") } for j in journal_rows]), flush=True)
             selected = [j for j in journal_rows if str(j.get("BankAccountIBAN") or "").replace(" ", "").upper() == iban]
             if len(selected) != 1 or selected[0].get("IsBlocked"):
                 raise ValueError("Expected one usable journal for source IBAN")
@@ -71,7 +72,7 @@ if os.getenv("JNP_MARKER_TEST_SNAPSHOT") == "20261002-A":
             }
             print("JNP_MARKER_TEST_SNAPSHOT " + json.dumps(result, default=str), flush=True)
         except Exception as exc:
-            print("JNP_MARKER_TEST_SNAPSHOT_ERROR " + json.dumps({"error_type": type(exc).__name__, "status": getattr(exc, "status_code", None)}), flush=True)
+            print("JNP_MARKER_TEST_SNAPSHOT_ERROR " + json.dumps({"error_type": type(exc).__name__, "status": getattr(exc, "status_code", None), "reason": str(exc) if isinstance(exc, ValueError) else "Request failure"}), flush=True)
 
     @m.app.on_event("startup")
     async def start_marker_test_snapshot():

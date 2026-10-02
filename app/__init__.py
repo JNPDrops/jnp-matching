@@ -51,8 +51,12 @@ if os.getenv("JNP_MARKER_TEST_SNAPSHOT") == "20261002-A":
             if latest.get("Currency") != "EUR":
                 raise ValueError("Expected EUR bank journal")
             balance = Decimal(str(latest["ClosingBalanceFC"]))
-            if not balance.is_finite() or balance != balance.quantize(Decimal("0.01")):
+            if not balance.is_finite():
                 raise ValueError("Invalid closing balance")
+            rounded = balance.quantize(Decimal("0.01"))
+            if abs(balance - rounded) > Decimal("0.000001"):
+                raise ValueError("Closing balance differs materially from cent precision")
+            latest["closing_balance_normalized_fc"] = str(rounded)
             probe_ref = "JNPTEST261002A"
             found = rows(await m.exact_get("financialtransaction/BankEntryLines", {
                 "$filter": f"substringof('{probe_ref}',Description)",

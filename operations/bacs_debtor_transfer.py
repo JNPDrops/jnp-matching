@@ -22,7 +22,8 @@ import httpx
 
 DIVISION = 3977752
 SOURCE = "100100"
-DESTINATION = "109372"
+DESTINATION = "109372"  # Legacy bacs CLI default. Never change the collective debtor.
+ROUTES = {"bacs": ("109372", "ba"), "plisio": ("109377", "pl")}
 BASE = "https://start.exactonline.nl"
 VERSION = 1
 RESOURCES = {
@@ -140,9 +141,21 @@ class Exact:
         await self.request("PUT", url, payload={"Customer": guid(destination_id)})
 
 
-async def context(api):
+def destination(ctx):
+    method = ctx.get("payment_method", "bacs")
+    require(method in ROUTES, "Payment method is not authorized")
+    code, condition = ROUTES[method]
+    require(ctx["condition"] == {"Code": condition, "Description": method, "PaymentMethod": "B"},
+            "Payment method and Exact condition disagree")
+    require(code in ctx["accounts"], "Destination does not match the authorized route")
+    return code
+
+
+async def context(api, payment_method="bacs"):
+    require(payment_method in ROUTES, "Payment method is not authorized")
+    target, condition_code = ROUTES[payment_method]
     accounts = {}
-    for code in (SOURCE, DESTINATION):
+    for code in (SOURCE, target):
         rows = await api.rows("crm/Accounts", {"$filter": "Code eq " + quoted(code.rjust(18)),
                             "$select": "ID,Code,Name,IsSales,Status"})
         require(len(rows) == 1 and rows[0]["Code"].strip() == code
@@ -150,11 +163,12 @@ async def context(api):
                 f"Existing active sales debtor {code} missing or ambiguous")
         accounts[code] = {k: rows[0][k] for k in ("ID", "Code", "Name")}
         accounts[code]["ID"] = guid(accounts[code]["ID"])
-    require(accounts[SOURCE]["ID"] != accounts[DESTINATION]["ID"], "Debtors must differ")
+    require(accounts[SOURCE]["ID"] != accounts[target]["ID"], "Debtors must differ")
     conditions = await api.rows("cashflow/PaymentConditions", {"$select": "Code,Description,PaymentMethod"})
-    bacs = [r for r in conditions if r["Description"] == "bacs"]
-    require(len(bacs) == 1 and bacs[0]["PaymentMethod"] == "B", "Exact bacs condition missing or ambiguous")
-    return {"accounts": accounts, "condition": bacs[0]}
+    selected = [r for r in conditions if r["Description"] == payment_method]
+    require(selected == [{"Code": condition_code, "Description": payment_method, "PaymentMethod": "B"}],
+            "Exact payment condition missing, changed or ambiguous")
+    return {"accounts": accounts, "condition": selected[0], "payment_method": payment_method}
 
 
 async def snapshot(api, entry_id):
@@ -180,14 +194,15 @@ async def snapshot(api, entry_id):
 
 def eligible(s, ctx, order_evidence=None):
     """Conservative executor subset; all other open bacs sales entries are reported."""
+    destination(ctx)
     h = s["header"]
     source_id = ctx["accounts"][SOURCE]["ID"]
     require(h["Customer"] == source_id, "Debtor is no longer 100100")
     if order_evidence is None:
-        require(h["PaymentCondition"] == ctx["condition"]["Code"], "Sales entry is not bacs")
+        require(h["PaymentCondition"] == ctx["condition"]["Code"], "Sales entry payment condition does not match route")
     else:
         from operations.metorik_bacs_evidence import validate_evidence
-        validate_evidence(s, order_evidence)
+        validate_evidence(s, order_evidence, ctx.get("payment_method", "bacs"), ctx["condition"]["Code"])
     ref = h["YourRef"]
     require(isinstance(ref, str) and re.fullmatch(r"TD[0-9]{4,10}", ref), "Unproven webshop reference")
     require(h["Description"] == "Order TD #" + ref[2:], "Webshop description does not match reference")
@@ -219,7 +234,7 @@ def eligible(s, ctx, order_evidence=None):
 
 
 async def balances(api, ctx):
-    ids = [ctx["accounts"][code]["ID"] for code in (SOURCE, DESTINATION)]
+    ids = [ctx["accounts"][code]["ID"] for code in (SOURCE, destination(ctx))]
     rows = await api.rows("read/financial/ReceivablesList", {
         "$filter": " or ".join(f"AccountId eq guid'{i}'" for i in ids), "$select": OPEN})
     require(all(r["AccountId"] in ids for r in rows), "Balance query returned another debtor")
@@ -234,8 +249,8 @@ def check_balances(before, after, moved_ids, ctx, accept_derived_changes=False):
     for r in expected:
         if (r["EntryNumber"], r["YourRef"]) in wanted:
             require(r["AccountId"] == ctx["accounts"][SOURCE]["ID"], "Unexpected starting debtor")
-            r["AccountId"] = ctx["accounts"][DESTINATION]["ID"]
-            r["AccountCode"] = DESTINATION
+            r["AccountId"] = ctx["accounts"][destination(ctx)]["ID"]
+            r["AccountCode"] = destination(ctx)
         else:
             r["AccountCode"] = r["AccountCode"].strip()
     actual = copy.deepcopy(after)
@@ -260,7 +275,7 @@ def validate_derived_source(s, ctx, order_evidence=None):
     h, c = s["header"], s["cashflow"][0]
     condition = (c["PaymentCondition"], c["PaymentConditionDescription"], c["PaymentMethod"])
     require(condition in (("PP", "Prepaid", "K"),
-                          (ctx["condition"]["Code"], "bacs", "B")), "Unapproved source payment condition")
+                          (ctx["condition"]["Code"], ctx["condition"]["Description"], ctx["condition"]["PaymentMethod"])), "Unapproved source payment condition")
     require(c["PaymentReference"] == f"{SOURCE}/{h['EntryNumber']}", "Custom payment reference requires review")
     for r in s["transactions"]:
         if r["LineNumber"] == 9999:
@@ -271,7 +286,7 @@ def validate_derived_source(s, ctx, order_evidence=None):
 
 def check_after(before, after, ctx, accept_derived_changes=False, order_evidence=None):
     source_id = ctx["accounts"][SOURCE]["ID"]
-    target_id = ctx["accounts"][DESTINATION]["ID"]
+    target_id = ctx["accounts"][destination(ctx)]["ID"]
     expected = copy.deepcopy(before)
     expected["header"]["Customer"] = target_id
     # Audit timestamps are not business invariants.
@@ -283,12 +298,12 @@ def check_after(before, after, ctx, accept_derived_changes=False, order_evidence
             r["Account"] = target_id
     for r in expected["cashflow"]:
         r["Account"] = target_id
-        r["AccountCode"] = DESTINATION
+        r["AccountCode"] = destination(ctx)
     for r in actual["cashflow"]:
         r["AccountCode"] = r["AccountCode"].strip()
     for r in expected["open"]:
         r["AccountId"] = target_id
-        r["AccountCode"] = DESTINATION
+        r["AccountCode"] = destination(ctx)
     for r in actual["open"]:
         r["AccountCode"] = r["AccountCode"].strip()
     expected["related"][0]["Customer"] = target_id
@@ -304,7 +319,7 @@ def check_after(before, after, ctx, accept_derived_changes=False, order_evidence
             condition = ctx["metorik_prepaid_condition"]
         c.update(PaymentCondition=condition["Code"],
                  PaymentConditionDescription=condition["Description"], PaymentMethod=condition["PaymentMethod"],
-                 PaymentReference=f"{DESTINATION}/{before['header']['EntryNumber']}")
+                 PaymentReference=f"{destination(ctx)}/{before['header']['EntryNumber']}")
         hid = actual["open"][0]["HID"]
         require(str(hid).isdigit() and int(hid) > 0, "Invalid regenerated HID")
         expected["open"][0]["HID"] = hid
@@ -316,13 +331,13 @@ def check_after(before, after, ctx, accept_derived_changes=False, order_evidence
     require(expected == actual, "Post-write mismatch: stop and inspect audit; no automatic rollback")
 
 
-async def plan(api):
-    ctx = await context(api)
+async def plan(api, payment_method="bacs"):
+    ctx = await context(api, payment_method)
     source_id = ctx["accounts"][SOURCE]["ID"]
     headers = await api.rows("salesentry/SalesEntries", {
         "$filter": f"Customer eq guid'{source_id}' and PaymentCondition eq {quoted(ctx['condition']['Code'])}", "$select": HEADER})
     require(len({h["EntryID"] for h in headers}) == len(headers), "Duplicate sales entry")
-    result = {"version": VERSION, "division": DIVISION, "source": SOURCE, "destination": DESTINATION,
+    result = {"version": VERSION, "division": DIVISION, "source": SOURCE, "destination": destination(ctx), "payment_method": payment_method,
               "created_at": utcnow(), "context": ctx, "eligible": [], "review": [], "paid_skipped": []}
     for h in sorted(headers, key=lambda r: r["EntryID"]):
         s = await snapshot(api, h["EntryID"])
@@ -342,7 +357,8 @@ async def plan(api):
 def validate_plan(p, expected_sha):
     unsigned = {k: v for k, v in p.items() if k != "plan_sha256"}
     require(p["plan_sha256"] == expected_sha == digest(unsigned), "Plan checksum mismatch")
-    require((p["version"], p["division"], p["source"], p["destination"]) == (VERSION, DIVISION, SOURCE, DESTINATION), "Wrong plan scope")
+    require(p.get("payment_method", "bacs") == p["context"].get("payment_method", "bacs"), "Plan payment method mismatch")
+    require((p["version"], p["division"], p["source"], p["destination"]) == (VERSION, DIVISION, SOURCE, destination(p["context"])), "Wrong plan scope")
     age = (datetime.now(timezone.utc) - datetime.fromisoformat(p["created_at"])).total_seconds()
     require(0 <= age <= 1800, "Plan expired (30 minutes)")
     require(len({i["entry_id"] for i in p["eligible"]}) == len(p["eligible"]), "Duplicate planned entry")
@@ -356,7 +372,9 @@ def append_audit(f, event):
 
 async def apply(api, p, expected_sha, audit, accept_derived_changes=False):
     validate_plan(p, expected_sha)
-    ctx = await context(api)
+    require(p.get("payment_method", "bacs") != "plisio" or "metorik_evidence" in p,
+            "Plisio requires live-verified webshop evidence")
+    ctx = await context(api, p.get("payment_method", "bacs"))
     if "metorik_evidence" in p:
         from operations.metorik_bacs_evidence import verify_again, prepaid_context, item_evidence
         await prepaid_context(api, ctx)
@@ -367,7 +385,7 @@ async def apply(api, p, expected_sha, audit, accept_derived_changes=False):
     else:
         require(all("order_evidence" not in item for item in p["eligible"]),
                 "Order evidence requires a live-verified manifest")
-    require(ctx == p["context"], "Debtors or bacs condition changed")
+    require(ctx == p["context"], "Debtors or payment condition changed")
     completed = []
     append_audit(audit, {"event": "begin", "plan_sha256": expected_sha,
                          "accept_exact_derived_changes": accept_derived_changes})
@@ -388,7 +406,7 @@ async def apply(api, p, expected_sha, audit, accept_derived_changes=False):
         require(before == item["snapshot"], "Entry changed before write")
         append_audit(audit, {"event": "write_intent", "entry_id": item["entry_id"], "before": before})
         try:
-            await api.change_customer(item["entry_id"], ctx["accounts"][DESTINATION]["ID"])
+            await api.change_customer(item["entry_id"], ctx["accounts"][destination(ctx)]["ID"])
             after = await snapshot(api, item["entry_id"])
             append_audit(audit, {"event": "read_after_write", "entry_id": item["entry_id"], "after": after})
             check_after(before, after, ctx, accept_derived_changes, item.get("order_evidence"))
@@ -426,9 +444,10 @@ async def run(args):
         if args.action == "plan":
             if args.metorik_manifest:
                 from operations.metorik_bacs_evidence import evidence_plan
-                result = await evidence_plan(api, json.loads(args.metorik_manifest.read_text()))
+                result = await evidence_plan(api, json.loads(args.metorik_manifest.read_text()), args.payment_method)
             else:
-                result = await plan(api)
+                require(args.payment_method == "bacs", "Plisio requires verified webshop evidence")
+                result = await plan(api, args.payment_method)
             private_write(args.output, result)
             print(json.dumps({**{k: v for k, v in result.items() if k not in ("context", "eligible", "review", "metorik_evidence")},
                 "review": [{k: v for k, v in i.items() if k != "snapshot"} for i in result["review"]],
@@ -445,6 +464,7 @@ def main():
     sub = parser.add_subparsers(dest="action", required=True)
     p = sub.add_parser("plan")
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--payment-method", choices=tuple(ROUTES), default="bacs")
     p.add_argument("--metorik-manifest", type=Path,
                    help="Explicit approved entry/order IDs; verify bacs against live Metorik before selecting")
     a = sub.add_parser("apply")

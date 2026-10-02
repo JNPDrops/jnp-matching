@@ -55,7 +55,57 @@ def plan(ctx, s):
     return p
 
 
+def regeneration_fixture():
+    ctx, s = fixture()
+    s["header"]["DueDate"] = "/Date(1790812800000)/"
+    s["cashflow"][0].update(ID="00000000-0000-0000-0000-000000000004",
+        EntryID="00000000-0000-0000-0000-000000000005", PaymentReference="100100/1",
+        PaymentConditionDescription="Prepaid", PaymentMethod="K", DueDate=s["header"]["DueDate"])
+    for i, r in enumerate(s["transactions"]):
+        r.update(LineNumber=i, DueDate=s["header"]["DueDate"])
+    s["transactions"][1]["AmountFC"] = -100
+    s["transactions"].append({**s["transactions"][1], "ID": "txvat", "LineNumber": 9999, "AmountFC": -21})
+    a = transferred(s)
+    a["cashflow"][0].update(ID="00000000-0000-0000-0000-000000000006",
+        EntryID="00000000-0000-0000-0000-000000000007", PaymentCondition="ba",
+        PaymentConditionDescription="bacs", PaymentMethod="B", PaymentReference="109372/1")
+    a["open"][0]["HID"] = "3"
+    a["transactions"][2]["DueDate"] = None
+    return ctx, s, a
+
+
 class SelectionTests(unittest.TestCase):
+    def test_observed_regeneration_requires_explicit_approval(self):
+        ctx, s, a = regeneration_fixture()
+        with self.assertRaises(m.Stop): m.check_after(s, a, ctx)
+        m.check_after(s, a, ctx, accept_derived_changes=True)
+
+    def test_approval_does_not_allow_business_or_linkage_changes(self):
+        mutations = [
+            lambda a: a["header"].update(DueDate=None),
+            lambda a: a["transactions"][0].update(DueDate=None),
+            lambda a: a["lines"][0].update(VATAmountFC=20),
+            lambda a: a["cashflow"][0].update(TransactionID="other"),
+            lambda a: a["cashflow"][0].update(PaymentReference="109372/WRONG"),
+            lambda a: a["open"][0].update(YourRef="TD99999"),
+            lambda a: a["open"][0].update(Amount=120),
+            lambda a: a["cashflow"][0].update(ID=None),
+        ]
+        for mutate in mutations:
+            ctx, s, a = regeneration_fixture()
+            mutate(a)
+            with self.assertRaises(m.Stop): m.check_after(s, a, ctx, True)
+
+    def test_only_selected_hid_can_change_in_global_check(self):
+        ctx, s, a = regeneration_fixture()
+        item = m.eligible(s, ctx)
+        other = {**s["open"][0], "HID": "2", "EntryNumber": 2, "YourRef": "OTHER"}
+        before, after = s["open"] + [other], a["open"] + [copy.deepcopy(other)]
+        m.check_balances(before, after, [item], ctx, True)
+        after[1]["HID"] = "4"
+        with self.assertRaises(m.Stop): m.check_balances(before, after, [item], ctx, True)
+        with self.assertRaises(m.Stop): m.check_balances(before, a["open"] * 2 + [other], [item], ctx, True)
+
     def test_sales_header_bacs_is_authoritative_even_if_receivable_prepaid(self):
         ctx, s = fixture()
         self.assertEqual(m.eligible(s, ctx)["receivable_condition"], "PP")
@@ -116,6 +166,32 @@ class SelectionTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approved_regeneration_is_verified_and_logged(self):
+        ctx, s, a = regeneration_fixture()
+        p, api = plan(ctx, s), AsyncMock()
+        with tempfile.TemporaryFile(mode="w+") as audit, \
+             patch.object(m, "context", AsyncMock(return_value=ctx)), \
+             patch.object(m, "balances", AsyncMock(side_effect=[s["open"], a["open"]])), \
+             patch.object(m, "snapshot", AsyncMock(side_effect=[s, s, a, a])):
+            result = await m.apply(api, p, p["plan_sha256"], audit, True)
+            self.assertEqual(len(result["moved"]), 1)
+            api.change_customer.assert_awaited_once_with(ENTRY, DST)
+            audit.seek(0)
+            events = [json.loads(line) for line in audit]
+            self.assertTrue(events[0]["accept_exact_derived_changes"])
+            self.assertEqual(events[-1]["event"], "complete")
+
+    async def test_custom_reference_blocks_before_any_write(self):
+        ctx, s, _ = regeneration_fixture()
+        s["cashflow"][0]["PaymentReference"] = "CUSTOM"
+        p, api = plan(ctx, s), AsyncMock()
+        with tempfile.TemporaryFile(mode="w+") as audit, \
+             patch.object(m, "context", AsyncMock(return_value=ctx)), \
+             patch.object(m, "balances", AsyncMock(return_value=s["open"])), \
+             patch.object(m, "snapshot", AsyncMock(return_value=s)):
+            with self.assertRaises(m.Stop): await m.apply(api, p, p["plan_sha256"], audit, True)
+            api.change_customer.assert_not_awaited()
+
     async def test_success_and_replay_never_double_apply(self):
         ctx, s = fixture()
         p = plan(ctx, s)

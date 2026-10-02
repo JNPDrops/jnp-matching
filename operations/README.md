@@ -6,7 +6,8 @@ matchinginstellingen, Xcore en DIRECT_WOO_BANK worden niet veranderd.
 
 De **betalingsconditie van de verkoopboeking** is bepalend. De unieke Exact-conditie
 met omschrijving exact `bacs` wordt opgezocht. Een oudere `PP`-conditie op de
-cashflowpost sluit de boeking niet uit en wordt niet opzettelijk gewijzigd.
+cashflowpost sluit de boeking niet uit. Exact kan die afgeleide conditie bij een
+Customer-wijziging opnieuw opbouwen; zie de expliciete goedkeuringsoptie hieronder.
 Alle bacs-verkoopboekingen op 100100 worden volledig gepagineerd opgehaald,
 zonder datumfilter. Werkelijke restbedragen komen uit Exact ReceivablesList,
 gecontroleerd tegen Cashflow Receivables. Geen Metorik of WooCommerce.
@@ -49,6 +50,29 @@ Na iedere PUT moeten verkoopboeking, verkoopregels, financiële regels, cashflow
 en openstaande post overeenkomen met het vooraf vastgelegde beeld, met alleen
 de verwachte debiteurwijzigingen. Bedragen, btw, referenties, betalingscondities,
 valuta, vervaldata en overige gecontroleerde velden moeten gelijk blijven.
+
+### Goedgekeurde Exact-nevenwijzigingen
+
+De eerste live uitvoering stopte terecht: Exact regenereerde aanvullende velden.
+Op 3 oktober 2026 is expliciet toestemming gegeven om de resterende omzettingen
+met deze nevenwijzigingen af te maken. Gebruik daarvoor bij `apply` de optie
+`--accept-exact-derived-changes`. Deze keuze wordt in de audit opgeslagen en
+staat standaard uit. Alleen de volgende extra veranderingen zijn toegestaan:
+
+- Nieuwe cashflow-ID/EntryID en HID van de geselecteerde openstaande post.
+  Koppelingen naar de verkoopboeking en financiële transactieregel blijven gelijk.
+- Cashflowconditie exact `bacs` (code van de unieke conditie, methode B).
+  Vooraf moet de conditie bacs of PP/Prepaid/K zijn.
+- Het gegenereerde betalingskenmerk `100100/BOEKING` wordt `109372/BOEKING`.
+  Een afwijkend eigen kenmerk blokkeert vóór de eerste PUT.
+- Alleen op de btw-samenvattingsregel 9999 mag de vervaldatum leeg worden;
+  het regelbedrag moet het tegengestelde van het btw-totaal zijn. Factuur-,
+  debiteuren- en overige vervaldata blijven strikt gelijk.
+
+Er worden geen extra velden naar Exact geschreven: de PUT blijft Customer-only.
+Bedragen, btw, verkoopregels, valuta, order-/factuurreferenties en alle overige
+gecontroleerde gegevens moeten ook met deze optie gelijk blijven.
+
 Daarnaast wordt de volledige open-postenpopulatie van beide debiteuren voor en
 na vergeleken. Gelijktijdige Xcore/gebruikerswijzigingen kunnen deze globale
 controle laten stoppen; onderzoek dan de audit en herhaal geen PUT blind.

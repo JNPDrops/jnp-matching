@@ -113,3 +113,25 @@ PP blijft PP; de nacontrole verwacht dat Exact de opnieuw gegenereerde cashflow 
 de ongewijzigde verkoopconditie koppelt. `--accept-exact-derived-changes` blijft
 nodig voor de expliciet goedgekeurde nevenwijzigingen. Dit voegt geen automatische
 verwerking, webhook, Plisio-route, infrastructuur of aflettering toe.
+
+## Plisio, dezelfde controles
+
+Dezelfde executor ondersteunt nu de vaste routes `bacs → 109372` en
+`plisio → 109377`, steeds uitsluitend vanaf 100100 in administratie 3977752.
+De bestemmingsdebiteur wordt live uniek en actief gecontroleerd; een route kan
+niet via het plan naar een willekeurig rekeningnummer worden omgebogen.
+Plisio vereist expliciete, opnieuw live gelezen Metorik-orderbewijzen. De
+verkoopconditie mag PP/Prepaid of pl/plisio zijn. Een PP-header blijft PP; alleen
+Customer wordt geschreven. De afgeleide referentie gebruikt doel 109377.
+
+```sh
+python -m operations.bacs_debtor_transfer plan --payment-method plisio \
+  --metorik-manifest /tmp/plisio-manifest.json --output /tmp/plisio-plan.json
+python -m operations.bacs_debtor_transfer apply \
+  --plan /tmp/plisio-plan.json --expect-sha256 SHA_UIT_HET_PLAN \
+  --audit /tmp/plisio-audit.jsonl --accept-exact-derived-changes
+```
+
+Dit voegt nog geen automatische verwerking toe. Voor lange shelluitvoeringen
+kan het bestaande CLI-proces los van de webterminal draaien; controleer altijd
+de exclusieve audit, lock en complete-event voordat een poging wordt herhaald.

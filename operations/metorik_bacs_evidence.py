@@ -90,19 +90,20 @@ async def read_orders(manifest):
     return {"manifest": manifest, "store": store, "orders": orders}
 
 
-def validate_evidence(snapshot, evidence):
+def validate_evidence(snapshot, evidence, payment_method="bacs", condition_code="ba"):
+    m.require(payment_method in m.ROUTES and m.ROUTES[payment_method][1] == condition_code, "Unauthorized evidence route")
     h = snapshot["header"]
     m.require(evidence["entry_id"] == h["EntryID"] and evidence["reference"] == h["YourRef"],
               "Order evidence belongs to another sales entry")
     order = evidence["order"]
     m.require(type(order["order_id"]) is int and order["order_id"] == evidence["order_id"]
               and order["order_number"] == "#" + h["YourRef"][2:]
-              and order["payment_method"] == "bacs", "Order is not proven bacs")
+              and order["payment_method"] == payment_method, "Order payment method does not match route")
     m.require(order["currency"] == h["Currency"] == "EUR"
               and m.amount(order["total_refunds"]) == 0
               and order["status"] in ("completed", "processing", "on-hold", "pending"),
               "Order currency/refund/status requires review")
-    m.require(h["PaymentCondition"] in ("PP", "ba"), "Unreviewed Exact payment condition")
+    m.require(h["PaymentCondition"] in ("PP", condition_code), "Unreviewed Exact payment condition")
     match = re.fullmatch(r"/Date\((-?\d+)\)/", h["EntryDate"])
     m.require(match is not None, "Invalid Exact entry date")
     exact_date = datetime.fromtimestamp(int(match[1]) / 1000, timezone.utc).date()
@@ -133,12 +134,12 @@ def item_evidence(evidence, entry_id):
     return {**row, "order": evidence["orders"]["#" + row["reference"][2:]]}
 
 
-async def evidence_plan(api, manifest):
+async def evidence_plan(api, manifest, payment_method="bacs"):
     evidence = await read_orders(manifest)
-    ctx = await m.context(api)
+    ctx = await m.context(api, payment_method)
     await prepaid_context(api, ctx)
     result = {"version": m.VERSION, "division": m.DIVISION, "source": m.SOURCE,
-        "destination": m.DESTINATION, "created_at": m.utcnow(), "context": ctx,
+        "destination": m.destination(ctx), "payment_method": payment_method, "created_at": m.utcnow(), "context": ctx,
         "metorik_evidence": evidence, "eligible": [], "review": [], "paid_skipped": []}
     for row in evidence["manifest"]:
         s = await m.snapshot(api, row["entry_id"])

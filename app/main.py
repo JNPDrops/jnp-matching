@@ -38,7 +38,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="1.6.1")
+app = FastAPI(title="JNP Matching", version="1.7.0")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -757,6 +757,139 @@ async def candidate_detail(bank_line_id: str) -> dict[str, Any]:
     }
 
 
+async def classify_direct_woo_bank(bank: dict[str, Any]) -> dict[str, Any]:
+    """Read-only classifier for direct WooCommerce customer bank receipts.
+
+    This is intentionally one payment-method handler. Future PSP/payment methods
+    can be added as separate handlers without changing this contract.
+    """
+    description = str(bank.get("Description") or "")
+    amount = money(bank.get("AmountDC"))
+    upper = description.upper()
+
+    base = {
+        "payment_method": "DIRECT_WOO_BANK",
+        "handler": "direct_woo_bank_v1",
+        "confidence": "NO_MATCH",
+        "eligible_for_reimport_enrichment": False,
+        "reason": "",
+        "order_number": None,
+        "expected_ref": None,
+        "receivable_entry": None,
+        "receivable_amount": None,
+        "account_code": None,
+        "account_name": None,
+    }
+
+    if amount <= Decimal("0.00"):
+        base["reason"] = "Geen positieve bankontvangst."
+        return base
+    if "PAYNETICS" in upper:
+        base["reason"] = "Paynetics/PSP-uitbetaling valt expliciet buiten DIRECT_WOO_BANK."
+        return base
+
+    order_no = extract_order_number(description)
+    if not order_no:
+        base["reason"] = "Geen WooCommerce-ordernummer herkenbaar in de bankomschrijving."
+        return base
+
+    expected_ref = f"{ORDER_REF_PREFIX}{order_no}"
+    base["order_number"] = order_no
+    base["expected_ref"] = expected_ref
+
+    recs = await find_receivable(order_no)
+    if len(recs) == 0:
+        base["confidence"] = "REVIEW"
+        base["reason"] = f"Geen openstaande post gevonden voor {expected_ref}."
+        return base
+    if len(recs) > 1:
+        base["confidence"] = "REVIEW"
+        base["reason"] = f"Meerdere openstaande posten gevonden voor {expected_ref}."
+        return base
+
+    rec = recs[0]
+    rec_amount = money(rec.get("Amount"))
+    account_code = str(rec.get("AccountCode") or "").strip()
+    base.update(
+        receivable_entry=rec.get("EntryNumber"),
+        receivable_amount=str(rec_amount),
+        account_code=account_code,
+        account_name=rec.get("AccountName") or "",
+    )
+
+    if account_code != COLLECTIVE_DEBTOR_CODE:
+        base["confidence"] = "REVIEW"
+        base["reason"] = f"Openstaande post staat op {account_code or 'onbekend'}, niet {COLLECTIVE_DEBTOR_CODE}."
+        return base
+    if amount != rec_amount:
+        base["confidence"] = "REVIEW"
+        base["reason"] = f"Bedrag wijkt af: bank {amount} vs openstaand {rec_amount}."
+        return base
+
+    base["confidence"] = "HARD_MATCH"
+    base["eligible_for_reimport_enrichment"] = True
+    base["reason"] = "Unieke TD-referentie, verzameldebiteur en bedrag komen exact overeen."
+    return base
+
+
+async def reimport_enrichment_dry_run(bank_line_id: str) -> dict[str, Any]:
+    """Read-only phase-1 plan for enriched reimport of one existing bank line.
+
+    No bank entry is deleted, recreated, imported or matched. The endpoint only
+    proves classification and the metadata that a later import adapter should
+    inject once the supported Exact import mapping has been validated.
+    """
+    bank = await bank_line_by_id(bank_line_id)
+    classification = await classify_direct_woo_bank(bank)
+
+    proposed = None
+    if classification["confidence"] == "HARD_MATCH":
+        proposed = {
+            "target_account_code": COLLECTIVE_DEBTOR_CODE,
+            "matching_reference": classification["expected_ref"],
+            "receivable_entry": classification["receivable_entry"],
+            "preserve_bank_amount": str(money(bank.get("AmountDC"))),
+            "preserve_original_description": str(bank.get("Description") or ""),
+            "import_field_mapping": "RESEARCH_REQUIRED",
+            "note": (
+                "Dit is alleen de semantische verrijking. Het exacte CAMT/importveld "
+                "waarmee Exact deze referentie tijdens import gebruikt, moet eerst "
+                "officieel worden gevalideerd."
+            ),
+        }
+
+    return {
+        "read_only": True,
+        "writes_executed": False,
+        "phase": "REIMPORT_ENRICHMENT_DRY_RUN",
+        "original_bank_line": {
+            "id": bank.get("ID"),
+            "entry_id": bank.get("EntryID"),
+            "entry_number": bank.get("EntryNumber"),
+            "line_number": bank.get("LineNumber"),
+            "date": bank.get("Date"),
+            "description": bank.get("Description"),
+            "amount_dc": str(money(bank.get("AmountDC"))),
+            "account_code": bank.get("AccountCode"),
+            "gl_account_code": bank.get("GLAccountCode"),
+            "our_ref": bank.get("OurRef"),
+        },
+        "classification": classification,
+        "proposed_enrichment": proposed,
+        "reimport_gate": {
+            "ready_for_format_research": classification["confidence"] == "HARD_MATCH",
+            "ready_for_financial_write": False,
+            "delete_original_allowed": False,
+            "reimport_allowed": False,
+            "reason": "Eerst het ondersteunde Exact-importformaat en de idempotency/saldocontroles bewijzen.",
+        },
+        "writes_enabled": {
+            "order_rule": ENABLE_ORDER_RULE_WRITES,
+            "direct_match": ENABLE_DIRECT_MATCH_WRITES,
+        },
+    }
+
+
 async def run_legacy_dry_run(limit: int = 100) -> list[dict[str, Any]]:
     rows = []
     for bank in await bank_lines_on_suspense(limit):
@@ -920,7 +1053,7 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "version": "1.6.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
+    return {"ok": True, "division": DIVISION, "version": "1.7.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -982,11 +1115,19 @@ async def api_bank_line_diagnostic(bank_line_id: str, receivable_entry: int | No
     return await diagnose_bank_line(bank_line_id, receivable_entry)
 
 
+@app.get("/api/reimport/dry-run/{bank_line_id}")
+async def api_reimport_dry_run(bank_line_id: str):
+    """Read-only enriched-reimport plan for one exact BankEntryLine."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", bank_line_id):
+        raise HTTPException(400, "Ongeldige bankregel-GUID.")
+    return await reimport_enrichment_dry_run(bank_line_id)
+
+
 @app.get("/api/safety")
 async def api_safety():
     """Expose only non-secret safety state for automated regression checks."""
     return {
-        "version": "1.6.0",
+        "version": "1.7.0",
         "division": DIVISION,
         "suspense_gl_code": SUSPENSE_GL_CODE,
         "collective_debtor_code": COLLECTIVE_DEBTOR_CODE,

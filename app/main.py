@@ -890,6 +890,89 @@ async def reimport_enrichment_dry_run(bank_line_id: str) -> dict[str, Any]:
     }
 
 
+async def reimport_field_mapping_research(bank_line_id: str) -> dict[str, Any]:
+    """Read-only phase-2 evidence for an enriched bank-statement reimport.
+
+    Important: Exact Online documents the matching concepts (payment reference,
+    Our ref., amount, booking date, relation), but public documentation does not
+    currently prove a one-to-one CAMT.053 XML tag mapping for this tenant.
+    Therefore candidate CAMT tags are kept explicitly unverified.
+    """
+    plan = await reimport_enrichment_dry_run(bank_line_id)
+    cls = plan.get("classification") or {}
+
+    candidates = [
+        {
+            "semantic": "payment_reference",
+            "camt_candidate": "RmtInf/Strd/CdtrRefInf/Ref",
+            "verification": "UNVERIFIED_FOR_EXACT_ONLINE",
+            "value_for_golden_test": cls.get("expected_ref"),
+            "why_candidate": "ISO 20022 structured creditor reference; Exact Online documents payment reference as a matching criterion.",
+        },
+        {
+            "semantic": "end_to_end_id",
+            "camt_candidate": "Refs/EndToEndId",
+            "verification": "UNVERIFIED_FOR_EXACT_ONLINE",
+            "value_for_golden_test": cls.get("expected_ref"),
+            "why_candidate": "Common SEPA transaction identifier; Exact ecosystems use end-to-end/reference data for reconciliation, but the Exact Online import mapping must be proven.",
+        },
+        {
+            "semantic": "unstructured_remittance",
+            "camt_candidate": "RmtInf/Ustrd",
+            "verification": "UNVERIFIED_FOR_EXACT_ONLINE",
+            "value_for_golden_test": cls.get("expected_ref"),
+            "why_candidate": "Could expose TD reference in bank narrative/remittance; not sufficient evidence that Exact maps it to Our ref. or payment reference.",
+        },
+    ]
+
+    return {
+        "read_only": True,
+        "writes_executed": False,
+        "phase": "REIMPORT_FIELD_MAPPING_RESEARCH",
+        "bank_line_id": bank_line_id,
+        "golden_case": {
+            "payment_method": cls.get("payment_method"),
+            "confidence": cls.get("confidence"),
+            "order_number": cls.get("order_number"),
+            "expected_ref": cls.get("expected_ref"),
+            "receivable_entry": cls.get("receivable_entry"),
+            "target_account_code": cls.get("account_code"),
+            "amount": cls.get("receivable_amount"),
+        },
+        "exact_online_matching_evidence": {
+            "documented_order": [
+                "user allocation rules",
+                "payment reference + amount",
+                "Our ref. + amount",
+                "booking date + amount",
+                "known relation bank account",
+            ],
+            "supported_conclusion": (
+                "Exact Online can allocate/match during bank import when reference metadata is recognised, "
+                "but the public documentation reviewed so far does not identify the exact CAMT.053 XML tag "
+                "that becomes Payment reference or Our ref. for this administration."
+            ),
+        },
+        "camt_field_candidates": candidates,
+        "recommended_next_experiment": {
+            "type": "NON_PRODUCTION_FILE_IMPORT_TEST",
+            "financial_write_allowed": False,
+            "instructions": (
+                "Create synthetic CAMT variants that differ only in one candidate reference tag, then import "
+                "only in a safe test administration or other non-production context. Compare Exact's imported "
+                "Payment reference/Our ref. fields and matching result. Do not delete or reimport production "
+                "bank entry 26205149 until one mapping is proven and duplicate/saldo controls are validated."
+            ),
+        },
+        "reimport_gate": {
+            "ready_for_financial_write": False,
+            "delete_original_allowed": False,
+            "reimport_allowed": False,
+            "field_mapping_proven": False,
+        },
+    }
+
+
 async def run_legacy_dry_run(limit: int = 100) -> list[dict[str, Any]]:
     rows = []
     for bank in await bank_lines_on_suspense(limit):
@@ -1121,6 +1204,14 @@ async def api_reimport_dry_run(bank_line_id: str):
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", bank_line_id):
         raise HTTPException(400, "Ongeldige bankregel-GUID.")
     return await reimport_enrichment_dry_run(bank_line_id)
+
+
+@app.get("/api/reimport/field-mapping/{bank_line_id}")
+async def api_reimport_field_mapping(bank_line_id: str):
+    """Read-only phase-2 research result for Exact Online import field mapping."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", bank_line_id):
+        raise HTTPException(400, "Ongeldige bankregel-GUID.")
+    return await reimport_field_mapping_research(bank_line_id)
 
 
 @app.get("/api/safety")

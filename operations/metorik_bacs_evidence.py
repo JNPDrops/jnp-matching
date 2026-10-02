@@ -61,27 +61,31 @@ async def read_orders(manifest):
                             "currency": "EUR", "platform": "woocommerce"}, "Unexpected Metorik store")
         wanted = {"#" + r["reference"][2:]: r for r in manifest}
         orders = {}
-        for page in range(1, 11):
-            body = await get("/orders", {"page": page, "per_page": 100,
-                "filters": json.dumps([{"field": "order_number", "operator": "in", "value": list(wanted)}])})
-            rows, pg = body.get("data"), body.get("pagination")
-            m.require(isinstance(rows, list) and isinstance(pg, dict)
-                and pg.get("current_page") == page and pg.get("per_page") == 100
-                and type(pg.get("has_more_pages")) is bool and len(rows) <= 100,
-                "Invalid Metorik pagination")
-            for raw in rows:
-                # Do not store personal customer details returned by the API.
-                row = {k: raw.get(k) for k in FIELDS}
-                number = row["order_number"]
-                m.require(number in wanted and number not in orders
-                          and row["order_id"] == wanted[number]["order_id"],
-                          "Metorik order mapping missing, changed or ambiguous")
-                orders[number] = row
-            if not pg["has_more_pages"]:
-                break
-            m.require(bool(rows), "Empty intermediate Metorik page")
-        else:
-            raise m.Stop("Incomplete Metorik pagination")
+        numbers = list(wanted)
+        # Live Metorik validation limits an in-filter to 25 values.
+        for offset in range(0, len(numbers), 25):
+            batch_numbers = numbers[offset:offset + 25]
+            for page in range(1, 11):
+                body = await get("/orders", {"page": page, "per_page": 100,
+                    "filters": json.dumps([{"field": "order_number", "operator": "in", "value": batch_numbers}])})
+                rows, pg = body.get("data"), body.get("pagination")
+                m.require(isinstance(rows, list) and isinstance(pg, dict)
+                    and pg.get("current_page") == page and pg.get("per_page") == 100
+                    and type(pg.get("has_more_pages")) is bool and len(rows) <= 100,
+                    "Invalid Metorik pagination")
+                for raw in rows:
+                    # Do not store personal customer details returned by the API.
+                    row = {k: raw.get(k) for k in FIELDS}
+                    number = row["order_number"]
+                    m.require(number in batch_numbers and number not in orders
+                              and row["order_id"] == wanted[number]["order_id"],
+                              "Metorik order mapping missing, changed or ambiguous")
+                    orders[number] = row
+                if not pg["has_more_pages"]:
+                    break
+                m.require(bool(rows), "Empty intermediate Metorik page")
+            else:
+                raise m.Stop("Incomplete Metorik pagination")
         m.require(set(orders) == set(wanted), "Metorik did not return every approved order")
     return {"manifest": manifest, "store": store, "orders": orders}
 

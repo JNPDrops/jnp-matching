@@ -59,6 +59,31 @@ class EvidenceTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_reader_batches_more_than_25_order_numbers(self):
+        from uuid import UUID
+        import json
+        _, _, _, ev = evidence_fixture()
+        manifest = [{"entry_id": str(UUID(int=i)), "reference": "TD" + str(12000+i), "order_id": i} for i in range(1,28)]
+        store = {"name": "TheDrops.eu", "timezone": "Europe/Amsterdam", "currency": "EUR", "platform": "woocommerce"}
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        def respond(url, params=None):
+            if params is None:
+                body = store
+            else:
+                numbers = json.loads(params["filters"])[0]["value"]
+                self.assertLessEqual(len(numbers), 25)
+                rows = [{**ev["order"], "order_id": r["order_id"], "order_number": "#"+r["reference"][2:]} for r in manifest if "#"+r["reference"][2:] in numbers]
+                body = {"data": rows, "pagination": {"current_page": 1, "per_page": 100, "has_more_pages": False}}
+            return Mock(status_code=200, json=Mock(return_value=body))
+        client.get.side_effect = respond
+        with patch.dict(e.os.environ, {"METORIK_API_KEY": "unit-test-only"}), \
+             patch.object(e.httpx, "AsyncClient", return_value=client), \
+             patch.object(e.asyncio, "sleep", AsyncMock()):
+            result = await e.read_orders(manifest)
+        self.assertEqual(len(result["orders"]), 27)
+        self.assertEqual(client.get.await_count, 3)
+
     async def test_live_reader_rejects_duplicate_missing_and_wrong_order_ids(self):
         _, _, _, ev = evidence_fixture()
         manifest = [{k: ev[k] for k in ("entry_id", "reference", "order_id")}]

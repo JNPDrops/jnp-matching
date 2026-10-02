@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import asyncio
 from typing import Any
 
 import httpx
@@ -12,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from openai import OpenAI
 
-app = FastAPI(title="JNP Development Agent", version="1.2.0")
+app = FastAPI(title="JNP Development Agent", version="1.5.0")
 
 TARGET_URL = os.getenv("TARGET_URL", "https://jnp-matching.onrender.com").rstrip("/")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "JNPDrops/jnp-matching")
@@ -39,6 +40,31 @@ FORBIDDEN_CHANGED_LINE_PATTERNS = [
     r"/execute",
     r"build_direct_match_xml",
 ]
+
+STARTUP_SELFTEST = os.getenv("STARTUP_SELFTEST", "true").lower() == "true"
+STARTUP_SELFTEST_DELAY_SECONDS = int(os.getenv("STARTUP_SELFTEST_DELAY_SECONDS", "8"))
+
+
+async def _startup_selftest_runner() -> None:
+    """Run the full read-only regression suite after each agent deployment.
+
+    Results are emitted as a single JSON log line so Render logs become the
+    canonical place to verify deployments without requiring a browser click.
+    Financial write flags are only read/validated by run_regression_tests().
+    """
+    await asyncio.sleep(max(0, STARTUP_SELFTEST_DELAY_SECONDS))
+    try:
+        result = await run_regression_tests()
+        print("JNP_STARTUP_SELFTEST " + json.dumps(result, ensure_ascii=False, default=str), flush=True)
+    except Exception as exc:
+        print("JNP_STARTUP_SELFTEST_ERROR " + json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), flush=True)
+
+
+@app.on_event("startup")
+async def startup_selftest() -> None:
+    if STARTUP_SELFTEST:
+        asyncio.create_task(_startup_selftest_runner())
+
 
 
 def _github_headers() -> dict[str, str]:

@@ -38,7 +38,7 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="1.6.0")
+app = FastAPI(title="JNP Matching", version="1.6.1")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -352,7 +352,7 @@ async def bank_entry_by_id(entry_id: str) -> dict[str, Any] | None:
     We deliberately use $top=1 without guessing a field list, because Exact's
     BankEntries field set varies across API revisions. This endpoint never writes.
     """
-    params = {"$filter": f"ID eq guid'{entry_id}'", "$top": "1"}
+    params = {"$filter": f"EntryID eq guid'{entry_id}'", "$top": "1"}
     rows = _extract_results(await exact_get("financialtransaction/BankEntries", params))
     return rows[0] if rows else None
 

@@ -135,3 +135,55 @@ python -m operations.bacs_debtor_transfer apply \
 Dit voegt nog geen automatische verwerking toe. Voor lange shelluitvoeringen
 kan het bestaande CLI-proces los van de webterminal draaien; controleer altijd
 de exclusieve audit, lock en complete-event voordat een poging wordt herhaald.
+
+## Automatisch verwerken van nieuwe boekingen
+
+`operations.automatic_debtor_routing` draait in de bestaande FastAPI-service,
+zonder extra Render-service, cronjob of webhook. De controle start iedere vijf
+minuten na afloop van de vorige controle; API-verwerking kan extra tijd kosten.
+Dit is polling, geen onmiddellijke Exact-eventcallback.
+
+De bestendige controlerij staat standaard uit. Een operator activeert eenmaal
+met een expliciet UTC-starttijdstip van maximaal een uur geleden. Alleen daarna
+in Exact aangemaakte verkoopboekingen op 100100 worden gevolgd, ongeacht hun
+factuurdatum. Overlappende Modified-scans en een wachtrij voorkomen dat een
+herstart of vertraagde Metorik-import een boeking overslaat. Ontbrekende orders
+worden opnieuw alleen-lezen gezocht; andere betaalmethoden worden overgeslagen.
+Een unieke live webshopkoppeling, originele bedragen en de bestaande volledige
+open-postcontroles zijn verplicht. Deelbetalingen en onduidelijke posten gaan
+naar beoordeling; zij worden niet automatisch gewijzigd.
+
+De bestaande PostgreSQL-database bewaart controlestatus, wachtrij en audit in
+`jnp_debtor_route_*`. Een databasebrede advisory lock en de lokale executorlock
+voorkomen gelijktijdige runs, ook bij een deployment. Vóór iedere PUT wordt het
+voorgenomen schrijfwerk bestendig opgeslagen. Zonder complete nacontrole blijft
+de post onzeker en stopt de automatisering, ook na herstart. Geen automatische
+herhaling van een onzekere PUT. De audit bevat voor/na-beelden van de geselecteerde
+boeking; globale controlemomenten bewaren aantallen, saldi en SHA256's.
+
+```sh
+python -m operations.automatic_debtor_routing enable --since 2026-10-03T00:00:00+00:00
+python -m operations.automatic_debtor_routing status
+python -m operations.automatic_debtor_routing pause
+```
+
+Kies bij enable het actuele afgesproken startmoment, niet het voorbeeld hierboven.
+`run-once` gebruikt dezelfde permanente instelling, locks en controles. Het is
+geen mogelijkheid om een gepauzeerde of onzekere verwerking te forceren. Herstel
+na een onzekere uitkomst vereist onderzoek van de audit en afzonderlijke actie.
+De publieke healthcontrole toont alleen ingeschakeld/status/laatste scantijd,
+geen boekingen, bedragen of geheimen. Bestaande matchingflags blijven ongewijzigd.
+
+### Afzonderlijk beoordeelde orderkoppeling bij centverschillen
+
+De operator kan één concreet entry-ID toevoegen met `--reviewed-line-link ID`.
+Dit is uitsluitend voor een vooraf onderzochte afwijking van maximaal twee cent,
+met dezelfde unieke orderidentiteit, datum, valuta, betaalmethode en openstatus.
+Het live orderbewijs bevat dan bovendien productregels, korting en verzendwijze.
+Alle artikelcodes, aantallen, nettobedragen en btw moeten exact aan unieke Exact-
+regels aansluiten; de korting en verzendomschrijving moeten eveneens aansluiten.
+De Exact-regels moeten het oorspronkelijke Exact-totaal en btw-totaal reproduceren.
+De controlegegevens worden vóór uitvoering opnieuw bij Metorik gelezen. Dit
+wijzigt geen enkel bedrag en verklaart de oorzaak van het centverschil niet.
+Een centverschil alleen is nooit voldoende bewijs. De automatische verwerking
+gebruikt deze optie niet en blijft afwijkende bedragen voor beoordeling apart zetten.

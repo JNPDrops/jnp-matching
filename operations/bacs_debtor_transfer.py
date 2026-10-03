@@ -6,6 +6,7 @@ reimport, recurring job, web endpoint, or a change to the collective debtor.
 import argparse
 import asyncio
 import copy
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import fcntl
@@ -365,6 +366,9 @@ def validate_plan(p, expected_sha):
 
 
 def append_audit(f, event):
+    if hasattr(f, "persist_event"):
+        f.persist_event({"at": utcnow(), **event})
+        return
     f.write(json.dumps({"at": utcnow(), **event}, default=str) + "\n")
     f.flush()
     os.fsync(f.fileno())
@@ -431,12 +435,27 @@ async def apply(api, p, expected_sha, audit, accept_derived_changes=False):
     return result
 
 
+@contextmanager
+def persistent_runner_lock(app_module):
+    conn = app_module._db_connect()
+    require(conn is not None, "Persistent database is required for the runner lock")
+    locked = False
+    try:
+        locked = conn.execute("SELECT pg_try_advisory_lock(%s)", (3977752100100,)).fetchone()[0]
+        require(locked, "Another debtor routing process is running")
+        yield
+    finally:
+        if locked:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (3977752100100,))
+        conn.close()
+
+
 async def run(args):
     from app import main as app_module
     api = Exact(app_module)
     # Existing Render instance only. Never creates infrastructure or alters flags.
     lock_path = Path("/tmp/jnp-bacs-debtor-transfer.lock")
-    with lock_path.open("a") as lock:
+    with persistent_runner_lock(app_module), lock_path.open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -444,7 +463,7 @@ async def run(args):
         if args.action == "plan":
             if args.metorik_manifest:
                 from operations.metorik_bacs_evidence import evidence_plan
-                result = await evidence_plan(api, json.loads(args.metorik_manifest.read_text()), args.payment_method)
+                result = await evidence_plan(api, json.loads(args.metorik_manifest.read_text()), args.payment_method, args.reviewed_line_link)
             else:
                 require(args.payment_method == "bacs", "Plisio requires verified webshop evidence")
                 result = await plan(api, args.payment_method)
@@ -465,6 +484,8 @@ def main():
     p = sub.add_parser("plan")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--payment-method", choices=tuple(ROUTES), default="bacs")
+    p.add_argument("--reviewed-line-link", action="append", default=[],
+                   help="Explicit entry ID with a separately reviewed <=2 cent difference; requires complete live product/discount/shipping evidence")
     p.add_argument("--metorik-manifest", type=Path,
                    help="Explicit approved entry/order IDs; verify bacs against live Metorik before selecting")
     a = sub.add_parser("apply")

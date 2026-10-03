@@ -100,6 +100,7 @@ class Exact:
         require(app_module.COLLECTIVE_DEBTOR_CODE == SOURCE, "Collective debtor changed")
         self.app = app_module
         self.last_request = 0.0
+        self.limits = {}
 
     async def request(self, method, url, params=None, payload=None):
         await asyncio.sleep(max(0, 1.2 - (time.monotonic() - self.last_request)))
@@ -115,6 +116,9 @@ class Exact:
             raise Stop(f"Exact {method} transport/auth failure; inspect audit before retrying") from None
         require(response.status_code in ((200,) if method == "GET" else (200, 204)),
                 f"Exact {method} HTTP {response.status_code}; response suppressed; no retry")
+        self.limits = {name: int(response.headers[header]) for name, header in (
+            ('remaining', 'x-ratelimit-remaining'), ('reset_ms', 'x-ratelimit-reset'))
+            if header in response.headers and response.headers[header].isdigit()}
         if not response.content:
             return {}
         try:
@@ -179,6 +183,32 @@ async def context(api, payment_method="bacs"):
     require(selected == [{"Code": condition_code, "Description": payment_method, "PaymentMethod": "B"}],
             "Exact payment condition missing, changed or ambiguous")
     return {"accounts": accounts, "condition": selected[0], "payment_method": payment_method}
+
+
+async def route_contexts(api):
+    """Resolve all fixed routes with two reads instead of repeating common reads."""
+    codes = {SOURCE, *(route[0] for route in ROUTES.values())}
+    rows = await api.rows('crm/Accounts', {'$filter': ' or '.join(
+        'Code eq ' + quoted(code.rjust(18)) for code in sorted(codes)),
+        '$select': 'ID,Code,Name,IsSales,Status'})
+    require(all(r['Code'].strip() in codes for r in rows), 'Unexpected route debtor')
+    accounts = {}
+    for code in codes:
+        selected = [r for r in rows if r['Code'].strip() == code]
+        require(len(selected) == 1 and selected[0]['IsSales'] is True and selected[0]['Status'] == 'C',
+                f'Existing active sales debtor {code} missing or ambiguous')
+        accounts[code] = {k:selected[0][k] for k in ('ID','Code','Name')}
+        accounts[code]['ID'] = guid(accounts[code]['ID'])
+    require(len({r['ID'] for r in accounts.values()}) == len(codes), 'Route debtors must differ')
+    conditions = await api.rows('cashflow/PaymentConditions', {'$select':'Code,Description,PaymentMethod'})
+    result = {}
+    for method, (target, condition) in ROUTES.items():
+        selected = [r for r in conditions if r['Description'] == method]
+        require(selected == [{'Code':condition,'Description':method,'PaymentMethod':'B'}],
+                'Exact payment condition missing, changed or ambiguous')
+        result[method] = {'accounts':{code:accounts[code] for code in (SOURCE,target)},
+                          'condition':selected[0], 'payment_method':method}
+    return result
 
 
 async def snapshot(api, entry_id):

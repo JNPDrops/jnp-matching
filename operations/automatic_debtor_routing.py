@@ -143,7 +143,7 @@ async def process_entry(api, conn, entry_id, reference, order):
 
 
 async def validate_routes(api):
-    contexts = [await m.context(api, method) for method in m.ROUTES]
+    contexts = (await m.route_contexts(api)).values()
     sources = {ctx['accounts'][m.SOURCE]['ID'] for ctx in contexts}
     m.require(len(sources) == 1, 'Route source debtors disagree')
     return sources.pop()
@@ -153,6 +153,8 @@ async def cycle(app_module):
     m.require(bool(app_module.DATABASE_URL), 'Persistent database required for automatic routing')
     with app_module._db_connect() as conn:
         initialize(conn)
+        from operations import backfill_debtor_routing as backfill
+        backfill.initialize(conn)
         if not conn.execute('SELECT pg_try_advisory_lock(%s)',(LOCK_ID,)).fetchone()[0]:
             STATUS['state'] = 'another_runner'
             return
@@ -167,7 +169,7 @@ async def cycle(app_module):
                 if not enabled:
                     STATUS['state']='disabled'
                     return
-                if conn.execute("SELECT EXISTS(SELECT 1 FROM jnp_debtor_route_queue WHERE state='uncertain')").fetchone()[0]:
+                if conn.execute("SELECT EXISTS(SELECT 1 FROM jnp_debtor_route_queue WHERE state='uncertain') OR EXISTS(SELECT 1 FROM jnp_debtor_route_backfill WHERE state='uncertain')").fetchone()[0]:
                     pause(conn,'Unresolved write intent: inspect durable audit before resuming')
                     return
                 api=AutomaticExact(app_module,conn)
@@ -181,15 +183,19 @@ async def cycle(app_module):
                 enqueue(conn,rows,source,started,end)
                 STATUS.update(state='checked',last_scan=m.utcnow())
                 queued=conn.execute("SELECT entry_id::text,reference FROM jnp_debtor_route_queue WHERE state='pending' AND next_check<=NOW() ORDER BY next_check,entry_id LIMIT 25").fetchall()
-                if not queued:return
-                references=sorted({r[1] for r in queued})
-                proof=await e.lookup_orders(references)
-                for entry_id,reference in queued:
-                    order=proof['orders'].get('#'+reference[2:])
-                    if order is None:
-                        record_state(conn,entry_id,'pending','Order not yet present in Metorik; no inference')
-                        continue
-                    await process_entry(api,conn,entry_id,reference,order)
+                if queued:
+                    references=sorted({r[1] for r in queued})
+                    proof=await e.lookup_orders(references)
+                    for entry_id,reference in queued:
+                        order=proof['orders'].get('#'+reference[2:])
+                        if order is None:
+                            record_state(conn,entry_id,'pending','Order not yet present in Metorik; no inference')
+                            continue
+                        await process_entry(api,conn,entry_id,reference,order)
+                # New entries take priority; old entries require an explicit,
+                # durable operator-approved discovery cohort.
+                result = await backfill.process_pending(api, conn)
+                if result: STATUS['state'] = result
         finally:
             conn.execute('SELECT pg_advisory_unlock(%s)',(LOCK_ID,))
 

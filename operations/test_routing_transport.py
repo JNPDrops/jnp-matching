@@ -10,6 +10,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         app._access_token=AsyncMock(return_value='test-token')
         api=m.Exact(app)
         response=Mock(status_code=200,content=b'{}')
+        response.headers={}
         response.json.return_value={}
         client=AsyncMock()
         client.__aenter__.return_value=client

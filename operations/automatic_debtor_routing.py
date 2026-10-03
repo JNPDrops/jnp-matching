@@ -18,6 +18,7 @@ from operations import routing_runtime as runtime
 from operations import debtor_routing_policy as policy, open_item_cleanup as cleanup
 from operations import allocation_connection as allocation
 from operations import reviewed_suap
+from operations import reviewed_routing_updates
 
 LOCK_ID = 3977752100100
 INTERVAL = 300
@@ -191,6 +192,7 @@ async def process_entry(api, conn, entry_id, reference, order, *, work_scope='co
                      'payment_method':method,'work_scope':work_scope,
                      'order_reference':order_reference,'entry_type':entry_type,
                      'debit_entry_id':debit_entry_id}
+        reviewed_routing_updates.validate_selection(selection)
         if method == reviewed_suap.METHOD:
             reviewed_suap.validate_selection(selection)
         result = await customer_only.change_selected(api,selection,
@@ -270,6 +272,9 @@ async def cycle(app_module):
                 if 'suap_reassessment' not in STATUS:
                     STATUS['suap_reassessment']=reviewed_suap.reconcile(conn)
                     runtime.event('suap_reassessment',**STATUS['suap_reassessment'])
+                if 'routing_reassessment' not in STATUS:
+                    STATUS['routing_reassessment']=reviewed_routing_updates.reconcile(conn)
+                    runtime.event('routing_reassessment',**STATUS['routing_reassessment'])
                 STATUS['state']='routing_immediate_cleanup' if early else 'processing_queue'
                 if not customer_only.budget_available(api):
                     runtime.defer_until_reset(STATUS,api.limits)
@@ -279,7 +284,8 @@ async def cycle(app_module):
                     FROM jnp_debtor_route_queue q WHERE state='pending' AND next_check<=NOW()
                     AND (%s OR (q.work_scope='cleanup' AND q.order_evidence->>'payment_method'=ANY(%s)))
                     AND NOT EXISTS (SELECT 1 FROM jnp_debtor_route_backfill b WHERE b.entry_id=q.entry_id AND b.state='uncertain')
-                    ORDER BY (work_scope='continuous') DESC,(order_evidence IS NOT NULL) DESC,next_check,entry_id LIMIT 50""",(not early,list(policy.IMMEDIATE_CLEANUP_ROUTES))).fetchall()
+                    ORDER BY (q.work_scope='cleanup' AND q.order_evidence->>'payment_method'='suap_wordpresspayplugin') DESC,
+                    (work_scope='continuous') DESC,(order_evidence IS NOT NULL) DESC,next_check,entry_id LIMIT 50""",(not early,list(policy.IMMEDIATE_CLEANUP_ROUTES))).fetchall()
                 if queued:
                     references=sorted({r[3] for r in queued if r[2] is None})
                     proof=await e.lookup_orders(references) if references else {'orders':{}}

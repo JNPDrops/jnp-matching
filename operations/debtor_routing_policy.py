@@ -1,4 +1,4 @@
-"""Operator routes; historical ICEPAY and SUAP authorized to run immediately."""
+"""Operator routes; all historical cleanup routes authorized to run immediately."""
 from datetime import datetime, timezone
 
 REVISION = '2026-10-03-allocation-icepay-now-v2'
@@ -8,10 +8,9 @@ CLEANUP_ROUTES = {**CONTINUOUS_ROUTES, 'np_payments': '109421',
                   'suap_wordpresspayplugin': '109422'}
 RETAIN_ON_SOURCE = {'wc_fibonatix': '100100', 'wc_fibonatics': '100100'}
 # Keep the cohort revision: SUAP was already discovered under this policy.
-# The 22:00 instruction advances its execution without resetting discovery,
+# The 22:20 instruction advances the remaining cleanup without resetting discovery,
 # completed ICEPAY entries, uncertain outcomes, or an operator pause.
-IMMEDIATE_CLEANUP_ROUTES = {'icepay-ideal': '109419',
-                            'suap_wordpresspayplugin': '109422'}
+IMMEDIATE_CLEANUP_ROUTES = dict(CLEANUP_ROUTES)
 
 
 def routes(scope):

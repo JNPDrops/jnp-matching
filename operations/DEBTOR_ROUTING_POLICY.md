@@ -22,8 +22,11 @@ The worker activates this authorization once, preserving the incremental cursor
 and all uncertain write outcomes. The 21:34 operator instruction brings the
 historic open ICEPAY cohort forward to run immediately. At 22:00 the operator
 also authorized immediate SUAP cleanup. At 22:01 they requested using the revised
-credit inventory from the other chat. Other methods and
-continuous imports start **4 October 2026 at 02:00:05 Europe/Amsterdam**
+credit inventory from the other chat. At 22:20 they authorized immediately
+continuing the remaining cleanup routes after SUAP. Prioritize ready SUAP cleanup
+entries, then drain the other methods, preserving the same completed discovery
+cohort. An uncertain SUAP write stays isolated and does not block the other work.
+Continuous imports start **4 October 2026 at 02:00:05 Europe/Amsterdam**
 (00:00:05 UTC). This is a start time, not a completion guarantee.
 A later persistent operator pause must remain effective across cycles/restarts.
 
@@ -65,11 +68,10 @@ Xcore, DIRECT_WOO_BANK and the Woo/bosci worker are unchanged. Do not call
 existing deployments and confirming auto-deploy remains off.
 
 Before the scheduled start, both queue selection and the last write guard require
-a durable cleanup entry with `icepay-ideal` evidence and destination 109419, or
-`suap_wordpresspayplugin` evidence and destination 109422. Each destination is
-bound to that entry's stored payment code.
-The full open-item discovery may queue other authorized routes, but cannot execute
-them early. Health exposes counts by payment method and the latest observed
+a durable cleanup entry with one of the authorized payment codes and its exact
+destination from the route table. Each destination is bound to that entry's
+stored payment code. Continuous entries still wait for the scheduled start.
+Health exposes counts by payment method and the latest observed
 Allocation budget headers. It performs no financial post-write rereads.
 
 ## SUAP reassessment incorporated at 22:01
@@ -87,3 +89,13 @@ queue is reported with its discovery reason; the spreadsheet does not override
 current open status, debit/credit proof, completed work or uncertain writes.
 Keep the cohort revision unchanged to reuse discovery and preserve the 25
 already applied ICEPAY entries. SUAP remains a one-time open-item cleanup.
+
+## Remaining cleanup authorized at 22:20
+
+NinjaPay to 109421, BACS to 109372 and Plisio to 109377 may now run immediately
+after SUAP. The same inventory's changed and still unknown entries are included
+in `reviewed_routing_updates_20261003.json`. Each affected queued identity must
+agree with that review before writing; unknown payment methods remain excluded.
+Orders absent from the older snapshot continue to use their established live
+order evidence. No uncertain writes, completed transfers or unproven credits are
+requeued by this change. The review's amount differences are not corrected.

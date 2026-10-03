@@ -19,16 +19,16 @@ class IcepayNowTests(unittest.IsolatedAsyncioTestCase):
     def test_only_authorized_historical_routes_can_run_early(self):
         before=p.START_AT-timedelta(hours=2)
         for method in p.CLEANUP_ROUTES:
-            self.assertEqual(p.work_allowed(method,'cleanup',before),method in ('icepay-ideal','suap_wordpresspayplugin'))
+            self.assertEqual(p.work_allowed(method,'cleanup',before),True)
             self.assertFalse(p.work_allowed(method,'continuous',before))
             self.assertTrue(p.work_allowed(method,'cleanup',p.START_AT))
-        self.assertEqual(p.routes_for_now(before),{'icepay-ideal':'109419','suap_wordpresspayplugin':'109422'})
+        self.assertEqual(p.routes_for_now(before),dict(p.CLEANUP_ROUTES))
         self.assertFalse(p.work_allowed('unknown','cleanup',p.START_AT))
 
     async def test_process_early_scopes_without_spending_calls_on_other_routes(self):
         for method,scope,allowed in (('icepay-ideal','cleanup',True),
-            ('icepay-ideal','continuous',False),('bacs','cleanup',False),
-            ('plisio','cleanup',False),('np_payments','cleanup',False),
+            ('icepay-ideal','continuous',False),('bacs','cleanup',True),
+            ('plisio','cleanup',True),('np_payments','cleanup',True),
             ('suap_wordpresspayplugin','cleanup',True),('suap_wordpresspayplugin','continuous',False)):
             conn=MagicMock();api=AsyncMock()
             with patch.object(a.reviewed_suap,'validate_selection'),patch.object(p,'before_scheduled_start',return_value=True),patch.object(c,'route_accounts',AsyncMock(return_value=ACCOUNTS)),patch.object(c,'change_selected',AsyncMock(return_value={'state':'skipped','reason':'No remaining open item'})) as change:
@@ -43,6 +43,9 @@ class IcepayNowTests(unittest.IsolatedAsyncioTestCase):
         app=MagicMock(DIVISION=m.DIVISION,BASE_URL=m.BASE,COLLECTIVE_DEBTOR_CODE=m.SOURCE)
         for evidence,target,allowed in ((('cleanup','icepay-ideal'),'109419',True),
             (('cleanup','suap_wordpresspayplugin'),'109422',True),
+            (('cleanup','np_payments'),'109421',True),
+            (('cleanup','bacs'),'109372',True),
+            (('cleanup','plisio'),'109377',True),
             (('cleanup','suap_wordpresspayplugin'),'109419',False),
             (('cleanup','icepay-ideal'),'109422',False),
             (('continuous','suap_wordpresspayplugin'),'109422',False),

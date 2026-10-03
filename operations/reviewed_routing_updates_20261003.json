@@ -1,0 +1,398 @@
+{
+  "source": "openstaande-posten-creditanalyse-20261003.xlsx",
+  "source_version": 2,
+  "entries": [
+    {
+      "entry_id": "692dc104-a730-402e-bfa9-7b5dab7a5379",
+      "reference": "TD116519",
+      "order_reference": "TD42489",
+      "order_id": 116038,
+      "payment_method": "suap_wordpresspayplugin",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "fa21ddc3-551a-4083-97cb-f254e8b1f9b3",
+      "reference": "TD133225",
+      "order_reference": "TD47224",
+      "order_id": 131258,
+      "payment_method": "wc_fibonatix",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "95ac95d5-c60d-414d-a541-3ad6c9eeaac2",
+      "reference": "TD136672",
+      "order_reference": "TD46841",
+      "order_id": 129798,
+      "payment_method": "wc_fibonatix",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "64306e49-9483-4513-9151-7528b0ed7846",
+      "reference": "TD136673",
+      "order_reference": "TD48616",
+      "order_id": 136527,
+      "payment_method": "wc_fibonatix",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "eb47f971-0d85-4e19-b6ee-22be9d6cef2a",
+      "reference": "F2025-0067",
+      "order_reference": "F2025-0067",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "a3fd6961-2496-473d-aa43-377d9877d5b8",
+      "reference": "F2025-0082",
+      "order_reference": "F2025-0082",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "d8874b45-14f9-478d-9a74-e0613176ebe4",
+      "reference": "F2026-0027",
+      "order_reference": "F2026-0027",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "2b9e0a27-d1ba-44fc-9189-c0d79a23bc95",
+      "reference": "F2026-0029",
+      "order_reference": "F2026-0029",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "9774428e-af3f-41b4-886e-aebe6e845fd5",
+      "reference": "F2026-0033",
+      "order_reference": "F2026-0033",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "49d8adb4-bd45-40ff-9bfc-ce281c5ab522",
+      "reference": "F2026-0042",
+      "order_reference": "F2026-0042",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "0ba8bb02-797c-476e-9e99-33e211b1251a",
+      "reference": "F2026-0048",
+      "order_reference": "F2026-0048",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "cf5795fd-971b-4cb9-b562-6e557f70e48d",
+      "reference": "F2026-0051",
+      "order_reference": "F2026-0051",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "22b3690a-91c0-4ea6-bad9-950def111424",
+      "reference": "F2026-0052",
+      "order_reference": "F2026-0052",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 21
+    },
+    {
+      "entry_id": "0ab77bba-d15e-4002-bff5-b8aef1d13127",
+      "reference": "F2026-0058",
+      "order_reference": "F2026-0058",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "2a2840ef-af75-42a8-b1b2-95d127705dcf",
+      "reference": "F2026-0059",
+      "order_reference": "F2026-0059",
+      "order_id": null,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "104f41d9-2437-4ac2-9f46-196e9c805fec",
+      "reference": "TD113933",
+      "order_reference": "TD41300",
+      "order_id": 111850,
+      "payment_method": "suap_wordpresspayplugin",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "7799e83a-8a9d-4fdc-94fd-1a69f9b2a36f",
+      "reference": "TD116518",
+      "order_reference": "TD40287",
+      "order_id": 108478,
+      "payment_method": "suap_wordpresspayplugin",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "9d2e625d-b6aa-48a3-85c4-bdd993ae73e4",
+      "reference": "TD128655",
+      "order_reference": "TD46438",
+      "order_id": 128652,
+      "payment_method": "wc_fibonatix",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "400c5e53-30d1-494f-a1aa-39f527d1adf6",
+      "reference": "TD37044",
+      "order_reference": "TD37044",
+      "order_id": 97544,
+      "payment_method": "icepay-ideal",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "a8b62cf3-ebed-4f4a-a47a-db73d4545df7",
+      "reference": "TD37665",
+      "order_reference": "TD37665",
+      "order_id": 99706,
+      "payment_method": "suap_wordpresspayplugin",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "5eae5b9f-c1d5-49c2-977e-15ee07faf33b",
+      "reference": "TD38382",
+      "order_reference": "TD38382",
+      "order_id": 101981,
+      "payment_method": "suap_wordpresspayplugin",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "54e3fcfc-88d6-4f93-90a8-1af09cdc2f1c",
+      "reference": "TD40913",
+      "order_reference": "TD40913",
+      "order_id": 110701,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "20429a1b-0af2-482e-83a7-52b8e7f536f2",
+      "reference": "TD41955",
+      "order_reference": "TD41955",
+      "order_id": 113932,
+      "payment_method": null,
+      "entry_type": 20
+    },
+    {
+      "entry_id": "8e1d047c-1d2c-4627-be89-9e7568e56385",
+      "reference": "TD41971",
+      "order_reference": "TD41971",
+      "order_id": 114003,
+      "payment_method": "bacs",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "1e8c1174-12be-4495-be20-7f818036830b",
+      "reference": "TD42144",
+      "order_reference": "TD42144",
+      "order_id": 114554,
+      "payment_method": "suap_wordpresspayplugin",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "d00c9d8c-c20e-4b4b-b4b9-d19a677f3a8d",
+      "reference": "TD42493",
+      "order_reference": "TD42493",
+      "order_id": 116046,
+      "payment_method": "suap_wordpresspayplugin",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "3d498b86-78ef-4109-985a-4be9ff7f43d7",
+      "reference": "TD42972",
+      "order_reference": "TD42972",
+      "order_id": 117685,
+      "payment_method": "bacs",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "0f6d1c78-b097-4061-9075-3c785dcdc876",
+      "reference": "TD43831",
+      "order_reference": "TD43831",
+      "order_id": 120387,
+      "payment_method": "np_payments",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "6b8c1feb-a7a8-479b-b2fd-f645f7882ffa",
+      "reference": "TD44104",
+      "order_reference": "TD44104",
+      "order_id": 121014,
+      "payment_method": "np_payments",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "15f9b1ab-70e5-4d36-b087-cf03b2760e1c",
+      "reference": "TD44135",
+      "order_reference": "TD44135",
+      "order_id": 121046,
+      "payment_method": "np_payments",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "faeb4d37-31b9-44cf-bdc7-6a280980d554",
+      "reference": "TD44874",
+      "order_reference": "TD44874",
+      "order_id": 123766,
+      "payment_method": "np_payments",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "7114d580-ded5-4883-9f76-ba3117f3a1a7",
+      "reference": "TD45050",
+      "order_reference": "TD45050",
+      "order_id": 124357,
+      "payment_method": "np_payments",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "a99c94e1-5ffa-47cc-9037-c2f0e4cb3202",
+      "reference": "TD46312",
+      "order_reference": "TD23064",
+      "order_id": 42668,
+      "payment_method": "ppcp-credit-card-gateway",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "2e170efc-378d-4b43-9fd1-430842f7fc4c",
+      "reference": "TD46349",
+      "order_reference": "TD46349",
+      "order_id": 128208,
+      "payment_method": "wc_fibonatix",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "863020da-eb9e-4cb0-8b5f-71f1a00c36d7",
+      "reference": "TD46535",
+      "order_reference": "TD46535",
+      "order_id": 128761,
+      "payment_method": "wc_fibonatix",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "ae9b9a7a-5741-4199-bc61-0730d1a7ec98",
+      "reference": "TD46763",
+      "order_reference": "TD46763",
+      "order_id": 129668,
+      "payment_method": "np_payments",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "324c3ebf-0667-4451-af19-fc5811c3161a",
+      "reference": "TD47040",
+      "order_reference": "TD47040",
+      "order_id": 130662,
+      "payment_method": "wc_fibonatix",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "5de2a4da-c93e-44f7-9d86-c87293d254e9",
+      "reference": "TD47469",
+      "order_reference": "TD47469",
+      "order_id": 132224,
+      "payment_method": "wc_fibonatix",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "f3b688cc-f8d5-4d7a-b3ea-0bdaf297b86f",
+      "reference": "TD48302",
+      "order_reference": "TD24095",
+      "order_id": 48291,
+      "payment_method": "ppcp-credit-card-gateway",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "4aab6d91-1486-4eae-bd17-e55ae64a72d5",
+      "reference": "TD48360",
+      "order_reference": "TD48360",
+      "order_id": 135565,
+      "payment_method": "wc_fibonatix",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "c3b9403c-c7ce-41a0-b6eb-a4d2ce8cad0e",
+      "reference": "TD48809",
+      "order_reference": "TD48809",
+      "order_id": 137078,
+      "payment_method": "icepay-ideal",
+      "entry_type": 20
+    },
+    {
+      "entry_id": "a4be2c52-303a-4074-b00a-3d371f2c326f",
+      "reference": "TD55913",
+      "order_reference": "TD25105",
+      "order_id": 52255,
+      "payment_method": "ppcp-gateway",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "a31bc346-19b3-43dd-b709-c211ba006b9a",
+      "reference": "TD59285",
+      "order_reference": "TD25639",
+      "order_id": 54147,
+      "payment_method": "icepay-ideal",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "89a08f9b-3758-46bc-be9a-165be369a5f6",
+      "reference": "TD59330",
+      "order_reference": "TD23542",
+      "order_id": 44279,
+      "payment_method": "icepay-card",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "79954f5e-6990-4d91-b0ff-74415774b538",
+      "reference": "TD67050",
+      "order_reference": "TD27622",
+      "order_id": 61606,
+      "payment_method": "np_payments",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "d4917d45-554c-4d49-b200-533bd05322db",
+      "reference": "TD67066",
+      "order_reference": "TD27656",
+      "order_id": 61707,
+      "payment_method": "np_payments",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "32a18d79-44a5-4b1f-a89d-2a7ae9201f6e",
+      "reference": "TD77876",
+      "order_reference": "TD28252",
+      "order_id": 64206,
+      "payment_method": "bacs",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "ac0bb0ff-a88c-4e81-93a2-8d8aa3ae117f",
+      "reference": "TD90171",
+      "order_reference": "TD32997",
+      "order_id": 83687,
+      "payment_method": "plisio",
+      "entry_type": 21
+    },
+    {
+      "entry_id": "bf7a7a8e-d74f-405a-84f3-247df1b94a63",
+      "reference": "TD94001",
+      "order_reference": "TD35634",
+      "order_id": 91840,
+      "payment_method": "icepay-ideal",
+      "entry_type": 21
+    }
+  ]
+}

@@ -67,6 +67,8 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         phase.start();self.addCleanup(phase.stop)
         review=patch.object(a.reviewed_suap,'reconcile',return_value={})
         review.start();self.addCleanup(review.stop)
+        updates=patch.object(a.reviewed_routing_updates,'reconcile',return_value={})
+        updates.start();self.addCleanup(updates.stop)
 
     async def test_other_methods_never_build_a_write_plan(self):
         with patch.object(e,'evidence_plan',AsyncMock()) as build:

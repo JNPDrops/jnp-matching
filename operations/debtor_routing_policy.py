@@ -1,7 +1,7 @@
-"""Fixed operator authorization from 3 October 2026, 20:55 Amsterdam."""
+"""Operator routes and the 21:34 authorization to process historic ICEPAY now."""
 from datetime import datetime, timezone
 
-REVISION = '2026-10-03-all-routes-v1'
+REVISION = '2026-10-03-allocation-icepay-now-v2'
 START_AT = datetime(2026, 10, 4, 0, 0, 5, tzinfo=timezone.utc)
 CONTINUOUS_ROUTES = {'bacs': '109372', 'plisio': '109377', 'icepay-ideal': '109419'}
 CLEANUP_ROUTES = {**CONTINUOUS_ROUTES, 'np_payments': '109421',
@@ -13,6 +13,19 @@ def routes(scope):
     if scope == 'continuous': return CONTINUOUS_ROUTES
     if scope == 'cleanup': return CLEANUP_ROUTES
     return {}
+
+
+def icepay_only(now=None):
+    return (now or datetime.now(timezone.utc)) < START_AT
+
+
+def routes_for_now(now=None):
+    return {'icepay-ideal':'109419'} if icepay_only(now) else dict(CLEANUP_ROUTES)
+
+
+def work_allowed(method, scope, now=None):
+    return method in routes(scope) and (not icepay_only(now)
+        or (method=='icepay-ideal' and scope=='cleanup'))
 
 
 def initialize(conn):

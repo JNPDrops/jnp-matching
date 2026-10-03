@@ -1,8 +1,8 @@
-"""Separate JNP Allocation OAuth connection and read-only Exact budget probe.
+"""Dedicated JNP Allocation connection for debtor routing and a quota probe.
 
-No financial write, key rotation, automatic fallback or background worker uses
-this connection. Credentials stay in Render and tokens in their own existing-DB
-row. Public status exposes only configuration flags and cached quota metadata.
+The routing worker uses this app permanently. There is no key rotation or quota
+fallback. Credentials stay in Render and tokens in their own existing-DB row.
+Public status exposes only configuration flags and cached quota metadata.
 """
 import asyncio
 from datetime import datetime, timezone
@@ -99,6 +99,39 @@ async def exchange(config, grant, previous=None):
         raise HTTPException(502, 'Exact-tokenuitwisseling mislukt; details afgeschermd.') from None
 
 
+async def routing_access_token(app):
+    """Use this app only; serialize rotating tokens with the probe and callback."""
+    config=require_configuration()
+    async with _lock:
+        with app._db_connect() as conn:
+            if not conn.execute('SELECT pg_try_advisory_lock(%s)',(LOCK_ID,)).fetchone()[0]:
+                raise HTTPException(409,'JNP Allocation-autorisatie wordt bijgewerkt; probeer later.')
+            try:
+                tokens=load_tokens(conn,config)
+                if not tokens:
+                    raise HTTPException(401,'JNP Allocation is niet verbonden.')
+                if int(tokens.get('expires_at',0))<=time.time():
+                    tokens=await exchange(config,{'grant_type':'refresh_token','refresh_token':tokens['refresh_token']},tokens)
+                    save_tokens(conn,config,tokens)
+                if not isinstance(tokens.get('access_token'),str) or not tokens['access_token']:
+                    raise HTTPException(401,'JNP Allocation-token ontbreekt.')
+                return tokens['access_token']
+            finally:
+                conn.execute('SELECT pg_advisory_unlock(%s)',(LOCK_ID,))
+
+
+class RoutingApp:
+    """Narrow facade: preserve target division while selecting the dedicated app."""
+    def __init__(self, app):
+        self.original=app
+        self.DIVISION=app.DIVISION
+        self.BASE_URL=app.BASE_URL
+        self.COLLECTIVE_DEBTOR_CODE=app.COLLECTIVE_DEBTOR_CODE
+
+    async def _access_token(self):
+        return await routing_access_token(self.original)
+
+
 def quota_result(response):
     headers = response.headers
     result={'checked_at':datetime.now(timezone.utc).isoformat(),
@@ -145,7 +178,11 @@ async def probe(conn, config, tokens):
 async def status():
     config=configuration()
     result={'connection':'JNP Allocation','configured':configured(config),'connected':False,
-            'division':DIVISION,'read_only':True,'last_probe':None}
+            'division':DIVISION,'read_only':False,'usage':'customer_only_debtor_routing',
+            'probe_read_only':True,'automatic_key_switching':False,'last_probe':None}
+    from operations.automatic_debtor_routing import STATUS
+    result['routing']={key:STATUS.get(key) for key in
+        ('state','current_phase','api_limits','api_limits_checked_at','applied_since_start')}
     app=main_module()
     if not config['client_id'] or not app.DATABASE_URL: return result
     try:
@@ -168,10 +205,10 @@ async def page(request:Request):
         button=f'<form method="post" action="/allocation/probe"><input type="hidden" name="csrf" value="{csrf}"><button>API-ruimte opnieuw controleren</button></form>'
     return HTMLResponse('<!doctype html><html lang="nl"><meta charset="utf-8"><title>JNP Allocation</title>'
         '<meta name="viewport" content="width=device-width, initial-scale=1"><body style="font:17px system-ui;max-width:760px;margin:48px auto;padding:0 20px">'
-        '<h1>JNP Allocation</h1><p>Aparte Exact-koppeling voor een leesproef van de beschikbare API-ruimte.</p>'
+        '<h1>JNP Allocation</h1><p>Exact-koppeling voor debiteurenomzetting en controle van de beschikbare API-ruimte.</p>'
         '<p><a href="/allocation/login">Verbinden met Exact Online</a></p>'+button+
         '<p><a href="/allocation/status">Bekijk het laatste resultaat</a></p>'
-        '<p>Deze aansluiting wijzigt geen boekingen. De teller hieronder betreft deze app; de gedeelde administratielimiet kan daarnaast gelden.</p></body></html>',
+        '<p>De leesproef wijzigt geen boekingen. De debiteurenagent gebruikt deze aansluiting voor de afgesproken debiteurwijzigingen. De teller betreft deze app; de gedeelde administratielimiet kan daarnaast gelden.</p></body></html>',
         headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
 
 

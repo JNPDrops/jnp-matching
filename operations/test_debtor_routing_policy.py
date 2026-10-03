@@ -42,9 +42,9 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(p.wait_for_start(status,p.START_AT))
         self.assertEqual(a.sleep_seconds({'state':'processing_queue'},now),15)
 
-    async def test_scheduled_cycle_makes_no_exact_or_metorik_call(self):
+    async def test_disabled_cycle_makes_no_exact_or_metorik_call(self):
         conn=MagicMock();conn.__enter__.return_value=conn
-        conn.execute.return_value.fetchone.side_effect=[(True,),(True,p.START_AT,p.START_AT,None)]
+        conn.execute.return_value.fetchone.side_effect=[(True,),(False,p.START_AT,p.START_AT,None)]
         app=MagicMock(DATABASE_URL='configured');app._db_connect.return_value=conn
         with patch.object(a,'initialize'),patch.object(b,'initialize'),patch.object(p,'initialize'),patch.object(p,'activate_once'),patch.object(p,'wait_for_start',return_value=True),patch.object(a,'AutomaticExact') as api,patch.object(a.e,'lookup_orders',AsyncMock()) as lookup:
             await a.cycle(app)
@@ -80,7 +80,7 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
             (True,p.REVISION,False,'100100',False)):
             conn=MagicMock();conn.execute.return_value.fetchone.return_value=(enabled,revision)
             api=a.AutomaticExact(app,conn)
-            with patch.object(p,'wait_for_start',return_value=waiting),patch.object(c,'route_accounts',AsyncMock(return_value=ACCOUNTS)),patch.object(m.Exact,'change_customer',AsyncMock()) as write:
+            with patch.object(p,'icepay_only',return_value=waiting),patch.object(c,'route_accounts',AsyncMock(return_value=ACCOUNTS)),patch.object(m.Exact,'change_customer',AsyncMock()) as write:
                 if allowed:
                     await api.change_customer(ID,ACCOUNTS[target]);write.assert_awaited_once()
                 else:

@@ -1,7 +1,7 @@
 # Debtor routing authorization — 3 October 2026
 
 Administration: 3977752. Source debtor: 100100. Existing service and database only.
-Policy revision: `2026-10-03-all-routes-v1`.
+Policy revision: `2026-10-03-allocation-icepay-now-v2`.
 
 | Exact-linked order payment code | Destination | Scope |
 | --- | --- | --- |
@@ -19,8 +19,10 @@ uniquely and be active sales accounts; they are never created.
 ## Schedule and progress
 
 The worker activates this authorization once, preserving the incremental cursor
-and all uncertain write outcomes. It waits until **4 October 2026 at 02:00:05
-Europe/Amsterdam** (00:00:05 UTC). This is a start time, not a completion guarantee.
+and all uncertain write outcomes. The 21:34 operator instruction brings the
+historic open ICEPAY cohort forward to run immediately. Other methods and
+continuous imports start **4 October 2026 at 02:00:05 Europe/Amsterdam**
+(00:00:05 UTC). This is a start time, not a completion guarantee.
 A later persistent operator pause must remain effective across cycles/restarts.
 
 At start, read the complete current ReceivablesList for 100100 without an invoice
@@ -45,8 +47,8 @@ post-write rereads, matching, reimports, new debtor creation, or amount/VAT/refe
 changes. A write intent is persisted before PUT. Ambiguous outcomes remain
 isolated and are never automatically retried.
 
-Every PUT checks the persistent enabled flag and policy revision. The worker
-respects the Exact response budget/reset headers, reserves 100 calls and resumes
+Every PUT checks the persistent enabled flag and policy revision. The worker uses **JNP Allocation** permanently; the primary connection remains
+assigned to the existing matching/rule functionality. It respects the Exact response budget/reset headers, reserves 100 calls and resumes
 after the reset. No extra OAuth app registrations or key rotation are used to
 multiply quotas. Other integrations also consume the administration-wide budget.
 
@@ -59,3 +61,9 @@ and `retry_next_cycle`. Unknown mappings and validation failures require review.
 Xcore, DIRECT_WOO_BANK and the Woo/bosci worker are unchanged. Do not call
 `POST /cycle` or `POST /research` for this operation. Deploy manually after checking
 existing deployments and confirming auto-deploy remains off.
+
+Before the scheduled start, both queue selection and the last write guard require
+a durable cleanup entry with `icepay-ideal` evidence and destination 109419.
+The full open-item discovery may queue other authorized routes, but cannot execute
+them early. Health exposes counts by payment method and the latest observed
+Allocation budget headers. It performs no financial post-write rereads.

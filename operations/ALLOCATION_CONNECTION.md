@@ -1,7 +1,9 @@
-# JNP Allocation — optional read-only quota probe
+# JNP Allocation — dedicated debtor routing and quota probe
 
-This second OAuth connection only checks API response limits. No routing worker,
-financial write, key rotation or automatic quota fallback uses it.
+The operator authorized this connection for debtor routing on 3 October 2026 at
+21:34 Amsterdam. The routing worker now uses it permanently, with the fixed
+Customer-only policy in DEBTOR_ROUTING_POLICY.md. No key rotation or automatic
+quota fallback is implemented. The separate quota probe remains read-only.
 
 ## Register and store
 
@@ -45,8 +47,11 @@ without handling credentials.
 For another probe, open `/allocation` in the authorized browser and press the
 button. `POST /allocation/probe` requires the same signed session, a CSRF token,
 and recent authorization. Requests are serialized in-process and with a separate
-Postgres advisory lock; results are reused for at least 60 seconds. No scheduled
-probing or background token refresh is enabled. Reconnect if Exact requires it.
+Postgres advisory lock; results are reused for at least 60 seconds. The routing worker also uses the same serialized token access for its requests.
+No scheduled probing is enabled. Reconnect if Exact requires it.
 
 OAuth query parameters are removed from the callback request scope before the
 response/access log. Token responses and errors never appear in status or logs.
+
+The cached `last_probe` remains a timestamped probe result. The `routing` field
+reports the worker state and its newer quota headers when it is processing.

@@ -55,10 +55,13 @@ async def debit_proof(api, credit, order, order_ref):
 
 def status(conn, saved):
     counts = dict(conn.execute("SELECT state,COUNT(*) FROM jnp_debtor_route_queue WHERE work_scope='cleanup' AND routing_policy=%s GROUP BY state",(policy.REVISION,)).fetchall())
+    methods = {}
+    for method,state,count in conn.execute("SELECT order_evidence->>'payment_method',state,COUNT(*) FROM jnp_debtor_route_queue WHERE work_scope='cleanup' AND routing_policy=%s GROUP BY order_evidence->>'payment_method',state",(policy.REVISION,)).fetchall():
+        methods.setdefault(method or 'unknown',{})[state]=count
     return {'discovery_complete':saved['done'],'scanned':saved['cursor'],
             'source_items':saved['source_items'],'candidate_items':len(saved['items']),
             'selected':saved['selected'],'unclassified':len(saved['unclassified']),
-            'counts':counts}
+            'counts':counts,'by_payment_method':methods}
 
 
 async def discover_batch(api, conn, source):

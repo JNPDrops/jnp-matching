@@ -62,6 +62,10 @@ class ScopeTests(unittest.TestCase):
 
 
 class ProcessTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        phase=patch.object(a.policy,"icepay_only",return_value=False)
+        phase.start();self.addCleanup(phase.stop)
+
     async def test_other_methods_never_build_a_write_plan(self):
         with patch.object(e,'evidence_plan',AsyncMock()) as build:
             await a.process_entry(AsyncMock(),Mock(),'entry','TD12345',{'payment_method':'card'})

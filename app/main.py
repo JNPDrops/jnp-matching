@@ -45,15 +45,22 @@ async def lifespan(_app):
     from operations.automatic_debtor_routing import serve
     from app import main as app_module
     task = asyncio.create_task(serve(app_module))
+    from operations.woo_iban_rules import serve as serve_iban
+    iban_task = asyncio.create_task(serve_iban(app_module))
     try:
         yield
     finally:
         task.cancel()
+        iban_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        with suppress(asyncio.CancelledError):
+            await iban_task
 
 
 app = FastAPI(title="JNP Matching", version="1.7.0", lifespan=lifespan)
+from operations.woo_iban_rules import router as woo_iban_router
+app.include_router(woo_iban_router)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -154,7 +161,16 @@ async def _refresh_tokens(tokens: dict[str, Any]) -> dict[str, Any]:
     return new_tokens
 
 
+_token_access_lock = asyncio.Lock()
+
+
 async def _access_token() -> str:
+    # The routing worker and the new IBAN worker share a rotating OAuth token.
+    async with _token_access_lock:
+        return await _access_token_unlocked()
+
+
+async def _access_token_unlocked() -> str:
     tokens = _load_tokens()
     if not tokens:
         raise HTTPException(401, "Exact Online is not connected yet. Visit /login.")
@@ -619,6 +635,8 @@ async def order_rule_status(limit: int = 500) -> dict[str, Any]:
 
 
 async def create_order_rule(order_number: str) -> dict[str, Any]:
+    if os.getenv('REPLACE_ORDER_RULES_WITH_IBAN', 'false').lower() == 'true':
+        raise HTTPException(410, 'Ordernummerregels zijn vervangen door IBAN-regels vanuit WooCommerce.')
     if not ENABLE_ORDER_RULE_WRITES:
         raise HTTPException(403, "Order-toewijzingsregels schrijven staat op slot.")
     if not re.fullmatch(r"\d{4,10}", order_number):

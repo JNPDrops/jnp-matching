@@ -1,4 +1,4 @@
-"""Authorized bacs/Plisio routing inside the existing service and database.
+"""Authorized bacs/Plisio/Fibonatix routing in the existing service and database.
 
 Disabled until the operator enables the persistent control row. Polls new Exact
 sales entries; no public write route, new infrastructure, matching or reimport.
@@ -142,6 +142,13 @@ async def process_entry(api, conn, entry_id, reference, order):
         raise
 
 
+async def validate_routes(api):
+    contexts = [await m.context(api, method) for method in m.ROUTES]
+    sources = {ctx['accounts'][m.SOURCE]['ID'] for ctx in contexts}
+    m.require(len(sources) == 1, 'Route source debtors disagree')
+    return sources.pop()
+
+
 async def cycle(app_module):
     m.require(bool(app_module.DATABASE_URL), 'Persistent database required for automatic routing')
     with app_module._db_connect() as conn:
@@ -164,14 +171,12 @@ async def cycle(app_module):
                     pause(conn,'Unresolved write intent: inspect durable audit before resuming')
                     return
                 api=AutomaticExact(app_module,conn)
-                ctx=await m.context(api,'plisio')
-                # Resolve both approved targets on every pass, before any write.
-                await m.context(api,'bacs')
+                # Resolve every approved target on every pass, before any write.
+                source=await validate_routes(api)
                 end=datetime.now(timezone.utc).replace(microsecond=0)-timedelta(seconds=60)
                 if end<=cursor:
                     STATUS['state']='waiting'
                     return
-                source=ctx['accounts'][m.SOURCE]['ID']
                 rows=await api.rows('salesentry/SalesEntries',scan_params(source,started,cursor,end))
                 enqueue(conn,rows,source,started,end)
                 STATUS.update(state='checked',last_scan=m.utcnow())
@@ -208,7 +213,7 @@ async def enable(app_module, since):
     m.require(timedelta(0) <= datetime.now(timezone.utc)-since <= timedelta(hours=1),
               'Activation must cover only the last hour/new entries')
     api=m.Exact(app_module)
-    for method in m.ROUTES: await m.context(api,method)
+    await validate_routes(api)
     # Harmless store/order lookup proves the connected Metorik reader works.
     await e.lookup_orders(['TD48517'])
     with app_module._db_connect() as conn:

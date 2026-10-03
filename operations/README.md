@@ -206,3 +206,9 @@ actuele open posten die eerder als andere betaalmethode werden overgeslagen.
 Er worden geen nieuwe infrastructuur, financiële velden of algemene instellingen
 toegevoegd. Alle bestaande bestemmingen worden vóór iedere automatische scan
 opnieuw live gecontroleerd.
+
+De Exact- en Metorik-clients hergebruiken dezelfde geverifieerde TLS-certificaatstore.
+Een health-only proef op Render liet bij 25 nieuwe stores ongeveer 24 MiB groei
+zien, tegenover circa 0,125 MiB met hergebruik. De CA-bundel, hostnamecontrole,
+timeouts, geen redirects en geen automatische PUT-herhaling blijven gelijk.
+Zie https://www.python-httpx.org/advanced/ssl/ voor de equivalente SSL-context.

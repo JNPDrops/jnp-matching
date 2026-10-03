@@ -1,3 +1,29 @@
+## Actueel beleid — 3 oktober 2026, ICEPAY-opdracht
+
+Alleen `icepay-ideal` is actief: openstaande webshopverkoopboekingen van
+100100 naar bestaande debiteur 109419 in administratie 3977752. Dit is de
+ICEPAY-code die in de werkelijke ordergegevens is aangetroffen; andere codes
+worden niet geraden. Fibonatix blijft op 100100. Bacs/Plisio blijven gepauzeerd.
+De gebruiker heeft eerdere verplaatsingen zelf teruggezet.
+
+Eenmalige discovery leest alle actuele openstaande posten van 100100 zonder
+datumgrens. Unieke TD-referenties worden via Metorik aan orders gekoppeld;
+alleen bewezen ICEPAY-orders komen in de bestaande wachtrij. De actuele
+Exact-entry en het positieve restbedrag worden bij uitvoering gelezen, ook
+voor deelbetalingen. De enige Exact-write is PUT met `Customer`. Geen
+balansvergelijking, nacontrole, betaalconditiewijziging of nieuwe debiteur.
+
+Discovery en activering worden in de bestaande database vastgelegd. Een
+latere handmatige pauze wordt niet overschreven bij een herstart. Onzekere
+schrijfresultaten worden nooit automatisch herhaald. De dagelijkse
+API-reserve blijft gelden; hervatting volgt het resetmoment uit Exact.
+Tijdens discovery lopen korte batches; daarna controleert de bestaande
+worker iedere vijf minuten op gewijzigde/nieuwe imports (geen webhook).
+Xcore, DIRECT_WOO_BANK en de Woo/bosci-worker worden niet gewijzigd.
+
+Onderstaande oudere instructies zijn historische context en mogen dit
+huidige beleid niet overrulen.
+
 # Debiteurenomzetting
 
 ## Actuele beslissing: Fibonatix blijft op 100100 (3 oktober 2026, avond)

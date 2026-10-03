@@ -1,4 +1,4 @@
-"""Authorized bacs/Plisio/Fibonatix routing in the existing service and database.
+"""Authorized ICEPAY-only routing in the existing service and database.
 
 Disabled until the operator enables the persistent control row. Polls new Exact
 sales entries; no public write route, new infrastructure, matching or reimport.
@@ -16,15 +16,19 @@ from uuid import uuid4
 from operations import bacs_debtor_transfer as m, metorik_bacs_evidence as e
 from operations import customer_only_routing as customer_only
 from operations import routing_runtime as runtime
+from operations import icepay_routing as icepay
 
 LOCK_ID = 3977752100100
 INTERVAL = 300
-# Explicit user pause on 2026-10-03; lift only after a new resume instruction.
-OPERATOR_PAUSED = True
+# User authorized only ICEPAY on 2026-10-03 after pausing all transfers.
+OPERATOR_PAUSED = False
+ACTIVE_METHODS = icepay.ACTIVE_METHODS
 STATUS = {"enabled": False, "state": "not_started", "last_scan": None,
           "mode": "customer_only", "balance_checks": False, "applied_since_start": 0,
           "interval_seconds": INTERVAL, "last_error": None, "next_attempt_at": None,
-          "retained_payment_methods": dict(m.RETAIN_ON_SOURCE)}
+          "retained_payment_methods": dict(m.RETAIN_ON_SOURCE),
+          "active_routes": {icepay.METHOD: icepay.DESTINATION},
+          "paused_payment_methods": sorted(m.ROUTES), "icepay_discovery": None}
 
 
 def initialize(conn):
@@ -54,6 +58,11 @@ class AutomaticExact(m.Exact):
         super().__init__(app_module)
         self.conn = conn
 
+    async def request(self, method, url, params=None, payload=None):
+        if type(self.limits.get('remaining')) is int and not customer_only.budget_available(self, calls=1):
+            raise customer_only.BudgetDeferred('Waiting for API budget')
+        return await super().request(method, url, params=params, payload=payload)
+
     async def change_customer(self, entry_id, destination_id):
         if OPERATOR_PAUSED:
             raise m.WritePaused('Debtor routing paused by operator')
@@ -62,6 +71,8 @@ class AutomaticExact(m.Exact):
         enabled = self.conn.execute('SELECT enabled FROM jnp_debtor_route_control').fetchone()
         if enabled != (True,):
             raise m.WritePaused('Automatic routing was paused before the write')
+        accounts = await customer_only.route_accounts(self, methods=ACTIVE_METHODS)
+        m.require(destination_id == accounts[icepay.DESTINATION], 'Only ICEPAY destination is active')
         await super().change_customer(entry_id, destination_id)
 
 
@@ -138,16 +149,19 @@ async def process_entry(api, conn, entry_id, reference, order):
     if method in m.RETAIN_ON_SOURCE:
         record_state(conn,entry_id,'retained','Fibonatix stays on 100100 by operator instruction')
         return True
-    if method not in m.ROUTES:
+    if method not in m.ROUTES and method not in ACTIVE_METHODS:
         record_state(conn,entry_id,'skipped','Other webshop payment method')
         return
+    if method not in ACTIVE_METHODS:
+        record_state(conn,entry_id,'paused','Payment route remains paused by operator')
+        return True
     audit = Audit(conn,entry_id)
     try:
         m.require(order.get('order_number') == '#' + reference[2:], 'Order reference mismatch')
         selection = {'entry_id':entry_id,'reference':reference,'order_id':order['order_id'],
                      'payment_method':method}
         result = await customer_only.change_selected(api,selection,
-                    await customer_only.route_accounts(api),audit)
+                    await customer_only.route_accounts(api, methods=ACTIVE_METHODS),audit)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -155,7 +169,7 @@ async def process_entry(api, conn, entry_id, reference, order):
         audit.persist_event({'event':'entry_failure','entry_id':entry_id,**result})
         runtime.event('entry_isolated',queue='new_entries',entry_id=entry_id,**result)
         STATUS['last_error'] = result['reason']
-        if isinstance(exc,m.ExactRequestError) and exc.status_code == 429:
+        if isinstance(exc,customer_only.BudgetDeferred) or (isinstance(exc,m.ExactRequestError) and exc.status_code == 429):
             runtime.defer_until_reset(STATUS,api.limits)
         return not result['stop_cycle']
     record_state(conn,entry_id,result['state'],result['reason'])
@@ -165,7 +179,7 @@ async def process_entry(api, conn, entry_id, reference, order):
 
 
 async def validate_routes(api):
-    return (await customer_only.route_accounts(api))[m.SOURCE]
+    return (await customer_only.route_accounts(api, methods=ACTIVE_METHODS))[m.SOURCE]
 
 
 async def cycle(app_module):
@@ -174,6 +188,7 @@ async def cycle(app_module):
         initialize(conn)
         from operations import backfill_debtor_routing as backfill
         backfill.initialize(conn)
+        icepay.initialize(conn)
         if not conn.execute('SELECT pg_try_advisory_lock(%s)',(LOCK_ID,)).fetchone()[0]:
             STATUS['state'] = 'another_runner'
             return
@@ -183,7 +198,7 @@ async def cycle(app_module):
                 except BlockingIOError:
                     STATUS['state']='manual_run_active'
                     return
-                runtime.recover_once(conn)
+                icepay.resume_once(conn)
                 enabled,started,cursor = conn.execute('SELECT enabled,started_at,cursor_at FROM jnp_debtor_route_control').fetchone()
                 STATUS['enabled'] = enabled
                 if not enabled:
@@ -195,6 +210,7 @@ async def cycle(app_module):
                 api=AutomaticExact(app_module,conn)
                 # Fixed existing debtor IDs are cached for this service process.
                 source=await validate_routes(api)
+                await icepay.discover_batch(api,conn,source)
                 end=datetime.now(timezone.utc).replace(microsecond=0)-timedelta(seconds=60)
                 if end<=cursor:
                     STATUS['state']='waiting'
@@ -205,12 +221,12 @@ async def cycle(app_module):
                 if not customer_only.budget_available(api):
                     runtime.defer_until_reset(STATUS,api.limits)
                     return
-                queued=conn.execute("SELECT entry_id::text,reference FROM jnp_debtor_route_queue WHERE state='pending' AND next_check<=NOW() ORDER BY next_check,entry_id LIMIT 25").fetchall()
+                queued=conn.execute("SELECT entry_id::text,reference,order_evidence FROM jnp_debtor_route_queue WHERE state='pending' AND next_check<=NOW() ORDER BY (order_evidence IS NOT NULL) DESC,next_check,entry_id LIMIT 25").fetchall()
                 if queued:
-                    references=sorted({r[1] for r in queued})
-                    proof=await e.lookup_orders(references)
-                    for entry_id,reference in queued:
-                        order=proof['orders'].get('#'+reference[2:])
+                    references=sorted({r[1] for r in queued if r[2] is None})
+                    proof=await e.lookup_orders(references) if references else {'orders':{}}
+                    for entry_id,reference,stored_order in queued:
+                        order=stored_order or proof['orders'].get('#'+reference[2:])
                         if order is None:
                             record_state(conn,entry_id,'pending','Order not yet present in Metorik; no inference')
                             continue
@@ -222,9 +238,14 @@ async def cycle(app_module):
                 # New entries take priority; old entries require an explicit,
                 # durable operator-approved discovery cohort.
                 result = await backfill.process_pending(api, conn)
-                if result: STATUS['state'] = result
+                if result and result != 'backfill_retained_on_source': STATUS['state'] = result
+                elif STATUS.get('icepay_discovery'):
+                    STATUS['state'] = 'watching_icepay' if STATUS['icepay_discovery']['done'] else 'discovering_icepay'
                 runtime.event('cycle_complete',applied_since_start=STATUS['applied_since_start'],
                               last_scan=STATUS['last_scan'],queues=runtime.queue_counts(conn))
+        except customer_only.BudgetDeferred:
+            runtime.defer_until_reset(STATUS,api.limits)
+            raise
         finally:
             conn.execute('SELECT pg_advisory_unlock(%s)',(LOCK_ID,))
 
@@ -241,16 +262,23 @@ async def serve(app_module):
                 await cycle(app_module)
         except asyncio.CancelledError:
             raise
+        except customer_only.BudgetDeferred:
+            # The last limit/reset headers are published by cycle below.
+            runtime.event('cycle_deferred',reason='Waiting for API budget')
         except Exception as exc:
             # API error bodies and credentials are suppressed. Public health
             # output contains no financial details. Write intents are durable.
             STATUS['state']='retry_next_cycle'
             STATUS['last_error'] = (f'Exact {exc.method} HTTP {exc.status_code}'
-                                   if isinstance(exc,m.ExactRequestError) else 'Routing cycle failed; retry pending')
+                                   if isinstance(exc,m.ExactRequestError) else
+                                   'Existing route debtor missing or ambiguous'
+                                   if isinstance(exc,m.Stop) and str(exc) == 'Existing route debtor missing or ambiguous'
+                                   else 'Routing cycle failed; retry pending')
             if isinstance(exc,m.ExactRequestError) and exc.status_code == 429:
                 runtime.defer_until_reset(STATUS,exc.limits)
             runtime.event('cycle_deferred',reason=STATUS['last_error'])
-        await asyncio.sleep(INTERVAL)
+        discovering = STATUS.get('icepay_discovery') and not STATUS['icepay_discovery']['done']
+        await asyncio.sleep(15 if discovering and STATUS['state'] == 'discovering_icepay' else INTERVAL)
 
 
 async def enable(app_module, since):

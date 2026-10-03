@@ -44,9 +44,9 @@ class FibonatixRetentionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(m.Stop):await m.apply(api,p,p['plan_sha256'],None,True)
         api.change_customer.assert_not_awaited()
 
-    async def test_active_routes_need_only_the_two_remaining_destinations(self):
+    async def test_active_routes_need_only_icepay_destination(self):
         api=AsyncMock()
-        codes=('100100','109372','109377')
+        codes=('100100','109419')
         api.rows.return_value=[{'ID':f'00000000-0000-0000-0000-{i:012d}',
             'Code':code,'IsSales':True,'Status':'C'} for i,code in enumerate(codes,1)]
         with patch.object(c,'_accounts',None):
@@ -55,10 +55,9 @@ class FibonatixRetentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('109384',str(api.rows.call_args))
 
     async def test_operator_pause_still_blocks_writes_even_with_enabled_database_switch(self):
-        self.assertTrue(a.OPERATOR_PAUSED)
         app=MagicMock(DIVISION=m.DIVISION,BASE_URL=m.BASE,COLLECTIVE_DEBTOR_CODE=m.SOURCE)
         conn=MagicMock();conn.execute.return_value.fetchone.return_value=(True,)
         api=a.AutomaticExact(app,conn)
-        with patch.object(m.Exact,'change_customer',AsyncMock()) as write:
+        with patch.object(a,'OPERATOR_PAUSED',True),patch.object(m.Exact,'change_customer',AsyncMock()) as write:
             with self.assertRaises(m.WritePaused):await api.change_customer(ID,ID)
         write.assert_not_awaited()

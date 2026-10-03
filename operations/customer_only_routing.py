@@ -6,14 +6,28 @@ then send one Customer-only PUT. No balance, line, VAT or post-write rereads.
 import re
 
 from operations import bacs_debtor_transfer as m
+from operations import icepay_routing as icepay
 
 DAILY_RESERVE = 100
 CALLS_PER_ENTRY = 3
 _accounts = None
 
 
+class BudgetDeferred(m.Stop):
+    """Wait for the Exact reset without consuming the daily reserve."""
+
+
+def destination_code(method):
+    if method == icepay.METHOD:
+        return icepay.DESTINATION
+    m.require(method in m.ROUTES, "Unauthorized payment route")
+    return m.ROUTES[method][0]
+
+
 def failure_result(exc, write_started):
     """Keep an unresolved write isolated; never repeat an ambiguous outcome."""
+    if isinstance(exc, BudgetDeferred):
+        return {'state': 'pending', 'reason': 'Waiting for API budget', 'stop_cycle': True}
     if isinstance(exc, m.WritePaused):
         return {'state': 'pending', 'reason': 'Operator paused before PUT', 'stop_cycle': True}
     if isinstance(exc, m.Stop) and str(exc).startswith(('Exact GET transport/auth failure', 'Exact PUT transport/auth failure')):
@@ -33,11 +47,11 @@ def failure_result(exc, write_started):
             'stop_cycle': False}
 
 
-async def route_accounts(api):
+async def route_accounts(api, methods=None):
     """Resolve existing debtor IDs once per service process, never create them."""
     global _accounts
-    if _accounts is None:
-        codes = {m.SOURCE, *(route[0] for route in m.ROUTES.values())}
+    codes = {m.SOURCE, *(destination_code(method) for method in (m.ROUTES if methods is None else methods))}
+    if _accounts is None or not codes <= set(_accounts):
         rows = await api.rows('crm/Accounts', {
             '$filter': ' or '.join('Code eq ' + m.quoted(code.rjust(18)) for code in sorted(codes)),
             '$select': 'ID,Code,IsSales,Status'})
@@ -60,7 +74,7 @@ def budget_available(api, calls=CALLS_PER_ENTRY):
 async def change_selected(api, selection, accounts, audit):
     """Apply one previously established order-to-entry mapping without replanning."""
     method, reference = selection['payment_method'], selection['reference']
-    m.require(method in m.ROUTES or method in m.RETAIN_ON_SOURCE, 'Unauthorized payment route')
+    m.require(method in m.ROUTES or method == icepay.METHOD or method in m.RETAIN_ON_SOURCE, 'Unauthorized payment route')
     entry_id = m.guid(selection['entry_id'])
     m.require(isinstance(reference, str) and re.fullmatch(r'TD[0-9]{4,10}', reference),
               'Invalid approved order reference')
@@ -72,9 +86,9 @@ async def change_selected(api, selection, accounts, audit):
         return {**selection, 'entry_id': entry_id, 'destination': m.RETAIN_ON_SOURCE[method],
                 'state': 'retained', 'reason': 'Fibonatix transfer disabled; retain existing debtor'}
     source = m.guid(accounts[m.SOURCE])
-    destination = m.guid(accounts[m.ROUTES[method][0]])
+    destination = m.guid(accounts[destination_code(method)])
     m.require(source != destination, 'Source and destination must differ')
-    result = {**selection, 'entry_id': entry_id, 'destination': m.ROUTES[method][0]}
+    result = {**selection, 'entry_id': entry_id, 'destination': destination_code(method)}
     if not budget_available(api):
         return {**result, 'state': 'pending', 'reason': 'Waiting for API budget'}
 

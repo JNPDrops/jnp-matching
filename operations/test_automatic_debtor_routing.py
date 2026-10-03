@@ -70,9 +70,9 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_order_evidence_is_reused_without_full_plan_or_balance_reads(self):
         conn=Mock()
         with patch.object(e,'evidence_plan',AsyncMock()) as planner,patch.object(m,'apply',AsyncMock()) as old_apply,patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',AsyncMock(return_value={'state':'skipped','reason':'No remaining open item'})) as change:
-            await a.process_entry(AsyncMock(),conn,'entry','TD12345',{'payment_method':'plisio','order_id':7,'order_number':'#12345'})
+            await a.process_entry(AsyncMock(),conn,'entry','TD12345',{'payment_method':'icepay-ideal','order_id':7,'order_number':'#12345'})
             planner.assert_not_awaited();old_apply.assert_not_awaited();change.assert_awaited_once()
-            self.assertEqual(change.await_args.args[1],{'entry_id':'entry','reference':'TD12345','order_id':7,'payment_method':'plisio'})
+            self.assertEqual(change.await_args.args[1],{'entry_id':'entry','reference':'TD12345','order_id':7,'payment_method':'icepay-ideal'})
             self.assertEqual(conn.execute.call_args.args[1],('skipped','No remaining open item','entry'))
 
     async def test_failure_after_intent_is_isolated_without_disabling_worker(self):
@@ -81,7 +81,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             audit.persist_event({'event':'write_intent'})
             raise m.Stop('ambiguous response')
         with patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',side_effect=failed):
-            proceed=await a.process_entry(AsyncMock(),conn,'00000000-0000-0000-0000-000000000001','TD12345',{'payment_method':'plisio','order_id':7,'order_number':'#12345'})
+            proceed=await a.process_entry(AsyncMock(),conn,'00000000-0000-0000-0000-000000000001','TD12345',{'payment_method':'icepay-ideal','order_id':7,'order_number':'#12345'})
         self.assertTrue(proceed)
         self.assertFalse(any('enabled=FALSE' in call.args[0] for call in conn.execute.call_args_list))
         self.assertEqual(conn.execute.call_args.args[1][0],'uncertain')
@@ -94,7 +94,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         app=Mock(DATABASE_URL='configured');app._db_connect.return_value=conn
         api=AsyncMock();api.limits={'remaining':500};api.rows.return_value=[]
         from operations import backfill_debtor_routing as b
-        with patch.object(a,'initialize'),patch.object(b,'initialize'),patch.object(a.runtime,'recover_once'),patch.object(a.runtime,'deferred',return_value=False),patch.object(a.runtime,'queue_counts',return_value={}),patch.object(a.Path,'open',MagicMock()),patch.object(a.fcntl,'flock'),patch.object(a,'AutomaticExact',return_value=api),patch.object(a,'validate_routes',AsyncMock(return_value='00000000-0000-0000-0000-000000000001')),patch.object(b,'process_pending',AsyncMock(return_value=None)),patch.object(a,'enqueue') as enqueue:
+        with patch.object(a.icepay,'initialize'),patch.object(a.icepay,'resume_once'),patch.object(a.icepay,'discover_batch',AsyncMock()),patch.object(a,'initialize'),patch.object(b,'initialize'),patch.object(a.runtime,'recover_once'),patch.object(a.runtime,'deferred',return_value=False),patch.object(a.runtime,'queue_counts',return_value={}),patch.object(a.Path,'open',MagicMock()),patch.object(a.fcntl,'flock'),patch.object(a,'AutomaticExact',return_value=api),patch.object(a,'validate_routes',AsyncMock(return_value='00000000-0000-0000-0000-000000000001')),patch.object(b,'process_pending',AsyncMock(return_value=None)),patch.object(a,'enqueue') as enqueue:
             await a.cycle(app)
         enqueue.assert_called_once()
         self.assertEqual(enqueue.call_args.args[3],start)

@@ -212,3 +212,30 @@ Een health-only proef op Render liet bij 25 nieuwe stores ongeveer 24 MiB groei
 zien, tegenover circa 0,125 MiB met hergebruik. De CA-bundel, hostnamecontrole,
 timeouts, geen redirects en geen automatische PUT-herhaling blijven gelijk.
 Zie https://www.python-httpx.org/advanced/ssl/ voor de equivalente SSL-context.
+
+### Hervatbare Fibonatix-inhaalronde
+
+Een grote bestaande populatie wordt alleen uit een expliciet, onveranderlijk
+opgeslagen leesonderzoek geïmporteerd. `backfill_debtor_routing seed
+--discovery-sha SHA` controleert administratie, bron, doel, hash, leeftijd, unieke
+entry/order-koppelingen en de bestaande bestemming. Het maakt geen Exact-mutatie.
+Alleen dat cohort komt in `jnp_debtor_route_backfill` in de bestaande database.
+
+De bestaande service verwerkt eerst nieuwe boekingen en daarna maximaal tien
+historische posten. Iedere batch gebruikt opnieuw de bestaande live planner en
+Customer-only executor inclusief volledige voor/na- en gezamenlijke saldocontrole.
+Voldane, deelbetaalde en onduidelijke posten worden afzonderlijk gerapporteerd.
+Plannen en auditgebeurtenissen worden vóór de mutatie bestendig gearchiveerd.
+Een onzekere batch pauzeert alle automatische mutaties, ook na een herstart.
+
+De actuele Exact-daglimiet wordt uit de responseheaders gelezen. De inhaalronde
+start uitsluitend met minstens 1.600 aanvragen beschikbaar: 600 voor de batch
+en 1.000 reserve voor normale controles/nieuwe boekingen. Dat wordt vóór en na
+de leesplanning gecontroleerd. Bij minder ruimte wacht de inhaalronde; de
+bestaande vijfminutencyclus hervat vanzelf zodra er weer voldoende ruimte is.
+Er wordt geen Exact-limiet omzeild. De controle van alle bestemmingen gebruikt
+twee gedeelde leesaanvragen, met dezelfde unieke en actieve debiteurcontroles.
+
+`python -m operations.backfill_debtor_routing status` toont de cohortvoortgang.
+Een volledig afgeronde batch telt pas na het permanente `complete`-auditmoment
+als geverifieerd. Nieuwe posten en lopende inhaalbatches delen dezelfde locks.

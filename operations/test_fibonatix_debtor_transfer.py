@@ -54,14 +54,12 @@ class FibonatixTests(unittest.IsolatedAsyncioTestCase):
         api.change_customer.assert_not_awaited()
 
     async def test_all_routes_must_resolve_before_automatic_processing(self):
-        seen=[]
-        async def context(api,method):
-            seen.append(method)
-            if method == 'wc_fibonatix': raise m.Stop('Missing destination')
-            return {'accounts':{m.SOURCE:{'ID':'source'}}}
-        with patch.object(m,'context',side_effect=context):
-            with self.assertRaises(m.Stop): await a.validate_routes(AsyncMock())
-        self.assertEqual(set(seen), {'bacs','plisio','wc_fibonatix'})
+        api=AsyncMock()
+        api.rows.return_value=[{'ID':f'00000000-0000-0000-0000-{i:012d}',
+            'Code':code, 'Name':code, 'IsSales':True, 'Status':'C'}
+            for i,code in enumerate(('100100','109372','109377'),1)]
+        with self.assertRaises(m.Stop): await a.validate_routes(api)
+        api.change_customer.assert_not_awaited()
 
     async def test_wrong_method_target_partial_paid_or_amount_still_blocked(self):
         for change in ('method','destination','partial','paid_link','amount'):

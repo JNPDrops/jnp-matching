@@ -61,6 +61,8 @@ async def lifespan(_app):
 app = FastAPI(title="JNP Matching", version="1.7.0", lifespan=lifespan)
 from operations.woo_iban_rules import router as woo_iban_router
 app.include_router(woo_iban_router)
+from operations.allocation_connection import router as allocation_router
+app.include_router(allocation_router)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 

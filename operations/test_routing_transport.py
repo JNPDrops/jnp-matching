@@ -5,6 +5,19 @@ from operations import bacs_debtor_transfer as m
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rate_limit_retains_reset_without_reading_body_or_retrying(self):
+        app=Mock(DIVISION=m.DIVISION,BASE_URL=m.BASE,COLLECTIVE_DEBTOR_CODE=m.SOURCE)
+        app._access_token=AsyncMock(return_value='test-token')
+        response=Mock(status_code=429)
+        response.headers={'x-ratelimit-remaining':'0','x-ratelimit-reset':'1791064800000'}
+        client=AsyncMock();client.__aenter__.return_value=client;client.request.return_value=response
+        api=m.Exact(app)
+        with patch.object(m.httpx,'AsyncClient',return_value=client),patch.object(m.asyncio,'sleep',AsyncMock()):
+            with self.assertRaises(m.ExactRequestError) as caught:
+                await api.request('PUT',m.BASE+'/test',payload={'Customer':'test'})
+        self.assertEqual(caught.exception.limits,{'remaining':0,'reset_ms':1791064800000})
+        client.request.assert_awaited_once();response.json.assert_not_called()
+
     async def test_requests_share_verified_tls_without_redirect_or_retry(self):
         app=Mock(DIVISION=m.DIVISION, BASE_URL=m.BASE, COLLECTIVE_DEBTOR_CODE=m.SOURCE)
         app._access_token=AsyncMock(return_value='test-token')

@@ -12,6 +12,27 @@ CALLS_PER_ENTRY = 3
 _accounts = None
 
 
+def failure_result(exc, write_started):
+    """Keep an unresolved write isolated; never repeat an ambiguous outcome."""
+    if isinstance(exc, m.WritePaused):
+        return {'state': 'pending', 'reason': 'Operator paused before PUT', 'stop_cycle': True}
+    if isinstance(exc, m.Stop) and str(exc).startswith(('Exact GET transport/auth failure', 'Exact PUT transport/auth failure')):
+        return {'state': 'uncertain' if write_started else 'pending',
+                'reason': 'Exact transport/auth failure', 'stop_cycle': True}
+    if isinstance(exc, m.ExactRequestError):
+        reason = f'Exact {exc.method} HTTP {exc.status_code}'
+        if exc.status_code in (401, 403, 429):
+            # Explicit rejection, not an ambiguous network/5xx outcome.
+            return {'state': 'pending', 'reason': reason, 'stop_cycle': True}
+        if 400 <= exc.status_code < 500:
+            return {'state': 'review', 'reason': reason, 'stop_cycle': False}
+        return {'state': 'uncertain' if write_started else 'pending',
+                'reason': reason, 'stop_cycle': True}
+    return {'state': 'uncertain' if write_started else 'review',
+            'reason': 'Unconfirmed write outcome' if write_started else 'Entry validation/read failed',
+            'stop_cycle': False}
+
+
 async def route_accounts(api):
     """Resolve existing debtor IDs once per service process, never create them."""
     global _accounts

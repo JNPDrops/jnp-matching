@@ -169,9 +169,10 @@ minuten na afloop van de vorige controle; API-verwerking kan extra tijd kosten.
 Dit is polling, geen onmiddellijke Exact-eventcallback.
 
 De bestendige controlerij staat standaard uit. Een operator activeert eenmaal
-met een expliciet UTC-starttijdstip van maximaal een uur geleden. Alleen daarna
-in Exact aangemaakte verkoopboekingen op 100100 worden gevolgd, ongeacht hun
-factuurdatum. Overlappende Modified-scans en een wachtrij voorkomen dat een
+met een expliciet UTC-starttijdstip van maximaal een uur geleden. Daarna worden
+nieuwe of gewijzigde verkoopboekingen op 100100 gevolgd, ongeacht hun aanmaak-
+of factuurdatum. Een import mag een andere omschrijving hebben: de TD-referentie
+moet alsnog bewezen aan een webshoporder gekoppeld worden. Overlappende Modified-scans en een wachtrij voorkomen dat een
 herstart of vertraagde Metorik-import een boeking overslaat. Ontbrekende orders
 worden opnieuw alleen-lezen gezocht; andere betaalmethoden worden overgeslagen.
 De opgezochte betaalmethode en unieke orderreferentie bepalen de vaste route.
@@ -182,7 +183,8 @@ De bestaande PostgreSQL-database bewaart controlestatus, wachtrij en audit in
 `jnp_debtor_route_*`. Een databasebrede advisory lock en de lokale executorlock
 voorkomen gelijktijdige runs, ook bij een deployment. Vóór iedere PUT wordt het
 voorgenomen schrijfwerk bestendig opgeslagen. Zonder bevestigde HTTP-respons blijft
-de post onzeker en stopt de automatisering, ook na herstart. Geen automatische
+de post onzeker en wordt uitsluitend die post apart gehouden, ook na herstart.
+De overige posten en nieuwe imports blijven doorlopen. Geen automatische
 herhaling van een onzekere PUT. De audit bewaart bron, doel, orderkoppeling en
 schrijfresultaat; er worden geen saldi of volledige voor/na-beelden opgehaald.
 
@@ -194,10 +196,25 @@ python -m operations.automatic_debtor_routing pause
 
 Kies bij enable het actuele afgesproken startmoment, niet het voorbeeld hierboven.
 `run-once` gebruikt dezelfde permanente instelling, locks en controles. Het is
-geen mogelijkheid om een gepauzeerde of onzekere verwerking te forceren. Herstel
-na een onzekere uitkomst vereist onderzoek van de audit en afzonderlijke actie.
+geen mogelijkheid om een handmatige pauze te omzeilen of een onzekere post opnieuw
+te schrijven. Herstel van zo'n afzonderlijke post vereist een aparte actie.
 De publieke healthcontrole toont alleen ingeschakeld/status/laatste scantijd,
 geen boekingen, bedragen of geheimen. Bestaande matchingflags blijven ongewijzigd.
+
+Op 3 oktober 2026 gaf de gebruiker opdracht de doorlopende verwerking te herstellen.
+`routing_runtime.recover_once` hervat daarom eenmalig de reeds geïnitialiseerde
+router, bewaart de bestaande scanpositie en laat alle poststatussen intact.
+`continuous_routing_recovered_at` legt dit vast in de bestaande controlerij;
+een latere handmatige pauze blijft gerespecteerd, ook na een deployment.
+De vorige stopredencategorie en wachtrij-aantallen verschijnen uitsluitend in de
+Render-servicelogs. Er worden geen geheimen, saldi of API-responsebodies gelogd.
+
+Een expliciete HTTP 429/401/403-afwijzing laat de post wachtend staan en beëindigt
+de huidige ronde; een HTTP 400 e.d. zet alleen die post op `review`. Bij een
+onzekere schrijfuitkomst (transport/5xx) blijft de post `uncertain` zonder herhaling.
+GET-transportfouten worden in een volgende ronde opnieuw geprobeerd. De agent
+blijft ingeschakeld en hervat na voldoende API-budget; een bekende daglimiet-reset
+wordt gerespecteerd zonder iedere vijf minuten de uitgeputte API aan te roepen.
 
 ### Afzonderlijk beoordeelde orderkoppeling bij centverschillen
 
@@ -249,7 +266,9 @@ historische posten. Iedere batch hergebruikt de opgeslagen cohortselectie en
 gebruikt de minimale Customer-only uitvoerder zonder herhaalde order- of saldocontrole.
 Voldane en onduidelijke posten worden afzonderlijk gerapporteerd.
 Selectie en auditgebeurtenissen worden vóór de mutatie bestendig gearchiveerd.
-Een onzekere batch pauzeert alle automatische mutaties, ook na een herstart.
+Een onzekere post wordt apart gehouden; andere posten blijven beschikbaar voor
+verwerking. Schrijfintenties worden per post bijgehouden, zodat een latere leesfout
+niet door een eerdere geslaagde schrijfopdracht als onzekere mutatie wordt gezien.
 
 De actuele Exact-daglimiet wordt uit de responseheaders gelezen. De inhaalronde
 start met minstens 130 aanvragen beschikbaar: 30 voor de batch en 100 reserve.

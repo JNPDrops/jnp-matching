@@ -10,19 +10,28 @@ from operations import customer_only_routing as c
 
 
 class ScopeTests(unittest.TestCase):
-    def test_incremental_scope_requires_source_and_new_creation_with_overlap(self):
+    def test_incremental_scope_uses_modification_so_old_dated_imports_are_seen(self):
         start=datetime(2026,10,3,tzinfo=timezone.utc)
         params=a.scan_params('00000000-0000-0000-0000-000000000001',start,start+timedelta(minutes=20),start+timedelta(minutes=25))
-        self.assertIn("Created ge datetime'2026-10-03T00:00:00'",params['$filter'])
+        self.assertNotIn("Created ge",params['$filter'])
         self.assertIn("Modified ge datetime'2026-10-03T00:18:00'",params['$filter'])
         self.assertIn("Modified lt datetime'2026-10-03T00:25:00'",params['$filter'])
         with self.assertRaises(m.Stop): a.scan_params('bad',start,start,start)
 
-    def test_old_entry_rejected_before_queue_or_cursor_change(self):
-        conn=MagicMock()
-        conn.transaction.return_value=nullcontext()
-        row={'EntryID':'00000000-0000-0000-0000-000000000001','Customer':'source','Created':'/Date(0)/'}
-        with self.assertRaises(m.Stop):a.enqueue(conn,[row],'source',datetime.now(timezone.utc),datetime.now(timezone.utc))
+    def test_old_dated_import_with_order_reference_is_queued(self):
+        conn=MagicMock();conn.transaction.return_value=nullcontext()
+        row={'EntryID':'00000000-0000-0000-0000-000000000001','Customer':'source',
+             'Created':'/Date(0)/','Modified':'/Date(1791030000000)/',
+             'YourRef':'TD12345','Description':'Imported sale','Type':20,'Reversal':False}
+        a.enqueue(conn,[row],'source',datetime.now(timezone.utc),datetime.now(timezone.utc))
+        self.assertIn('INSERT INTO jnp_debtor_route_queue',conn.execute.call_args_list[0].args[0])
+        self.assertIn("'uncertain'",conn.execute.call_args_list[0].args[0])
+        self.assertIn("'applied'",conn.execute.call_args_list[0].args[0])
+
+    def test_wrong_source_rejected_before_queue_or_cursor_change(self):
+        conn=MagicMock();conn.transaction.return_value=nullcontext()
+        with self.assertRaises(m.Stop):
+            a.enqueue(conn,[{'EntryID':'id','Customer':'wrong'}],'source',datetime.now(timezone.utc),datetime.now(timezone.utc))
         conn.execute.assert_not_called()
 
     def test_durable_intent_precedes_put_and_complete_marks_verified(self):
@@ -66,24 +75,32 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(change.await_args.args[1],{'entry_id':'entry','reference':'TD12345','order_id':7,'payment_method':'plisio'})
             self.assertEqual(conn.execute.call_args.args[1],('skipped','No remaining open item','entry'))
 
-    async def test_any_failure_after_intent_pauses_automatic_routing(self):
+    async def test_failure_after_intent_is_isolated_without_disabling_worker(self):
         conn=MagicMock();conn.transaction.return_value=nullcontext()
         async def failed(api,selection,accounts,audit):
             audit.persist_event({'event':'write_intent'})
             raise m.Stop('ambiguous response')
         with patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',side_effect=failed):
-            with self.assertRaises(m.Stop):
-                await a.process_entry(AsyncMock(),conn,'00000000-0000-0000-0000-000000000001','TD12345',{'payment_method':'plisio','order_id':7,'order_number':'#12345'})
-        self.assertTrue(any('enabled=FALSE' in c.args[0] for c in conn.execute.call_args_list))
+            proceed=await a.process_entry(AsyncMock(),conn,'00000000-0000-0000-0000-000000000001','TD12345',{'payment_method':'plisio','order_id':7,'order_number':'#12345'})
+        self.assertTrue(proceed)
+        self.assertFalse(any('enabled=FALSE' in call.args[0] for call in conn.execute.call_args_list))
+        self.assertEqual(conn.execute.call_args.args[1][0],'uncertain')
 
-    async def test_restart_with_uncertain_entry_never_queries_exact(self):
+    async def test_cycle_only_processes_pending_entries_and_preserves_existing_cursor(self):
         conn=MagicMock();conn.__enter__.return_value=conn
-        conn.execute.return_value.fetchone.side_effect=[(True,),(True,datetime.now(timezone.utc),datetime.now(timezone.utc)),(True,)]
+        start=datetime.now(timezone.utc)-timedelta(days=1)
+        conn.execute.return_value.fetchone.side_effect=[(True,),(True,start,start)]
+        conn.execute.return_value.fetchall.return_value=[]
         app=Mock(DATABASE_URL='configured');app._db_connect.return_value=conn
-        with patch.object(a,'initialize'),patch.object(a.Path,'open',MagicMock()),patch.object(a.fcntl,'flock'),patch.object(a.m,'Exact') as exact:
+        api=AsyncMock();api.limits={'remaining':500};api.rows.return_value=[]
+        from operations import backfill_debtor_routing as b
+        with patch.object(a,'initialize'),patch.object(b,'initialize'),patch.object(a.runtime,'recover_once'),patch.object(a.runtime,'deferred',return_value=False),patch.object(a.runtime,'queue_counts',return_value={}),patch.object(a.Path,'open',MagicMock()),patch.object(a.fcntl,'flock'),patch.object(a,'AutomaticExact',return_value=api),patch.object(a,'validate_routes',AsyncMock(return_value='00000000-0000-0000-0000-000000000001')),patch.object(b,'process_pending',AsyncMock(return_value=None)),patch.object(a,'enqueue') as enqueue:
             await a.cycle(app)
-            exact.assert_not_called()
-        self.assertTrue(any('enabled=FALSE' in c.args[0] for c in conn.execute.call_args_list))
+        enqueue.assert_called_once()
+        self.assertEqual(enqueue.call_args.args[3],start)
+        sqls=[call.args[0] for call in conn.execute.call_args_list]
+        self.assertTrue(any("WHERE state='pending'" in sql for sql in sqls))
+        self.assertFalse(any('enabled=FALSE' in sql or 'SELECT EXISTS' in sql for sql in sqls))
 
     async def test_missing_orders_are_allowed_in_discovery_not_in_write_proof(self):
         with patch.object(e,'lookup_orders',AsyncMock(return_value={'store':{},'orders':{}})):

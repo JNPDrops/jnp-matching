@@ -51,6 +51,19 @@ class Stop(RuntimeError):
     """Safe, deliberately non-sensitive failure message."""
 
 
+class ExactRequestError(Stop):
+    """HTTP outcome without response bodies, URLs or credentials."""
+
+    def __init__(self, method, status_code, limits=None):
+        self.method, self.status_code = method, status_code
+        self.limits = dict(limits or {})
+        super().__init__(f"Exact {method} HTTP {status_code}; response suppressed; no retry")
+
+
+class WritePaused(Stop):
+    """Operator stopped routing before the HTTP write was sent."""
+
+
 def require(ok, message):
     if not ok:
         raise Stop(message)
@@ -114,11 +127,11 @@ class Exact:
         except Exception:
             # PUT is never retried, including ambiguous network outcomes.
             raise Stop(f"Exact {method} transport/auth failure; inspect audit before retrying") from None
-        require(response.status_code in ((200,) if method == "GET" else (200, 204)),
-                f"Exact {method} HTTP {response.status_code}; response suppressed; no retry")
         self.limits = {name: int(response.headers[header]) for name, header in (
             ('remaining', 'x-ratelimit-remaining'), ('reset_ms', 'x-ratelimit-reset'))
             if header in response.headers and response.headers[header].isdigit()}
+        if response.status_code not in ((200,) if method == "GET" else (200, 204)):
+            raise ExactRequestError(method, response.status_code, self.limits)
         if not response.content:
             return {}
         try:

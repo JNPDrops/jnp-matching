@@ -187,3 +187,22 @@ De controlegegevens worden vóór uitvoering opnieuw bij Metorik gelezen. Dit
 wijzigt geen enkel bedrag en verklaart de oorzaak van het centverschil niet.
 Een centverschil alleen is nooit voldoende bewijs. De automatische verwerking
 gebruikt deze optie niet en blijft afwijkende bedragen voor beoordeling apart zetten.
+
+## Fibonatix
+
+Dezelfde vaste route ondersteunt `wc_fibonatix → 109384` (bestaande debiteur
+Verzameldebiteur Fibonatics), vanaf 100100 in administratie 3977752. De live
+Exact-conditie moet `fi / wc_fibonatix / B` zijn. Ook deze route vereist uniek
+Metorik-orderbewijs, werkelijke Exact-restbedragen en alle bovenstaande controles.
+Een PP-verkoopconditie blijft PP. Andere betaalmethoden, voldane en deelbetaalde
+posten worden niet naar 109384 omgezet.
+
+Voor bestaande open posten: gebruik het manifest en `--payment-method wc_fibonatix`.
+Werk in kleine gecontroleerde batches; een Render-webshell kan een langlopend
+proces beëindigen. Archiveer iedere complete audit in de bestaande database.
+De bestaande automatische verwerking neemt de nieuwe route mee zonder reset van
+controlestatus, cursor, wachtrij of audit. Controleer bij de ingebruikname ook de
+actuele open posten die eerder als andere betaalmethode werden overgeslagen.
+Er worden geen nieuwe infrastructuur, financiële velden of algemene instellingen
+toegevoegd. Alle bestaande bestemmingen worden vóór iedere automatische scan
+opnieuw live gecontroleerd.

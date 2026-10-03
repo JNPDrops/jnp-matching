@@ -24,7 +24,8 @@ import httpx
 DIVISION = 3977752
 SOURCE = "100100"
 DESTINATION = "109372"  # Legacy bacs CLI default. Never change the collective debtor.
-ROUTES = {"bacs": ("109372", "ba"), "plisio": ("109377", "pl")}
+ROUTES = {"bacs": ("109372", "ba"), "plisio": ("109377", "pl"),
+          "wc_fibonatix": ("109384", "fi")}
 BASE = "https://start.exactonline.nl"
 VERSION = 1
 RESOURCES = {
@@ -376,8 +377,8 @@ def append_audit(f, event):
 
 async def apply(api, p, expected_sha, audit, accept_derived_changes=False):
     validate_plan(p, expected_sha)
-    require(p.get("payment_method", "bacs") != "plisio" or "metorik_evidence" in p,
-            "Plisio requires live-verified webshop evidence")
+    require(p.get("payment_method", "bacs") == "bacs" or "metorik_evidence" in p,
+            "This route requires live-verified webshop evidence")
     ctx = await context(api, p.get("payment_method", "bacs"))
     if "metorik_evidence" in p:
         from operations.metorik_bacs_evidence import verify_again, prepaid_context, item_evidence
@@ -465,7 +466,7 @@ async def run(args):
                 from operations.metorik_bacs_evidence import evidence_plan
                 result = await evidence_plan(api, json.loads(args.metorik_manifest.read_text()), args.payment_method, args.reviewed_line_link)
             else:
-                require(args.payment_method == "bacs", "Plisio requires verified webshop evidence")
+                require(args.payment_method == "bacs", "This route requires verified webshop evidence")
                 result = await plan(api, args.payment_method)
             private_write(args.output, result)
             print(json.dumps({**{k: v for k, v in result.items() if k not in ("context", "eligible", "review", "metorik_evidence")},

@@ -32,9 +32,9 @@ class IcepayTests(unittest.IsolatedAsyncioTestCase):
                 'order_id': 137196, 'payment_method': i.METHOD}, {**ACCOUNTS, '109419': TARGET}, Audit())
             api.change_customer.assert_not_awaited()
 
-    async def test_other_authorized_routes_remain_paused_and_unknown_codes_are_not_inferred(self):
-        for method, expected in (('bacs', 'paused'), ('plisio', 'paused'),
-                                 ('wc_fibonatix', 'retained'), ('icepay-unknown', 'skipped')):
+    async def test_retained_and_unknown_codes_are_not_inferred(self):
+        for method, expected in (('wc_fibonatix', 'retained'), ('wc_fibonatics', 'retained'),
+                                 ('icepay-unknown', 'skipped'), ('np_payments','skipped')):
             conn = MagicMock(); api = AsyncMock()
             with patch.object(c, 'change_selected', AsyncMock()) as change:
                 await a.process_entry(api, conn, ID, 'TD48874', {**ORDER, 'payment_method': method})

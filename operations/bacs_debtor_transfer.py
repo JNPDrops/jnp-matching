@@ -130,7 +130,8 @@ class Exact:
             # PUT is never retried, including ambiguous network outcomes.
             raise Stop(f"Exact {method} transport/auth failure; inspect audit before retrying") from None
         self.limits = {name: int(response.headers[header]) for name, header in (
-            ('remaining', 'x-ratelimit-remaining'), ('reset_ms', 'x-ratelimit-reset'))
+            ('remaining', 'x-ratelimit-remaining'), ('reset_ms', 'x-ratelimit-reset'),
+            ('limit', 'x-ratelimit-limit'))
             if header in response.headers and response.headers[header].isdigit()}
         if response.status_code not in ((200,) if method == "GET" else (200, 204)):
             raise ExactRequestError(method, response.status_code, self.limits)

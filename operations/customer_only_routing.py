@@ -6,7 +6,7 @@ then send one Customer-only PUT. No balance, line, VAT or post-write rereads.
 import re
 
 from operations import bacs_debtor_transfer as m
-from operations import icepay_routing as icepay
+from operations import debtor_routing_policy as policy
 
 DAILY_RESERVE = 100
 CALLS_PER_ENTRY = 3
@@ -18,10 +18,8 @@ class BudgetDeferred(m.Stop):
 
 
 def destination_code(method):
-    if method == icepay.METHOD:
-        return icepay.DESTINATION
-    m.require(method in m.ROUTES, "Unauthorized payment route")
-    return m.ROUTES[method][0]
+    m.require(method in policy.CLEANUP_ROUTES, "Unauthorized payment route")
+    return policy.CLEANUP_ROUTES[method]
 
 
 def failure_result(exc, write_started):
@@ -74,16 +72,28 @@ def budget_available(api, calls=CALLS_PER_ENTRY):
 async def change_selected(api, selection, accounts, audit):
     """Apply one previously established order-to-entry mapping without replanning."""
     method, reference = selection['payment_method'], selection['reference']
-    m.require(method in m.ROUTES or method == icepay.METHOD or method in m.RETAIN_ON_SOURCE, 'Unauthorized payment route')
+    scope = selection.get('work_scope', 'continuous')
+    m.require(method in policy.routes(scope) or method in policy.RETAIN_ON_SOURCE, 'Unauthorized payment route')
     entry_id = m.guid(selection['entry_id'])
     m.require(isinstance(reference, str) and re.fullmatch(r'TD[0-9]{4,10}', reference),
               'Invalid approved order reference')
     m.require(type(selection['order_id']) is int and selection['order_id'] > 0,
               'Missing approved order identity')
-    if method in m.RETAIN_ON_SOURCE:
+    entry_type = selection.get('entry_type', 20)
+    order_reference = selection.get('order_reference', reference)
+    m.require(entry_type in (20, 21), 'Unsupported sales entry type')
+    if entry_type == 21:
+        m.require(scope == 'cleanup' and isinstance(order_reference, str)
+                  and re.fullmatch(r'TD[0-9]{4,10}', order_reference)
+                  and order_reference != reference, 'Credit needs its original order')
+        m.require(m.guid(selection.get('debit_entry_id')) != entry_id,
+                  'Credit needs its proven original debit entry')
+    else:
+        m.require(order_reference == reference, 'Order reference mismatch')
+    if method in policy.RETAIN_ON_SOURCE:
         # A policy disposition only: no Exact reread, write, or reversal of an
         # earlier transfer. Applies to old queued work as well as new imports.
-        return {**selection, 'entry_id': entry_id, 'destination': m.RETAIN_ON_SOURCE[method],
+        return {**selection, 'entry_id': entry_id, 'destination': policy.RETAIN_ON_SOURCE[method],
                 'state': 'retained', 'reason': 'Fibonatix transfer disabled; retain existing debtor'}
     source = m.guid(accounts[m.SOURCE])
     destination = m.guid(accounts[destination_code(method)])
@@ -94,7 +104,7 @@ async def change_selected(api, selection, accounts, audit):
 
     rows = await api.rows('salesentry/SalesEntries', {
         '$filter': f"EntryID eq guid'{entry_id}'",
-        '$select': 'EntryID,Customer,YourRef,EntryNumber,Status,Type,Reversal'})
+        '$select': 'EntryID,Customer,YourRef,EntryNumber,Status,Type,Reversal,Description'})
     if len(rows) != 1:
         return {**result, 'state': 'review', 'reason': 'Sales entry missing or ambiguous'}
     header = rows[0]
@@ -104,8 +114,10 @@ async def change_selected(api, selection, accounts, audit):
         return {**result, 'state': 'applied', 'reason': 'Already on destination debtor'}
     if header['Customer'] != source:
         return {**result, 'state': 'review', 'reason': 'Entry is no longer on source debtor'}
-    if header['Status'] != 20 or header['Type'] != 20 or header['Reversal'] is not False:
+    if header['Status'] != 20 or header['Type'] != entry_type or header['Reversal'] is not False:
         return {**result, 'state': 'review', 'reason': 'Entry is not an editable sales booking'}
+    if entry_type == 21 and header.get('Description') != f'Order #{order_reference[2:]} / Credit #{reference}':
+        return {**result, 'state': 'review', 'reason': 'Credit/original order mapping changed'}
 
     # This selects the currently open item only; it is not a balance comparison.
     open_items = await api.rows('read/financial/ReceivablesList', {
@@ -118,8 +130,9 @@ async def change_selected(api, selection, accounts, audit):
     item = open_items[0]
     m.require(item['AccountId'] == source and item['YourRef'] == reference
               and item['EntryNumber'] == header['EntryNumber'], 'Unexpected open item')
-    if m.amount(item['Amount']) <= 0:
-        return {**result, 'state': 'skipped', 'reason': 'No positive remaining amount'}
+    remaining = m.amount(item['Amount'])
+    if (entry_type == 20 and remaining <= 0) or (entry_type == 21 and remaining >= 0):
+        return {**result, 'state': 'skipped', 'reason': 'No remaining amount for this entry type'}
     if not budget_available(api, calls=1):
         return {**result, 'state': 'pending', 'reason': 'Waiting for API budget'}
 

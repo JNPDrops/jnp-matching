@@ -72,7 +72,8 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(e,'evidence_plan',AsyncMock()) as planner,patch.object(m,'apply',AsyncMock()) as old_apply,patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',AsyncMock(return_value={'state':'skipped','reason':'No remaining open item'})) as change:
             await a.process_entry(AsyncMock(),conn,'entry','TD12345',{'payment_method':'icepay-ideal','order_id':7,'order_number':'#12345'})
             planner.assert_not_awaited();old_apply.assert_not_awaited();change.assert_awaited_once()
-            self.assertEqual(change.await_args.args[1],{'entry_id':'entry','reference':'TD12345','order_id':7,'payment_method':'icepay-ideal'})
+            self.assertEqual(change.await_args.args[1],{'entry_id':'entry','reference':'TD12345','order_id':7,'payment_method':'icepay-ideal',
+                'work_scope':'continuous','order_reference':'TD12345','entry_type':20,'debit_entry_id':None})
             self.assertEqual(conn.execute.call_args.args[1],('skipped','No remaining open item','entry'))
 
     async def test_failure_after_intent_is_isolated_without_disabling_worker(self):
@@ -89,18 +90,18 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
     async def test_cycle_only_processes_pending_entries_and_preserves_existing_cursor(self):
         conn=MagicMock();conn.__enter__.return_value=conn
         start=datetime.now(timezone.utc)-timedelta(days=1)
-        conn.execute.return_value.fetchone.side_effect=[(True,),(True,start,start)]
+        conn.execute.return_value.fetchone.side_effect=[(True,),(True,start,start,None),({'done':True},),(False,)]
         conn.execute.return_value.fetchall.return_value=[]
         app=Mock(DATABASE_URL='configured');app._db_connect.return_value=conn
         api=AsyncMock();api.limits={'remaining':500};api.rows.return_value=[]
         from operations import backfill_debtor_routing as b
-        with patch.object(a.icepay,'initialize'),patch.object(a.icepay,'resume_once'),patch.object(a.icepay,'discover_batch',AsyncMock()),patch.object(a,'initialize'),patch.object(b,'initialize'),patch.object(a.runtime,'recover_once'),patch.object(a.runtime,'deferred',return_value=False),patch.object(a.runtime,'queue_counts',return_value={}),patch.object(a.Path,'open',MagicMock()),patch.object(a.fcntl,'flock'),patch.object(a,'AutomaticExact',return_value=api),patch.object(a,'validate_routes',AsyncMock(return_value='00000000-0000-0000-0000-000000000001')),patch.object(b,'process_pending',AsyncMock(return_value=None)),patch.object(a,'enqueue') as enqueue:
+        with patch.object(a.policy,'initialize'),patch.object(a.policy,'activate_once'),patch.object(a.policy,'wait_for_start',return_value=False),patch.object(a.cleanup,'discover_batch',AsyncMock()),patch.object(a.cleanup,'status',return_value={}),patch.object(a,'initialize'),patch.object(b,'initialize'),patch.object(a.runtime,'recover_once'),patch.object(a.runtime,'deferred',return_value=False),patch.object(a.runtime,'queue_counts',return_value={}),patch.object(a.Path,'open',MagicMock()),patch.object(a.fcntl,'flock'),patch.object(a,'AutomaticExact',return_value=api),patch.object(a,'validate_routes',AsyncMock(return_value='00000000-0000-0000-0000-000000000001')),patch.object(b,'process_pending',AsyncMock(return_value=None)),patch.object(a,'enqueue') as enqueue:
             await a.cycle(app)
         enqueue.assert_called_once()
         self.assertEqual(enqueue.call_args.args[3],start)
         sqls=[call.args[0] for call in conn.execute.call_args_list]
         self.assertTrue(any("WHERE state='pending'" in sql for sql in sqls))
-        self.assertFalse(any('enabled=FALSE' in sql or 'SELECT EXISTS' in sql for sql in sqls))
+        self.assertFalse(any('enabled=FALSE' in sql for sql in sqls))
 
     async def test_missing_orders_are_allowed_in_discovery_not_in_write_proof(self):
         with patch.object(e,'lookup_orders',AsyncMock(return_value={'store':{},'orders':{}})):

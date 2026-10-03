@@ -1,5 +1,21 @@
 # Debiteurenomzetting
 
+## Actuele beslissing: Fibonatix blijft op 100100 (3 oktober 2026, avond)
+
+Op uitdrukkelijk verzoek blijft `wc_fibonatix` vanaf nu op debiteur **100100**.
+Fibonatix is verwijderd uit de toegestane omzettingsroutes naar 109384. Nieuwe
+imports krijgen de status `retained`; de bestaande Fibonatix-inhaalqueue wordt
+bij een latere hervatting eveneens overgeslagen, zonder Exact-aanroepen.
+`retained` legt deze beleidskeuze vast en is geen nieuwe controle van de boeking.
+Eerder overgezette posten op 109384 worden hiermee niet teruggezet.
+
+De agent blijft expliciet gepauzeerd (`OPERATOR_PAUSED = True`). Deze wijziging
+hervat geen verwerking. De bestaande bacs- en Plisio-bestemmingen blijven 109372
+en 109377. De publieke status toont de vaste behoudregel; onbekende betaalcodes,
+waaronder `suap_wordpresspayplugin`, worden niet op basis van vermoedens aan
+PayPal, Stripe of Myco Solutions gekoppeld. Onderstaande Fibonatix-omzettings-
+instructies beschrijven de historische inrichting en zijn niet meer actief.
+
 ## Actieve agents: alleen de debiteur wijzigen (3 oktober 2026)
 
 Op expliciet verzoek gebruiken de automatische router en Fibonatix-inhaalqueue

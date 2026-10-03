@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, patch
 from operations import customer_only_routing as c, bacs_debtor_transfer as m
 
 ID='00000000-0000-0000-0000-000000000001'
-ACCOUNTS={code:f'00000000-0000-0000-0000-{i:012d}' for i,code in enumerate(('100100','109372','109377','109384'),10)}
-SELECTION={'entry_id':ID,'reference':'TD48874','order_id':137196,'payment_method':'wc_fibonatix'}
+ACCOUNTS={code:f'00000000-0000-0000-0000-{i:012d}' for i,code in enumerate(('100100','109372','109377'),10)}
+SELECTION={'entry_id':ID,'reference':'TD48874','order_id':137196,'payment_method':'plisio'}
 HEADER={'EntryID':ID,'Customer':ACCOUNTS['100100'],'YourRef':'TD48874','EntryNumber':26722913,'Status':20,'Type':20,'Reversal':False}
 OPEN={'AccountId':ACCOUNTS['100100'],'EntryNumber':26722913,'YourRef':'TD48874','Amount':170}
 
@@ -35,7 +35,7 @@ class CustomerOnlyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(audit.events[-1]['event'],'customer_applied')
 
     async def test_already_moved_is_not_written_again(self):
-        api=self.api({**HEADER,'Customer':ACCOUNTS['109384']})
+        api=self.api({**HEADER,'Customer':ACCOUNTS['109377']})
         result=await c.change_selected(api,SELECTION,ACCOUNTS,Audit())
         self.assertEqual(result['state'],'applied');self.assertEqual(api.rows.await_count,1)
         api.change_customer.assert_not_awaited()

@@ -60,12 +60,17 @@ def budget_available(api, calls=CALLS_PER_ENTRY):
 async def change_selected(api, selection, accounts, audit):
     """Apply one previously established order-to-entry mapping without replanning."""
     method, reference = selection['payment_method'], selection['reference']
-    m.require(method in m.ROUTES, 'Unauthorized payment route')
+    m.require(method in m.ROUTES or method in m.RETAIN_ON_SOURCE, 'Unauthorized payment route')
     entry_id = m.guid(selection['entry_id'])
     m.require(isinstance(reference, str) and re.fullmatch(r'TD[0-9]{4,10}', reference),
               'Invalid approved order reference')
     m.require(type(selection['order_id']) is int and selection['order_id'] > 0,
               'Missing approved order identity')
+    if method in m.RETAIN_ON_SOURCE:
+        # A policy disposition only: no Exact reread, write, or reversal of an
+        # earlier transfer. Applies to old queued work as well as new imports.
+        return {**selection, 'entry_id': entry_id, 'destination': m.RETAIN_ON_SOURCE[method],
+                'state': 'retained', 'reason': 'Fibonatix transfer disabled; retain existing debtor'}
     source = m.guid(accounts[m.SOURCE])
     destination = m.guid(accounts[m.ROUTES[method][0]])
     m.require(source != destination, 'Source and destination must differ')

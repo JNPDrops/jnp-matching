@@ -1,73 +1,64 @@
-import copy
-import tempfile
+"""Current user policy supersedes the former Fibonatix transfer authorization."""
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from operations import bacs_debtor_transfer as m, metorik_bacs_evidence as e
-from operations import automatic_debtor_routing as a
-from operations.test_plisio_debtor_transfer import fixture as plisio_fixture
+from operations import bacs_debtor_transfer as m, customer_only_routing as c
+from operations import automatic_debtor_routing as a, backfill_debtor_routing as b
 
-
-def fixture():
-    ctx, before, after, ev = plisio_fixture()
-    ctx['accounts']['109384'] = ctx['accounts'].pop('109377')
-    ctx.update(payment_method='wc_fibonatix', condition={
-        'Code':'fi', 'Description':'wc_fibonatix', 'PaymentMethod':'B'})
-    ev['order']['payment_method'] = 'wc_fibonatix'
-    after['cashflow'][0].update(AccountCode='            109384', PaymentReference='109384/1')
-    after['open'][0]['AccountCode'] = '            109384'
-    return ctx, before, after, ev
+ID='00000000-0000-0000-0000-000000000001'
+SELECTION={'entry_id':ID,'reference':'TD48874','order_id':137196,'payment_method':'wc_fibonatix'}
 
 
-class FibonatixTests(unittest.IsolatedAsyncioTestCase):
-    async def test_exact_customer_write_and_all_amounts_preserved(self):
-        ctx, before, after, ev = fixture()
-        item = m.eligible(before, ctx, ev)
-        m.check_after(before, after, ctx, True, ev)
-        m.check_balances(before['open'], after['open'], [item], ctx, True)
-        proof = {'manifest':[{k:ev[k] for k in ('entry_id','reference','order_id')}],
-                 'orders':{'#12345':ev['order']}}
-        p = {'version':m.VERSION, 'division':m.DIVISION, 'source':m.SOURCE,
-             'destination':'109384', 'payment_method':'wc_fibonatix', 'context':ctx,
-             'created_at':m.utcnow(), 'metorik_evidence':proof, 'review':[],
-             'eligible':[{**item,'snapshot':before,'order_evidence':ev}]}
-        p['plan_sha256'] = m.digest(p)
-        api = AsyncMock()
-        with tempfile.TemporaryFile(mode='w+') as audit, \
-             patch.object(m,'context',AsyncMock(return_value=ctx)), \
-             patch.object(e,'prepaid_context',AsyncMock()), \
-             patch.object(e,'verify_again',AsyncMock()), \
-             patch.object(m,'snapshot',AsyncMock(side_effect=[before,before,after,after])), \
-             patch.object(m,'balances',AsyncMock(side_effect=[before['open'],after['open']])):
-            result = await m.apply(api,p,p['plan_sha256'],audit,True)
-        api.change_customer.assert_awaited_once_with(ev['entry_id'],ctx['accounts']['109384']['ID'])
-        self.assertEqual(result['preserved_open_totals'],{'EUR':'121'})
+class FibonatixRetentionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_executor_retains_fibonatix_without_any_exact_or_audit_calls(self):
+        api=AsyncMock();audit=MagicMock()
+        result=await c.change_selected(api,SELECTION,{},audit)
+        self.assertEqual(result['state'],'retained')
+        self.assertEqual(result['destination'],'100100')
+        self.assertNotIn('confirmation',result)
+        self.assertEqual(api.mock_calls,[]);self.assertEqual(audit.mock_calls,[])
 
-    async def test_fibonatix_cannot_apply_without_live_order_proof(self):
-        ctx, _, _, _ = fixture()
-        p = {'version':m.VERSION, 'division':m.DIVISION, 'source':m.SOURCE,
-             'destination':'109384', 'payment_method':'wc_fibonatix', 'context':ctx,
-             'created_at':m.utcnow(), 'eligible':[]}
-        p['plan_sha256'] = m.digest(p)
-        api=AsyncMock()
-        with self.assertRaises(m.Stop): await m.apply(api,p,p['plan_sha256'],None,True)
+    async def test_new_fibonatix_import_never_resolves_accounts_or_writes(self):
+        api=AsyncMock();conn=MagicMock()
+        order={'order_id':137196,'order_number':'#48874','payment_method':'wc_fibonatix'}
+        with patch.object(c,'route_accounts',AsyncMock()) as accounts,patch.object(c,'change_selected',AsyncMock()) as change:
+            self.assertTrue(await a.process_entry(api,conn,ID,'TD48874',order))
+        accounts.assert_not_awaited();change.assert_not_awaited()
+        self.assertEqual(conn.execute.call_args.args[1][0],'retained')
+
+    async def test_old_waiting_cohort_is_retired_without_reversing_previous_results(self):
+        api=AsyncMock();conn=MagicMock()
+        with patch.object(c,'route_accounts',AsyncMock()) as accounts,patch.object(c,'change_selected',AsyncMock()) as change:
+            self.assertEqual(await b.process_pending(api,conn),'backfill_retained_on_source')
+        accounts.assert_not_awaited();change.assert_not_awaited();self.assertEqual(api.mock_calls,[])
+        conn.execute.assert_called_once()
+        sql,args=conn.execute.call_args.args
+        self.assertIn("WHERE state='pending' AND payment_method=%s",sql)
+        self.assertEqual(args,('wc_fibonatix',))
+
+    async def test_previous_fibonatix_transfer_plan_is_no_longer_authorized(self):
+        p={'version':m.VERSION,'division':m.DIVISION,'source':'100100',
+           'destination':'109384','payment_method':'wc_fibonatix',
+           'context':{'payment_method':'wc_fibonatix'},'created_at':m.utcnow(),'eligible':[]}
+        p['plan_sha256']=m.digest(p);api=AsyncMock()
+        with self.assertRaises(m.Stop):await m.apply(api,p,p['plan_sha256'],None,True)
         api.change_customer.assert_not_awaited()
 
-    async def test_all_routes_must_resolve_before_automatic_processing(self):
+    async def test_active_routes_need_only_the_two_remaining_destinations(self):
         api=AsyncMock()
+        codes=('100100','109372','109377')
         api.rows.return_value=[{'ID':f'00000000-0000-0000-0000-{i:012d}',
-            'Code':code, 'Name':code, 'IsSales':True, 'Status':'C'}
-            for i,code in enumerate(('100100','109372','109377'),1)]
-        with self.assertRaises(m.Stop): await a.validate_routes(api)
-        api.change_customer.assert_not_awaited()
+            'Code':code,'IsSales':True,'Status':'C'} for i,code in enumerate(codes,1)]
+        with patch.object(c,'_accounts',None):
+            source=await a.validate_routes(api)
+        self.assertEqual(source,'00000000-0000-0000-0000-000000000001')
+        self.assertNotIn('109384',str(api.rows.call_args))
 
-    async def test_wrong_method_target_partial_paid_or_amount_still_blocked(self):
-        for change in ('method','destination','partial','paid_link','amount'):
-            ctx, before, _, ev = fixture()
-            if change=='method': ev['order']['payment_method']='plisio'
-            elif change=='destination': ctx['accounts']['109377']=ctx['accounts'].pop('109384')
-            elif change=='partial': before['open'][0]['Amount']=1
-            elif change=='paid_link': before['cashflow'].append(copy.deepcopy(before['cashflow'][0]))
-            else: ev['order']['total']=120.99
-            with self.subTest(change=change):
-                with self.assertRaises(m.Stop): m.eligible(before,ctx,ev)
+    async def test_operator_pause_still_blocks_writes_even_with_enabled_database_switch(self):
+        self.assertTrue(a.OPERATOR_PAUSED)
+        app=MagicMock(DIVISION=m.DIVISION,BASE_URL=m.BASE,COLLECTIVE_DEBTOR_CODE=m.SOURCE)
+        conn=MagicMock();conn.execute.return_value.fetchone.return_value=(True,)
+        api=a.AutomaticExact(app,conn)
+        with patch.object(m.Exact,'change_customer',AsyncMock()) as write:
+            with self.assertRaises(m.WritePaused):await api.change_customer(ID,ID)
+        write.assert_not_awaited()

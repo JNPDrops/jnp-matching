@@ -12,6 +12,12 @@ OTHER='00000000-0000-0000-0000-000000000002'
 
 
 class BackfillTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Exercise historical batch mechanics separately from the current
+        # retain-on-source policy, which has dedicated no-write tests.
+        self.retention=patch.object(m,'RETAIN_ON_SOURCE',{})
+        self.retention.start();self.addCleanup(self.retention.stop)
+
     def connection(self):
         conn=MagicMock();conn.transaction.return_value=nullcontext()
         conn.execute.return_value.fetchall.return_value=[(ID,'TD12345',7,b.METHOD)]
@@ -78,12 +84,12 @@ class BackfillTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_route_contexts_preserve_fixed_destinations_in_two_reads(self):
         api=AsyncMock()
-        codes=('100100','109372','109377','109384')
+        codes=('100100','109372','109377')
         accounts=[{'Code':code.rjust(18),'Name':code,'ID':f'00000000-0000-0000-0000-{i:012d}','IsSales':True,'Status':'C'} for i,code in enumerate(codes,1)]
         conditions=[{'Code':route[1],'Description':method,'PaymentMethod':'B'} for method,route in m.ROUTES.items()]
         api.rows.side_effect=[accounts,conditions]
         ctx=await m.route_contexts(api)
-        self.assertEqual({method:m.destination(c) for method,c in ctx.items()}, {'bacs':'109372','plisio':'109377','wc_fibonatix':'109384'})
+        self.assertEqual({method:m.destination(c) for method,c in ctx.items()}, {'bacs':'109372','plisio':'109377'})
         self.assertEqual(api.rows.await_count,2)
 
 

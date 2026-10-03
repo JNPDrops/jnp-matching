@@ -71,6 +71,11 @@ class Audit:
 
 
 async def process_pending(api, conn):
+    if METHOD in m.RETAIN_ON_SOURCE:
+        # Retire only waiting work. Applied/review/uncertain history stays intact;
+        # nothing is moved back and no Exact request is made for this cohort.
+        conn.execute("UPDATE jnp_debtor_route_backfill SET state='retained',reason='Fibonatix stays on 100100 by operator instruction',updated_at=NOW() WHERE state='pending' AND payment_method=%s", (METHOD,))
+        return 'backfill_retained_on_source'
     rows = conn.execute("SELECT entry_id::text,reference,order_id,payment_method FROM jnp_debtor_route_backfill WHERE state='pending' ORDER BY created_at,reference LIMIT %s", (BATCH_SIZE,)).fetchall()
     if not rows: return None
     from operations.automatic_debtor_routing import STATUS

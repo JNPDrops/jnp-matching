@@ -23,7 +23,8 @@ INTERVAL = 300
 OPERATOR_PAUSED = True
 STATUS = {"enabled": False, "state": "not_started", "last_scan": None,
           "mode": "customer_only", "balance_checks": False, "applied_since_start": 0,
-          "interval_seconds": INTERVAL, "last_error": None, "next_attempt_at": None}
+          "interval_seconds": INTERVAL, "last_error": None, "next_attempt_at": None,
+          "retained_payment_methods": dict(m.RETAIN_ON_SOURCE)}
 
 
 def initialize(conn):
@@ -134,6 +135,9 @@ def record_state(conn, entry_id, state, reason):
 
 async def process_entry(api, conn, entry_id, reference, order):
     method = order['payment_method']
+    if method in m.RETAIN_ON_SOURCE:
+        record_state(conn,entry_id,'retained','Fibonatix stays on 100100 by operator instruction')
+        return True
     if method not in m.ROUTES:
         record_state(conn,entry_id,'skipped','Other webshop payment method')
         return

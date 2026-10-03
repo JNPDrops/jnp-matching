@@ -31,8 +31,10 @@ TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 DIVISION = 3977752
 SOURCE = "100100"
 DESTINATION = "109372"  # Legacy bacs CLI default. Never change the collective debtor.
-ROUTES = {"bacs": ("109372", "ba"), "plisio": ("109377", "pl"),
-          "wc_fibonatix": ("109384", "fi")}
+ROUTES = {"bacs": ("109372", "ba"), "plisio": ("109377", "pl")}
+# User decision 2026-10-03: keep Fibonatix on the existing source debtor.
+# This does not move previously transferred entries back from 109384.
+RETAIN_ON_SOURCE = {"wc_fibonatix": SOURCE}
 BASE = "https://start.exactonline.nl"
 VERSION = 1
 RESOURCES = {

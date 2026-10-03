@@ -14,10 +14,12 @@ import re
 from uuid import uuid4
 
 from operations import bacs_debtor_transfer as m, metorik_bacs_evidence as e
+from operations import customer_only_routing as customer_only
 
 LOCK_ID = 3977752100100
 INTERVAL = 300
-STATUS = {"enabled": False, "state": "not_started", "last_scan": None}
+STATUS = {"enabled": False, "state": "not_started", "last_scan": None,
+          "mode": "customer_only", "balance_checks": False, "applied_since_start": 0}
 
 
 def initialize(conn):
@@ -75,6 +77,8 @@ class Audit:
                 self.conn.execute("UPDATE jnp_debtor_route_queue SET state='uncertain',reason='write intent persisted' WHERE entry_id=%s", (self.entry_id,))
             elif event['event'] == 'complete':
                 self.conn.execute("UPDATE jnp_debtor_route_queue SET state='verified',reason=NULL WHERE entry_id=%s", (self.entry_id,))
+            elif event['event'] == 'customer_applied':
+                self.conn.execute("UPDATE jnp_debtor_route_queue SET state='applied',reason=NULL WHERE entry_id=%s", (self.entry_id,))
         if event['event'] == 'write_intent':
             self.write_started = True
 
@@ -108,7 +112,7 @@ def enqueue(conn, rows, source_id, started_at, end):
             conn.execute("""INSERT INTO jnp_debtor_route_queue(entry_id,reference,modified)
                 VALUES(%s,%s,%s) ON CONFLICT(entry_id) DO UPDATE
                 SET reference=EXCLUDED.reference,modified=EXCLUDED.modified,state='pending',reason=NULL,next_check=NOW()
-                WHERE jnp_debtor_route_queue.state NOT IN ('verified','uncertain')
+                WHERE jnp_debtor_route_queue.state NOT IN ('verified','applied','uncertain')
                   AND jnp_debtor_route_queue.modified<>EXCLUDED.modified""", (m.guid(row['EntryID']),ref,row['Modified']))
         conn.execute("UPDATE jnp_debtor_route_control SET cursor_at=%s,last_scan=NOW()", (end,))
 
@@ -123,19 +127,16 @@ async def process_entry(api, conn, entry_id, reference, order):
     if method not in m.ROUTES:
         record_state(conn,entry_id,'skipped','Other webshop payment method')
         return
-    manifest = [{'entry_id':entry_id,'reference':reference,'order_id':order['order_id']}]
-    p = await e.evidence_plan(api,manifest,method)
-    if p['review']:
-        record_state(conn,entry_id,'review',p['review'][0]['reason'])
-        return
-    if not p['eligible']:
-        record_state(conn,entry_id,'skipped','No remaining open sales entry')
-        return
+    m.require(order.get('order_number') == '#' + reference[2:], 'Order reference mismatch')
+    selection = {'entry_id':entry_id,'reference':reference,'order_id':order['order_id'],
+                 'payment_method':method}
     audit = Audit(conn,entry_id)
     try:
-        # Identical Customer-only executor and preflight/global verification as
-        # the approved one-shot correction. No alternate mutation path exists.
-        await m.apply(api,p,p['plan_sha256'],audit,accept_derived_changes=True)
+        result = await customer_only.change_selected(api,selection,
+                    await customer_only.route_accounts(api),audit)
+        record_state(conn,entry_id,result['state'],result['reason'])
+        if result.get('confirmation') == 'Exact HTTP acknowledgement':
+            STATUS['applied_since_start'] += 1
     except BaseException:
         if audit.write_started:
             pause(conn,'Write attempted without a complete verified audit; inspect durable audit')
@@ -143,10 +144,7 @@ async def process_entry(api, conn, entry_id, reference, order):
 
 
 async def validate_routes(api):
-    contexts = (await m.route_contexts(api)).values()
-    sources = {ctx['accounts'][m.SOURCE]['ID'] for ctx in contexts}
-    m.require(len(sources) == 1, 'Route source debtors disagree')
-    return sources.pop()
+    return (await customer_only.route_accounts(api))[m.SOURCE]
 
 
 async def cycle(app_module):
@@ -173,7 +171,7 @@ async def cycle(app_module):
                     pause(conn,'Unresolved write intent: inspect durable audit before resuming')
                     return
                 api=AutomaticExact(app_module,conn)
-                # Resolve every approved target on every pass, before any write.
+                # Fixed existing debtor IDs are cached for this service process.
                 source=await validate_routes(api)
                 end=datetime.now(timezone.utc).replace(microsecond=0)-timedelta(seconds=60)
                 if end<=cursor:
@@ -182,6 +180,9 @@ async def cycle(app_module):
                 rows=await api.rows('salesentry/SalesEntries',scan_params(source,started,cursor,end))
                 enqueue(conn,rows,source,started,end)
                 STATUS.update(state='checked',last_scan=m.utcnow())
+                if not customer_only.budget_available(api):
+                    STATUS['state']='waiting_for_api_budget'
+                    return
                 queued=conn.execute("SELECT entry_id::text,reference FROM jnp_debtor_route_queue WHERE state='pending' AND next_check<=NOW() ORDER BY next_check,entry_id LIMIT 25").fetchall()
                 if queued:
                     references=sorted({r[1] for r in queued})
@@ -191,6 +192,7 @@ async def cycle(app_module):
                         if order is None:
                             record_state(conn,entry_id,'pending','Order not yet present in Metorik; no inference')
                             continue
+                        if not customer_only.budget_available(api): break
                         await process_entry(api,conn,entry_id,reference,order)
                 # New entries take priority; old entries require an explicit,
                 # durable operator-approved discovery cohort.

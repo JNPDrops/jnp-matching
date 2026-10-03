@@ -15,11 +15,18 @@ import json
 import os
 from pathlib import Path
 import re
+import ssl
 import time
 from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
+import certifi
+
+# Reuse the verified CA store across short-lived clients. Rebuilding it on every
+# request caused about 24 MiB growth per 25 live requests on the Render runtime.
+# This is HTTPX's documented equivalent of verify=True, not a weaker TLS policy.
+TLS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 DIVISION = 3977752
 SOURCE = "100100"
@@ -99,7 +106,8 @@ class Exact:
         self.last_request = time.monotonic()
         try:
             token = await self.app._access_token()
-            async with httpx.AsyncClient(timeout=45, follow_redirects=False, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=45, follow_redirects=False, trust_env=False,
+                                         verify=TLS_CONTEXT) as client:
                 response = await client.request(method, url, params=params, json=payload,
                     headers={"Authorization": "Bearer " + token, "Accept": "application/json"})
         except Exception:

@@ -42,7 +42,7 @@ async def lookup_orders(references, include_line_proof=False):
               "Expected unique webshop references")
     key = os.environ.get("METORIK_API_KEY", "").strip()
     m.require(bool(key), "Metorik authentication unavailable")
-    async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False,
+    async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False, verify=m.TLS_CONTEXT,
             headers={"Authorization": "Bearer " + key, "Accept": "application/json"}) as client:
         async def get(path, params=None):
             m.require(path in ("", "/orders"), "Metorik read path not allowed")

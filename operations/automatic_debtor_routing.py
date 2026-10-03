@@ -41,6 +41,19 @@ def pause(conn, reason):
     STATUS.update(enabled=False, state="paused")
 
 
+class AutomaticExact(m.Exact):
+    def __init__(self, app_module, conn):
+        super().__init__(app_module)
+        self.conn = conn
+
+    async def change_customer(self, entry_id, destination_id):
+        # A pause takes effect even when an earlier read-only preflight is still
+        # running. Failure to read the switch blocks the write as well.
+        enabled = self.conn.execute('SELECT enabled FROM jnp_debtor_route_control').fetchone()
+        m.require(enabled == (True,), 'Automatic routing was paused before the write')
+        await super().change_customer(entry_id, destination_id)
+
+
 class Audit:
     def __init__(self, conn, entry_id):
         self.conn, self.entry_id, self.run_id = conn, entry_id, str(uuid4())
@@ -150,7 +163,7 @@ async def cycle(app_module):
                 if conn.execute("SELECT EXISTS(SELECT 1 FROM jnp_debtor_route_queue WHERE state='uncertain')").fetchone()[0]:
                     pause(conn,'Unresolved write intent: inspect durable audit before resuming')
                     return
-                api=m.Exact(app_module)
+                api=AutomaticExact(app_module,conn)
                 ctx=await m.context(api,'plisio')
                 # Resolve both approved targets on every pass, before any write.
                 await m.context(api,'bacs')

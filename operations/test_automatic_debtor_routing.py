@@ -89,3 +89,12 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class PauseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pause_after_preflight_blocks_customer_put(self):
+        app=Mock(DIVISION=m.DIVISION,BASE_URL=m.BASE,COLLECTIVE_DEBTOR_CODE=m.SOURCE)
+        conn=MagicMock();conn.execute.return_value.fetchone.return_value=(False,)
+        api=a.AutomaticExact(app,conn)
+        with patch.object(m.Exact,'change_customer',AsyncMock()) as write:
+            with self.assertRaises(m.Stop):await api.change_customer('entry','target')
+            write.assert_not_awaited()

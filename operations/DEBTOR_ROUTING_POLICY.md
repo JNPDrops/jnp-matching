@@ -20,7 +20,9 @@ uniquely and be active sales accounts; they are never created.
 
 The worker activates this authorization once, preserving the incremental cursor
 and all uncertain write outcomes. The 21:34 operator instruction brings the
-historic open ICEPAY cohort forward to run immediately. Other methods and
+historic open ICEPAY cohort forward to run immediately. At 22:00 the operator
+also authorized immediate SUAP cleanup. At 22:01 they requested using the revised
+credit inventory from the other chat. Other methods and
 continuous imports start **4 October 2026 at 02:00:05 Europe/Amsterdam**
 (00:00:05 UTC). This is a start time, not a completion guarantee.
 A later persistent operator pause must remain effective across cycles/restarts.
@@ -63,7 +65,25 @@ Xcore, DIRECT_WOO_BANK and the Woo/bosci worker are unchanged. Do not call
 existing deployments and confirming auto-deploy remains off.
 
 Before the scheduled start, both queue selection and the last write guard require
-a durable cleanup entry with `icepay-ideal` evidence and destination 109419.
+a durable cleanup entry with `icepay-ideal` evidence and destination 109419, or
+`suap_wordpresspayplugin` evidence and destination 109422. Each destination is
+bound to that entry's stored payment code.
 The full open-item discovery may queue other authorized routes, but cannot execute
 them early. Health exposes counts by payment method and the latest observed
 Allocation budget headers. It performs no financial post-write rereads.
+
+## SUAP reassessment incorporated at 22:01
+
+The revised `openstaande-posten-creditanalyse-20261003.xlsx`, version 2, updated
+19:48:53 UTC, identifies 343 SUAP entries in the 09:35 Exact snapshot. Its minimal
+entry/order identity list is persisted in `reviewed_suap_20261003.json`.
+TD113933 belongs to order TD41300 (Metorik 111850); TD116518 belongs to TD40287
+(Metorik 108478). The former proposed TD113933/40287 pairing is rejected.
+
+Compare that reviewed inventory with the existing live cleanup queue before
+processing SUAP. The comparison is local database work and uses no Exact calls.
+Any conflicting entry/order identity is held for review. Absence from the live
+queue is reported with its discovery reason; the spreadsheet does not override
+current open status, debit/credit proof, completed work or uncertain writes.
+Keep the cohort revision unchanged to reuse discovery and preserve the 25
+already applied ICEPAY entries. SUAP remains a one-time open-item cleanup.

@@ -63,8 +63,10 @@ class ScopeTests(unittest.TestCase):
 
 class ProcessTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        phase=patch.object(a.policy,"icepay_only",return_value=False)
+        phase=patch.object(a.policy,"before_scheduled_start",return_value=False)
         phase.start();self.addCleanup(phase.stop)
+        review=patch.object(a.reviewed_suap,'reconcile',return_value={})
+        review.start();self.addCleanup(review.stop)
 
     async def test_other_methods_never_build_a_write_plan(self):
         with patch.object(e,'evidence_plan',AsyncMock()) as build:

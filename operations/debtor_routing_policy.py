@@ -1,4 +1,4 @@
-"""Operator routes and the 21:34 authorization to process historic ICEPAY now."""
+"""Operator routes; historical ICEPAY and SUAP authorized to run immediately."""
 from datetime import datetime, timezone
 
 REVISION = '2026-10-03-allocation-icepay-now-v2'
@@ -7,6 +7,11 @@ CONTINUOUS_ROUTES = {'bacs': '109372', 'plisio': '109377', 'icepay-ideal': '1094
 CLEANUP_ROUTES = {**CONTINUOUS_ROUTES, 'np_payments': '109421',
                   'suap_wordpresspayplugin': '109422'}
 RETAIN_ON_SOURCE = {'wc_fibonatix': '100100', 'wc_fibonatics': '100100'}
+# Keep the cohort revision: SUAP was already discovered under this policy.
+# The 22:00 instruction advances its execution without resetting discovery,
+# completed ICEPAY entries, uncertain outcomes, or an operator pause.
+IMMEDIATE_CLEANUP_ROUTES = {'icepay-ideal': '109419',
+                            'suap_wordpresspayplugin': '109422'}
 
 
 def routes(scope):
@@ -15,17 +20,17 @@ def routes(scope):
     return {}
 
 
-def icepay_only(now=None):
+def before_scheduled_start(now=None):
     return (now or datetime.now(timezone.utc)) < START_AT
 
 
 def routes_for_now(now=None):
-    return {'icepay-ideal':'109419'} if icepay_only(now) else dict(CLEANUP_ROUTES)
+    return dict(IMMEDIATE_CLEANUP_ROUTES if before_scheduled_start(now) else CLEANUP_ROUTES)
 
 
 def work_allowed(method, scope, now=None):
-    return method in routes(scope) and (not icepay_only(now)
-        or (method=='icepay-ideal' and scope=='cleanup'))
+    return method in routes(scope) and (not before_scheduled_start(now)
+        or (method in IMMEDIATE_CLEANUP_ROUTES and scope=='cleanup'))
 
 
 def initialize(conn):

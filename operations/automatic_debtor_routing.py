@@ -17,6 +17,7 @@ from operations import customer_only_routing as customer_only
 from operations import routing_runtime as runtime
 from operations import debtor_routing_policy as policy, open_item_cleanup as cleanup
 from operations import allocation_connection as allocation
+from operations import reviewed_suap
 
 LOCK_ID = 3977752100100
 INTERVAL = 300
@@ -31,7 +32,8 @@ STATUS = {"enabled": False, "state": "not_started", "last_scan": None,
           "cleanup_routes": dict(policy.CLEANUP_ROUTES), "cleanup": None,
           "policy_revision": policy.REVISION, "api_limits": None,
           "execution_connection": "JNP Allocation", "automatic_key_switching": False,
-          "current_phase": "icepay_history" if policy.icepay_only() else "all_routes",
+          "immediate_cleanup_routes": dict(policy.IMMEDIATE_CLEANUP_ROUTES),
+          "current_phase": "immediate_cleanup" if policy.before_scheduled_start() else "all_routes",
           "paused_payment_methods": []}
 
 
@@ -84,10 +86,12 @@ class AutomaticExact(m.Exact):
         accounts = await customer_only.route_accounts(self, methods=policy.routes_for_now())
         m.require(destination_id in {accounts[code] for code in policy.routes_for_now().values()},
                   'Destination is outside the authorized policy')
-        if policy.icepay_only():
+        if policy.before_scheduled_start():
             entry = self.conn.execute("SELECT work_scope,order_evidence->>'payment_method' FROM jnp_debtor_route_queue WHERE entry_id=%s", (m.guid(entry_id),)).fetchone()
-            if entry != ('cleanup','icepay-ideal'):
-                raise m.WritePaused('Only the historic ICEPAY cohort may run before the scheduled start')
+            if (entry is None or entry[0] != 'cleanup'
+                    or entry[1] not in policy.IMMEDIATE_CLEANUP_ROUTES
+                    or destination_id != accounts[policy.IMMEDIATE_CLEANUP_ROUTES[entry[1]]]):
+                raise m.WritePaused('Only authorized historical routes may run before the scheduled start')
         await super().change_customer(entry_id, destination_id)
 
 
@@ -187,6 +191,8 @@ async def process_entry(api, conn, entry_id, reference, order, *, work_scope='co
                      'payment_method':method,'work_scope':work_scope,
                      'order_reference':order_reference,'entry_type':entry_type,
                      'debit_entry_id':debit_entry_id}
+        if method == reviewed_suap.METHOD:
+            reviewed_suap.validate_selection(selection)
         result = await customer_only.change_selected(api,selection,
                     await customer_only.route_accounts(api, methods=policy.routes_for_now()),audit)
     except asyncio.CancelledError:
@@ -237,9 +243,9 @@ async def cycle(app_module):
                 if not enabled:
                     STATUS.update(state='disabled',next_attempt_at=None)
                     return
-                early=policy.icepay_only()
-                STATUS['current_phase']='icepay_history' if early else 'all_routes'
-                if early and STATUS['state']=='icepay_history_complete': return
+                early=policy.before_scheduled_start()
+                STATUS['current_phase']='immediate_cleanup' if early else 'all_routes'
+                if early and STATUS['state']=='immediate_cleanup_complete': return
                 if runtime.deferred(STATUS):
                     STATUS['state']='waiting_for_api_budget'
                     return
@@ -261,16 +267,19 @@ async def cycle(app_module):
                     enqueue(conn,rows,source,started,end)
                     STATUS['last_scan']=m.utcnow()
                 await cleanup.discover_batch(api,conn,source)
-                STATUS['state']='routing_icepay_history' if early else 'processing_queue'
+                if 'suap_reassessment' not in STATUS:
+                    STATUS['suap_reassessment']=reviewed_suap.reconcile(conn)
+                    runtime.event('suap_reassessment',**STATUS['suap_reassessment'])
+                STATUS['state']='routing_immediate_cleanup' if early else 'processing_queue'
                 if not customer_only.budget_available(api):
                     runtime.defer_until_reset(STATUS,api.limits)
                     return
                 queued=conn.execute("""SELECT q.entry_id::text,q.reference,q.order_evidence,
                     COALESCE(q.order_reference,q.reference),q.entry_type,q.work_scope,q.debit_entry_id::text
                     FROM jnp_debtor_route_queue q WHERE state='pending' AND next_check<=NOW()
-                    AND (%s OR (q.work_scope='cleanup' AND q.order_evidence->>'payment_method'='icepay-ideal'))
+                    AND (%s OR (q.work_scope='cleanup' AND q.order_evidence->>'payment_method'=ANY(%s)))
                     AND NOT EXISTS (SELECT 1 FROM jnp_debtor_route_backfill b WHERE b.entry_id=q.entry_id AND b.state='uncertain')
-                    ORDER BY (work_scope='continuous') DESC,(order_evidence IS NOT NULL) DESC,next_check,entry_id LIMIT 50""",(not early,)).fetchall()
+                    ORDER BY (work_scope='continuous') DESC,(order_evidence IS NOT NULL) DESC,next_check,entry_id LIMIT 50""",(not early,list(policy.IMMEDIATE_CLEANUP_ROUTES))).fetchall()
                 if queued:
                     references=sorted({r[3] for r in queued if r[2] is None})
                     proof=await e.lookup_orders(references) if references else {'orders':{}}
@@ -291,10 +300,10 @@ async def cycle(app_module):
                 await backfill.process_pending(api,conn)
                 saved=conn.execute('SELECT open_item_cleanup FROM jnp_debtor_route_control').fetchone()[0]
                 STATUS['cleanup']=cleanup.status(conn,saved)
-                ready=conn.execute("SELECT EXISTS(SELECT 1 FROM jnp_debtor_route_queue WHERE state='pending' AND (%s OR (work_scope='cleanup' AND order_evidence->>'payment_method'='icepay-ideal')))",(not early,)).fetchone()[0]
+                ready=conn.execute("SELECT EXISTS(SELECT 1 FROM jnp_debtor_route_queue WHERE state='pending' AND (%s OR (work_scope='cleanup' AND order_evidence->>'payment_method'=ANY(%s))))",(not early,list(policy.IMMEDIATE_CLEANUP_ROUTES))).fetchone()[0]
                 STATUS['state']='processing_queue' if ready or not saved['done'] else 'watching'
                 if early and not ready and saved['done']:
-                    STATUS.update(state='icepay_history_complete',next_attempt_at=policy.START_AT.isoformat())
+                    STATUS.update(state='immediate_cleanup_complete',next_attempt_at=policy.START_AT.isoformat())
                 runtime.event('cycle_complete',applied_since_start=STATUS['applied_since_start'],
                               last_scan=STATUS['last_scan'],cleanup=STATUS['cleanup'],queues=runtime.queue_counts(conn))
         except customer_only.BudgetDeferred:

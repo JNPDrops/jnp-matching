@@ -80,7 +80,7 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
             (True,p.REVISION,False,'100100',False)):
             conn=MagicMock();conn.execute.return_value.fetchone.return_value=(enabled,revision)
             api=a.AutomaticExact(app,conn)
-            with patch.object(p,'icepay_only',return_value=waiting),patch.object(c,'route_accounts',AsyncMock(return_value=ACCOUNTS)),patch.object(m.Exact,'change_customer',AsyncMock()) as write:
+            with patch.object(p,'before_scheduled_start',return_value=waiting),patch.object(c,'route_accounts',AsyncMock(return_value=ACCOUNTS)),patch.object(m.Exact,'change_customer',AsyncMock()) as write:
                 if allowed:
                     await api.change_customer(ID,ACCOUNTS[target]);write.assert_awaited_once()
                 else:

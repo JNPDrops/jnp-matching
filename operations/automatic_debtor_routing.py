@@ -19,6 +19,8 @@ from operations import routing_runtime as runtime
 
 LOCK_ID = 3977752100100
 INTERVAL = 300
+# Explicit user pause on 2026-10-03; lift only after a new resume instruction.
+OPERATOR_PAUSED = True
 STATUS = {"enabled": False, "state": "not_started", "last_scan": None,
           "mode": "customer_only", "balance_checks": False, "applied_since_start": 0,
           "interval_seconds": INTERVAL, "last_error": None, "next_attempt_at": None}
@@ -52,6 +54,8 @@ class AutomaticExact(m.Exact):
         self.conn = conn
 
     async def change_customer(self, entry_id, destination_id):
+        if OPERATOR_PAUSED:
+            raise m.WritePaused('Debtor routing paused by operator')
         # A pause takes effect even when an earlier read-only preflight is still
         # running. Failure to read the switch blocks the write as well.
         enabled = self.conn.execute('SELECT enabled FROM jnp_debtor_route_control').fetchone()
@@ -224,7 +228,13 @@ async def cycle(app_module):
 async def serve(app_module):
     while True:
         try:
-            await cycle(app_module)
+            if OPERATOR_PAUSED:
+                with app_module._db_connect() as conn:
+                    initialize(conn)
+                    pause(conn, 'Paused by authorized operator')
+                STATUS['next_attempt_at'] = None
+            else:
+                await cycle(app_module)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

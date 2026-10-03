@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from operations import bacs_debtor_transfer as m, metorik_bacs_evidence as e
 from operations import customer_only_routing as customer_only
+from operations import routing_runtime as runtime
 
 METHOD = 'wc_fibonatix'
 BATCH_SIZE = 10
@@ -39,6 +40,7 @@ class Audit:
         m.require(bool(self.ids), 'Empty backfill audit')
         self.first = sorted(self.ids)[0]
         self.write_started = False
+        self.write_started_entries = set()
         conn.execute('INSERT INTO jnp_debtor_manual_archive(plan_sha256,payment_method,plan,audit,verification) VALUES(%s,%s,%s::jsonb,%s::jsonb,%s::jsonb)',
                      (plan['plan_sha256'], METHOD, json.dumps(plan), '[]', json.dumps({'kind':'automatic_backfill','run_id':self.run_id})))
         self.plan_sha = plan['plan_sha256']
@@ -60,14 +62,21 @@ class Audit:
                                   (json.dumps({'kind':'automatic_backfill','run_id':self.run_id,'result':event},default=str),self.plan_sha))
             elif event['event'] == 'customer_applied':
                 self.conn.execute("UPDATE jnp_debtor_route_backfill SET state='applied',reason=NULL,updated_at=NOW() WHERE entry_id=%s", (entry,))
-        if event['event'] == 'write_intent': self.write_started = True
+            elif event['event'] == 'entry_failure':
+                self.conn.execute("UPDATE jnp_debtor_route_backfill SET state=%s,reason=%s,updated_at=NOW() WHERE entry_id=%s",
+                                  (event['state'],event['reason'],entry))
+        if event['event'] == 'write_intent':
+            self.write_started = True
+            self.write_started_entries.add(entry)
 
 
 async def process_pending(api, conn):
     rows = conn.execute("SELECT entry_id::text,reference,order_id,payment_method FROM jnp_debtor_route_backfill WHERE state='pending' ORDER BY created_at,reference LIMIT %s", (BATCH_SIZE,)).fetchall()
     if not rows: return None
-    if not budget_available(api): return 'backfill_waiting_for_api_budget'
     from operations.automatic_debtor_routing import STATUS
+    if not budget_available(api):
+        runtime.defer_until_reset(STATUS,api.limits)
+        return 'waiting_for_api_budget'
     STATUS['state'] = 'backfill_customer_only'
     m.require(all(row[3] == METHOD for row in rows), 'Unauthorized backfill route')
     accounts = await customer_only.route_accounts(api)
@@ -77,19 +86,26 @@ async def process_pending(api, conn):
          'run_id':str(uuid4()),'eligible':manifest}
     p['plan_sha256'] = m.digest(p)
     audit = Audit(conn,p)
-    try:
-        for selection in manifest:
-            if not customer_only.budget_available(api): break
+    for selection in manifest:
+        if not customer_only.budget_available(api): break
+        try:
             result = await customer_only.change_selected(api,selection,accounts,audit)
-            conn.execute("UPDATE jnp_debtor_route_backfill SET state=%s,reason=%s,updated_at=NOW() WHERE entry_id=%s",
-                         (result['state'],result['reason'],selection['entry_id']))
-            if result.get('confirmation') == 'Exact HTTP acknowledgement':
-                STATUS['applied_since_start'] += 1
-    except BaseException:
-        if audit.write_started:
-            from operations.automatic_debtor_routing import pause
-            pause(conn,'Backfill write attempted without a complete verified audit; inspect durable archive')
-        raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            result = customer_only.failure_result(exc, selection['entry_id'] in audit.write_started_entries)
+            audit.persist_event({'event':'entry_failure','entry_id':selection['entry_id'],**result})
+            runtime.event('entry_isolated',queue='backfill',entry_id=selection['entry_id'],**result)
+            STATUS['last_error'] = result['reason']
+            if isinstance(exc,m.ExactRequestError) and exc.status_code == 429:
+                runtime.defer_until_reset(STATUS,api.limits)
+                return 'waiting_for_api_budget'
+            if result['stop_cycle']: return 'retry_next_cycle'
+            continue
+        conn.execute("UPDATE jnp_debtor_route_backfill SET state=%s,reason=%s,updated_at=NOW() WHERE entry_id=%s",
+                     (result['state'],result['reason'],selection['entry_id']))
+        if result.get('confirmation') == 'Exact HTTP acknowledgement':
+            STATUS['applied_since_start'] += 1
     return 'backfill_batch_applied'
 
 

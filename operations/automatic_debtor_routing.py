@@ -2,7 +2,7 @@
 
 Disabled until the operator enables the persistent control row. Polls new Exact
 sales entries; no public write route, new infrastructure, matching or reimport.
-A durable write intent without a complete audit halts automation after a restart.
+An unconfirmed write is isolated; other entries and future imports keep running.
 """
 import argparse
 import asyncio
@@ -15,11 +15,13 @@ from uuid import uuid4
 
 from operations import bacs_debtor_transfer as m, metorik_bacs_evidence as e
 from operations import customer_only_routing as customer_only
+from operations import routing_runtime as runtime
 
 LOCK_ID = 3977752100100
 INTERVAL = 300
 STATUS = {"enabled": False, "state": "not_started", "last_scan": None,
-          "mode": "customer_only", "balance_checks": False, "applied_since_start": 0}
+          "mode": "customer_only", "balance_checks": False, "applied_since_start": 0,
+          "interval_seconds": INTERVAL, "last_error": None, "next_attempt_at": None}
 
 
 def initialize(conn):
@@ -29,6 +31,7 @@ def initialize(conn):
         started_at TIMESTAMPTZ, cursor_at TIMESTAMPTZ,
         pause_reason TEXT, last_scan TIMESTAMPTZ)""")
     conn.execute("INSERT INTO jnp_debtor_route_control(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING")
+    conn.execute('ALTER TABLE jnp_debtor_route_control ADD COLUMN IF NOT EXISTS continuous_routing_recovered_at TIMESTAMPTZ')
     conn.execute("""CREATE TABLE IF NOT EXISTS jnp_debtor_route_queue (
         entry_id UUID PRIMARY KEY, reference TEXT NOT NULL, modified TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'pending', reason TEXT,
@@ -52,7 +55,8 @@ class AutomaticExact(m.Exact):
         # A pause takes effect even when an earlier read-only preflight is still
         # running. Failure to read the switch blocks the write as well.
         enabled = self.conn.execute('SELECT enabled FROM jnp_debtor_route_control').fetchone()
-        m.require(enabled == (True,), 'Automatic routing was paused before the write')
+        if enabled != (True,):
+            raise m.WritePaused('Automatic routing was paused before the write')
         await super().change_customer(entry_id, destination_id)
 
 
@@ -79,6 +83,9 @@ class Audit:
                 self.conn.execute("UPDATE jnp_debtor_route_queue SET state='verified',reason=NULL WHERE entry_id=%s", (self.entry_id,))
             elif event['event'] == 'customer_applied':
                 self.conn.execute("UPDATE jnp_debtor_route_queue SET state='applied',reason=NULL WHERE entry_id=%s", (self.entry_id,))
+            elif event['event'] == 'entry_failure':
+                self.conn.execute("UPDATE jnp_debtor_route_queue SET state=%s,reason=%s,next_check=NOW()+INTERVAL '10 minutes' WHERE entry_id=%s",
+                                  (event['state'],event['reason'],self.entry_id))
         if event['event'] == 'write_intent':
             self.write_started = True
 
@@ -94,7 +101,7 @@ def scan_params(source_id, started_at, cursor_at, end):
         m.require(dt.tzinfo is not None, 'Naive scan timestamp')
         return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
     lower = max(started_at, cursor_at - timedelta(minutes=2))
-    return {'$filter': f"Customer eq guid'{m.guid(source_id)}' and Created ge datetime'{stamp(started_at)}' and Modified ge datetime'{stamp(lower)}' and Modified lt datetime'{stamp(end)}'",
+    return {'$filter': f"Customer eq guid'{m.guid(source_id)}' and Modified ge datetime'{stamp(lower)}' and Modified lt datetime'{stamp(end)}'",
             '$select': 'EntryID,Customer,Created,Modified,YourRef,Description,Type,Reversal'}
 
 
@@ -102,12 +109,11 @@ def enqueue(conn, rows, source_id, started_at, end):
     m.require(len({r['EntryID'] for r in rows}) == len(rows), 'Duplicate incremental Exact entry')
     with conn.transaction():
         for row in rows:
-            m.require(row['Customer'] == source_id and exact_time(row['Created']) >= started_at.replace(microsecond=0),
+            m.require(row['Customer'] == source_id,
                       'Incremental query returned an out-of-scope entry')
             ref = row['YourRef']
             if (row['Type'] != 20 or row['Reversal'] is not False or not isinstance(ref,str)
-                    or not re.fullmatch(r'TD[0-9]{4,10}', ref)
-                    or row['Description'] != 'Order TD #' + ref[2:]):
+                    or not re.fullmatch(r'TD[0-9]{4,10}', ref)):
                 continue
             conn.execute("""INSERT INTO jnp_debtor_route_queue(entry_id,reference,modified)
                 VALUES(%s,%s,%s) ON CONFLICT(entry_id) DO UPDATE
@@ -127,20 +133,27 @@ async def process_entry(api, conn, entry_id, reference, order):
     if method not in m.ROUTES:
         record_state(conn,entry_id,'skipped','Other webshop payment method')
         return
-    m.require(order.get('order_number') == '#' + reference[2:], 'Order reference mismatch')
-    selection = {'entry_id':entry_id,'reference':reference,'order_id':order['order_id'],
-                 'payment_method':method}
     audit = Audit(conn,entry_id)
     try:
+        m.require(order.get('order_number') == '#' + reference[2:], 'Order reference mismatch')
+        selection = {'entry_id':entry_id,'reference':reference,'order_id':order['order_id'],
+                     'payment_method':method}
         result = await customer_only.change_selected(api,selection,
                     await customer_only.route_accounts(api),audit)
-        record_state(conn,entry_id,result['state'],result['reason'])
-        if result.get('confirmation') == 'Exact HTTP acknowledgement':
-            STATUS['applied_since_start'] += 1
-    except BaseException:
-        if audit.write_started:
-            pause(conn,'Write attempted without a complete verified audit; inspect durable audit')
+    except asyncio.CancelledError:
         raise
+    except Exception as exc:
+        result = customer_only.failure_result(exc,audit.write_started)
+        audit.persist_event({'event':'entry_failure','entry_id':entry_id,**result})
+        runtime.event('entry_isolated',queue='new_entries',entry_id=entry_id,**result)
+        STATUS['last_error'] = result['reason']
+        if isinstance(exc,m.ExactRequestError) and exc.status_code == 429:
+            runtime.defer_until_reset(STATUS,api.limits)
+        return not result['stop_cycle']
+    record_state(conn,entry_id,result['state'],result['reason'])
+    if result.get('confirmation') == 'Exact HTTP acknowledgement':
+        STATUS['applied_since_start'] += 1
+    return True
 
 
 async def validate_routes(api):
@@ -162,13 +175,14 @@ async def cycle(app_module):
                 except BlockingIOError:
                     STATUS['state']='manual_run_active'
                     return
+                runtime.recover_once(conn)
                 enabled,started,cursor = conn.execute('SELECT enabled,started_at,cursor_at FROM jnp_debtor_route_control').fetchone()
                 STATUS['enabled'] = enabled
                 if not enabled:
                     STATUS['state']='disabled'
                     return
-                if conn.execute("SELECT EXISTS(SELECT 1 FROM jnp_debtor_route_queue WHERE state='uncertain') OR EXISTS(SELECT 1 FROM jnp_debtor_route_backfill WHERE state='uncertain')").fetchone()[0]:
-                    pause(conn,'Unresolved write intent: inspect durable audit before resuming')
+                if runtime.deferred(STATUS):
+                    STATUS['state']='waiting_for_api_budget'
                     return
                 api=AutomaticExact(app_module,conn)
                 # Fixed existing debtor IDs are cached for this service process.
@@ -181,7 +195,7 @@ async def cycle(app_module):
                 enqueue(conn,rows,source,started,end)
                 STATUS.update(state='checked',last_scan=m.utcnow())
                 if not customer_only.budget_available(api):
-                    STATUS['state']='waiting_for_api_budget'
+                    runtime.defer_until_reset(STATUS,api.limits)
                     return
                 queued=conn.execute("SELECT entry_id::text,reference FROM jnp_debtor_route_queue WHERE state='pending' AND next_check<=NOW() ORDER BY next_check,entry_id LIMIT 25").fetchall()
                 if queued:
@@ -193,11 +207,16 @@ async def cycle(app_module):
                             record_state(conn,entry_id,'pending','Order not yet present in Metorik; no inference')
                             continue
                         if not customer_only.budget_available(api): break
-                        await process_entry(api,conn,entry_id,reference,order)
+                        if await process_entry(api,conn,entry_id,reference,order) is False:
+                            if STATUS['state'] != 'waiting_for_api_budget':
+                                STATUS['state']='retry_next_cycle'
+                            return
                 # New entries take priority; old entries require an explicit,
                 # durable operator-approved discovery cohort.
                 result = await backfill.process_pending(api, conn)
                 if result: STATUS['state'] = result
+                runtime.event('cycle_complete',applied_since_start=STATUS['applied_since_start'],
+                              last_scan=STATUS['last_scan'],queues=runtime.queue_counts(conn))
         finally:
             conn.execute('SELECT pg_advisory_unlock(%s)',(LOCK_ID,))
 
@@ -208,10 +227,15 @@ async def serve(app_module):
             await cycle(app_module)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             # API error bodies and credentials are suppressed. Public health
             # output contains no financial details. Write intents are durable.
-            STATUS['state']='error_inspect_private_audit'
+            STATUS['state']='retry_next_cycle'
+            STATUS['last_error'] = (f'Exact {exc.method} HTTP {exc.status_code}'
+                                   if isinstance(exc,m.ExactRequestError) else 'Routing cycle failed; retry pending')
+            if isinstance(exc,m.ExactRequestError) and exc.status_code == 429:
+                runtime.defer_until_reset(STATUS,exc.limits)
+            runtime.event('cycle_deferred',reason=STATUS['last_error'])
         await asyncio.sleep(INTERVAL)
 
 

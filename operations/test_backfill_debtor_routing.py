@@ -21,7 +21,7 @@ class BackfillTests(unittest.IsolatedAsyncioTestCase):
         for limits in ({},{'remaining':b.DAILY_RESERVE+b.BATCH_ALLOWANCE-1}):
             api=MagicMock(limits=limits)
             with patch.object(e,'evidence_plan',AsyncMock()) as planner:
-                self.assertEqual(await b.process_pending(api,self.connection()),'backfill_waiting_for_api_budget')
+                self.assertEqual(await b.process_pending(api,self.connection()),'waiting_for_api_budget')
                 planner.assert_not_awaited()
 
     async def test_approved_manifest_reused_without_order_or_balance_replanning(self):
@@ -40,14 +40,33 @@ class BackfillTests(unittest.IsolatedAsyncioTestCase):
         conn.execute.return_value.fetchall.return_value=[(ID,'TD12345',7,'plisio')]
         with self.assertRaises(m.Stop): await b.process_pending(api,conn)
 
-    async def test_failed_write_pauses_instead_of_replaying(self):
+    async def test_failed_write_is_isolated_and_next_entry_still_runs(self):
         conn=self.connection();api=MagicMock(limits={'remaining':3000})
-        async def failure(api,selection,accounts,audit):
+        conn.execute.return_value.fetchall.return_value=[(ID,'TD12345',7,b.METHOD),(OTHER,'TD12346',8,b.METHOD)]
+        seen=[]
+        async def change(api,selection,accounts,audit):
+            entry=selection['entry_id'];seen.append(entry)
+            audit.persist_event({'event':'write_intent','entry_id':entry})
+            if entry==ID: raise m.Stop('ambiguous outcome')
+            audit.persist_event({'event':'customer_applied','entry_id':entry})
+            return {'state':'applied','reason':None,'confirmation':'Exact HTTP acknowledgement'}
+        with patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',side_effect=change),patch.object(a,'pause') as pause:
+            self.assertEqual(await b.process_pending(api,conn),'backfill_batch_applied')
+        self.assertEqual(seen,[ID,OTHER]);pause.assert_not_called()
+        self.assertTrue(any(call.args[1]==('uncertain','Unconfirmed write outcome',ID) for call in conn.execute.call_args_list))
+        self.assertEqual(conn.execute.call_args.args[1],('applied',None,OTHER))
+
+    async def test_read_failure_after_previous_success_is_not_an_uncertain_write(self):
+        conn=self.connection();api=MagicMock(limits={'remaining':3000})
+        conn.execute.return_value.fetchall.return_value=[(ID,'TD12345',7,b.METHOD),(OTHER,'TD12346',8,b.METHOD)]
+        async def change(api,selection,accounts,audit):
+            if selection['entry_id']==OTHER: raise m.Stop('Exact GET transport/auth failure; inspect audit before retrying')
             audit.persist_event({'event':'write_intent','entry_id':ID})
-            raise m.Stop('ambiguous outcome')
-        with patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',side_effect=failure),patch.object(a,'pause') as pause:
-            with self.assertRaises(m.Stop): await b.process_pending(api,conn)
-            pause.assert_called_once()
+            audit.persist_event({'event':'customer_applied','entry_id':ID})
+            return {'state':'applied','reason':None}
+        with patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',side_effect=change):
+            self.assertEqual(await b.process_pending(api,conn),'retry_next_cycle')
+        self.assertEqual(conn.execute.call_args.args[1],('pending','Exact transport/auth failure',OTHER))
 
     async def test_import_checksum_rejects_unapproved_cohort(self):
         app=MagicMock();conn=self.connection()

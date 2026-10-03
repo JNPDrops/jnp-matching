@@ -1,4 +1,4 @@
-"""Authenticated WooCommerce receipts -> durable Exact IBAN rules for debtor 109372.
+"""Authenticated WooCommerce receipts -> Exact allocation rules for debtor 109372.
 
 No invoice changes, bank reimports, matching, or deletion of existing rules.
 The caller is the trusted single-store plugin; only authenticated evidence is queued.
@@ -26,6 +26,7 @@ DIVISION = 3977752
 DEBTOR = '109372'
 LOCK = 3977752109372
 PATH = '/api/woocommerce/iban-rule'
+REFERENCE_PATH = '/api/woocommerce/allocation-rule'
 BASE = 'https://start.exactonline.nl'
 STATUS = {'state': 'starting'}
 
@@ -39,10 +40,18 @@ def iban(value):
     return value
 
 
-def validate(data):
+def camt_words(reference):
+    # GoDutch CAMT AcctSvcrRef truncates the full 38-character Moneybird code to 35.
+    if not isinstance(reference, str) or not re.fullmatch(r'bosci_[a-f0-9]{32}', reference):
+        raise ValueError('Geen volledige eenduidige bosci-code')
+    return reference[:35]
+
+
+def validate(data, reference_mode=False):
     if not isinstance(data, dict): raise ValueError('Ongeldig bericht')
     required = {'transaction_id','administration_id','financial_account_id','order_id','order_number',
-                'order_date','payment_date','iban','amount','currency','payment_method','order_status','origin'}
+                'order_date','payment_date','amount','currency','payment_method','order_status','origin'}
+    required.add('bank_reference' if reference_mode else 'iban')
     if set(data) != required: raise ValueError('Ontbrekende of onverwachte velden')
     if data['administration_id'] != ADMINISTRATION or data['financial_account_id'] != BANK_ACCOUNT: raise ValueError('Verkeerde Moneybird-rekening')
     if data['currency'] != 'EUR' or data['payment_method'] != 'bacs' or data['order_status'] not in ('completed','processing'): raise ValueError('Geen betaalde bankorder')
@@ -54,6 +63,9 @@ def validate(data):
     for field in ('order_date','payment_date'):
         if not isinstance(data[field], str) or date.fromisoformat(data[field]).isoformat() != data[field] or not CUTOFF <= data[field] <= date.today().isoformat(): raise ValueError('Datum buiten periode')
     if data['payment_date'] < data['order_date']: raise ValueError('Betaling voor order')
+    if reference_mode:
+        camt_words(data['bank_reference'])
+        return dict(data)
     return {**data, 'iban': iban(data['iban'])}
 
 
@@ -77,6 +89,7 @@ def initialize(conn):
 
 
 @router.post(PATH)
+@router.post(REFERENCE_PATH)
 async def receive(request: Request):
     if int(request.headers.get('content-length','0') or 0) > 8192: raise HTTPException(413,'Bericht te groot')
     raw = bytearray()
@@ -85,8 +98,8 @@ async def receive(request: Request):
         if len(raw) > 8192: raise HTTPException(413,'Bericht te groot')
     raw = bytes(raw)
     authenticate(request.headers, raw)
-    try: body = validate(json.loads(raw))
-    except (ValueError, TypeError, KeyError): raise HTTPException(422,'Ongeldig betalingsbewijs of IBAN') from None
+    try: body = validate(json.loads(raw), reference_mode=request.url.path == REFERENCE_PATH)
+    except (ValueError, TypeError, KeyError): raise HTTPException(422,'Ongeldig betalingsbewijs of herkenningscode') from None
     from app import main as app_module
     if not app_module.DATABASE_URL: raise HTTPException(503,'Duurzame wachtrij niet beschikbaar')
     event_id = ADMINISTRATION + ':' + body['transaction_id']
@@ -145,6 +158,10 @@ class ExactAPI:
     async def create(self, account, bank):
         return await self.request('POST',f'{BASE}/api/v1/beta/{DIVISION}/cashflow/AllocationRule',payload={'Account':account,'AccountBankAccount':bank})
 
+    async def create_words(self, account, words):
+        if not re.fullmatch(r'bosci_[a-f0-9]{29}', words): raise ValueError('Ongeldige CAMT-code')
+        return await self.request('POST',f'{BASE}/api/v1/beta/{DIVISION}/cashflow/AllocationRule',payload={'Account':account,'Words':words})
+
 
 def existing_rule(rules, bank, account):
     found=[]
@@ -158,23 +175,39 @@ def existing_rule(rules, bank, account):
     return 'missing',None
 
 
+def existing_words_rule(rules, words, account):
+    found=[]
+    for rule in rules:
+        candidate=str(rule.get('Words') or '').strip().lower()
+        if not re.search(r'(?<![a-z0-9_])'+re.escape(words)+r'(?![a-z0-9_])',candidate): continue
+        if candidate!=words or str(rule.get('Account') or '').lower()!=account.lower() or any(rule.get(k) for k in ('AccountBankAccount','GLAccount','Costcenter','Costunit','VATCode')):
+            return 'conflict',None
+        found.append(rule)
+    if found: return 'done',str(found[0]['ID'])
+    return 'missing',None
+
+
 async def process(conn, api, event_id, body, previous):
     account=await api.account()
-    state,rule=existing_rule(await api.rules(),body['iban'],account)
+    words=camt_words(body['bank_reference']) if 'bank_reference' in body else None
+    def lookup(rules):
+        return existing_words_rule(rules,words,account) if words else existing_rule(rules,body['iban'],account)
+    state,rule=lookup(await api.rules())
     if state=='conflict':
-        conn.execute("UPDATE jnp_woo_iban_events SET state='conflict',reason='Bestaande IBAN-regel wijkt af; controle nodig',updated_at=NOW() WHERE event_id=%s",(event_id,)); return
+        conn.execute("UPDATE jnp_woo_iban_events SET state='conflict',reason='Bestaande toewijzingsregel wijkt af; controle nodig',updated_at=NOW() WHERE event_id=%s",(event_id,)); return
     if state=='done':
-        conn.execute("UPDATE jnp_woo_iban_events SET state='done',rule_id=%s,reason='IBAN-regel voor debiteur 109372 bevestigd',updated_at=NOW() WHERE event_id=%s",(rule,event_id)); return
+        conn.execute("UPDATE jnp_woo_iban_events SET state='done',rule_id=%s,reason='Toewijzingsregel voor debiteur 109372 bevestigd',updated_at=NOW() WHERE event_id=%s",(rule,event_id)); return
     if previous in ('creating','uncertain'):
         conn.execute("UPDATE jnp_woo_iban_events SET state='uncertain',reason='Eerdere aanmaak niet bevestigd; handmatige controle nodig',next_check=NOW()+INTERVAL '15 minutes',updated_at=NOW() WHERE event_id=%s",(event_id,)); return
     # Autocommit makes intent durable before network I/O.
     conn.execute("UPDATE jnp_woo_iban_events SET state='creating',reason='Aanmaak wordt uitgevoerd',updated_at=NOW() WHERE event_id=%s",(event_id,))
     try:
-        await api.create(account,body['iban'])
+        if words: await api.create_words(account,words)
+        else: await api.create(account,body['iban'])
         # Verify through collection rather than trusting a response body alone.
-        state,rule=existing_rule(await api.rules(),body['iban'],account)
+        state,rule=lookup(await api.rules())
         if state!='done': raise RuntimeError('Readback did not confirm creation')
-        conn.execute("UPDATE jnp_woo_iban_events SET state='done',rule_id=%s,reason='IBAN-regel voor debiteur 109372 bevestigd',updated_at=NOW() WHERE event_id=%s",(rule,event_id))
+        conn.execute("UPDATE jnp_woo_iban_events SET state='done',rule_id=%s,reason='Toewijzingsregel voor debiteur 109372 bevestigd',updated_at=NOW() WHERE event_id=%s",(rule,event_id))
     except Exception:
         conn.execute("UPDATE jnp_woo_iban_events SET state='uncertain',reason='Exact-aanmaak niet bevestigd; we controleren opnieuw zonder dubbel aanmaken',next_check=NOW()+INTERVAL '5 minutes',updated_at=NOW() WHERE event_id=%s",(event_id,))
 
@@ -215,5 +248,5 @@ async def check_connection(request: Request):
         api=ExactAPI(app_module)
         await api.account()
         rules=await api.rules()
-        return {'ok':True,'division':DIVISION,'debtor':DEBTOR,'allocation_rules_readable':True,'rule_count':len(rules),'writes_enabled':os.getenv('ENABLE_WOO_IBAN_RULE_WRITES','false').lower()=='true'}
+        return {'ok':True,'division':DIVISION,'debtor':DEBTOR,'allocation_rules_readable':True,'rule_count':len(rules),'writes_enabled':os.getenv('ENABLE_WOO_IBAN_RULE_WRITES','false').lower()=='true','allocation_rule_version':2,'rule_types':['iban','bosci_words']}
     except Exception: raise HTTPException(503,'Exact-verbinding of toewijzingsregels niet beschikbaar') from None

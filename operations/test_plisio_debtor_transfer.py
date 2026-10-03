@@ -73,3 +73,35 @@ class PlisioExecutionTests(unittest.IsolatedAsyncioTestCase):
         api.rows.side_effect=[[{'ID':'00000000-0000-0000-0000-000000000001','Code':'100100','Name':'source','IsSales':True,'Status':'C'}],[]]
         with self.assertRaises(m.Stop): await m.context(api,'plisio')
         api.change_customer.assert_not_awaited()
+
+class ReviewedLineLinkTests(unittest.TestCase):
+    def evidence(self):
+        ctx,s,after,ev=fixture()
+        s['header'].update(AmountFC=35.23,VATAmountFC=5.87)
+        s['lines']=[{'ID':'item','Description':'sku (1x)','Quantity':1,'AmountFC':32.5,'VATAmountFC':6.5},
+                    {'ID':'discount','Description':'Discount','Quantity':-1,'AmountFC':-8.13,'VATAmountFC':-1.63},
+                    {'ID':'shipping','Description':'Pickup','Quantity':1,'AmountFC':4.99,'VATAmountFC':1}]
+        ev['order'].update(total=35.25,line_proof={'items':[{'sku':'sku','quantity':1,'total':32.5,'total_tax':6.5}],
+                                                 'total_discount':8.13,'shipping_method_title':'Pickup'})
+        return s,ev
+
+    def test_amount_difference_still_blocks_without_explicit_review(self):
+        s,ev=self.evidence()
+        with self.assertRaises(m.Stop):e.validate_evidence(s,ev,'plisio','pl')
+        ev['reviewed_line_link']=True
+        e.validate_evidence(s,ev,'plisio','pl')
+        self.assertEqual(s['header']['AmountFC'],35.23)
+        self.assertEqual(ev['order']['total'],35.25)
+
+    def test_small_difference_does_not_replace_full_line_identity(self):
+        for change in ('sku','quantity','tax','discount','shipping','larger'):
+            s,ev=self.evidence();ev['reviewed_line_link']=True
+            proof=ev['order']['line_proof']
+            if change=='sku':proof['items'][0]['sku']='other'
+            elif change=='quantity':proof['items'][0]['quantity']=2
+            elif change=='tax':proof['items'][0]['total_tax']=6.49
+            elif change=='discount':proof['total_discount']=8.12
+            elif change=='shipping':proof['shipping_method_title']='other'
+            else:ev['order']['total']=35.26
+            with self.subTest(change=change):
+                with self.assertRaises(m.Stop):e.validate_evidence(s,ev,'plisio','pl')

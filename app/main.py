@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import asynccontextmanager, suppress
 import json
 import os
 import re
@@ -38,7 +40,20 @@ API_V1 = f"{BASE_URL}/api/v1"
 API_BETA = f"{BASE_URL}/api/v1/beta"
 MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
-app = FastAPI(title="JNP Matching", version="1.7.0")
+@asynccontextmanager
+async def lifespan(_app):
+    from operations.automatic_debtor_routing import serve
+    from app import main as app_module
+    task = asyncio.create_task(serve(app_module))
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="JNP Matching", version="1.7.0", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -1136,7 +1151,9 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "division": DIVISION, "version": "1.7.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES, "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES}
+    from operations.automatic_debtor_routing import STATUS
+    return {"ok": True, "division": DIVISION, "version": "1.7.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
+            "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES, "debtor_routing": dict(STATUS)}
 
 
 @app.get("/", response_class=HTMLResponse)

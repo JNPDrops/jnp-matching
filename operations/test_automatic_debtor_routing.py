@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from operations import automatic_debtor_routing as a, bacs_debtor_transfer as m, metorik_bacs_evidence as e
 from operations.test_plisio_debtor_transfer import fixture
+from operations import customer_only_routing as c
 
 
 class ScopeTests(unittest.TestCase):
@@ -57,20 +58,22 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             await a.process_entry(AsyncMock(),Mock(),'entry','TD12345',{'payment_method':'card'})
             build.assert_not_awaited()
 
-    async def test_review_and_paid_entries_never_write(self):
-        for plan in ({'review':[{'reason':'partial'}],'eligible':[]},{'review':[],'eligible':[]}):
-            with patch.object(e,'evidence_plan',AsyncMock(return_value=plan)),patch.object(m,'apply',AsyncMock()) as apply:
-                await a.process_entry(AsyncMock(),Mock(),'entry','TD12345',{'payment_method':'plisio','order_id':7})
-                apply.assert_not_awaited()
+    async def test_existing_order_evidence_is_reused_without_full_plan_or_balance_reads(self):
+        conn=Mock()
+        with patch.object(e,'evidence_plan',AsyncMock()) as planner,patch.object(m,'apply',AsyncMock()) as old_apply,patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',AsyncMock(return_value={'state':'skipped','reason':'No remaining open item'})) as change:
+            await a.process_entry(AsyncMock(),conn,'entry','TD12345',{'payment_method':'plisio','order_id':7,'order_number':'#12345'})
+            planner.assert_not_awaited();old_apply.assert_not_awaited();change.assert_awaited_once()
+            self.assertEqual(change.await_args.args[1],{'entry_id':'entry','reference':'TD12345','order_id':7,'payment_method':'plisio'})
+            self.assertEqual(conn.execute.call_args.args[1],('skipped','No remaining open item','entry'))
 
     async def test_any_failure_after_intent_pauses_automatic_routing(self):
         conn=MagicMock();conn.transaction.return_value=nullcontext()
-        async def failed(api,p,sha,audit,**kw):
+        async def failed(api,selection,accounts,audit):
             audit.persist_event({'event':'write_intent'})
             raise m.Stop('ambiguous response')
-        with patch.object(e,'evidence_plan',AsyncMock(return_value={'review':[],'eligible':[{}],'plan_sha256':'sha'})),patch.object(m,'apply',side_effect=failed):
+        with patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',side_effect=failed):
             with self.assertRaises(m.Stop):
-                await a.process_entry(AsyncMock(),conn,'00000000-0000-0000-0000-000000000001','TD12345',{'payment_method':'plisio','order_id':7})
+                await a.process_entry(AsyncMock(),conn,'00000000-0000-0000-0000-000000000001','TD12345',{'payment_method':'plisio','order_id':7,'order_number':'#12345'})
         self.assertTrue(any('enabled=FALSE' in c.args[0] for c in conn.execute.call_args_list))
 
     async def test_restart_with_uncertain_entry_never_queries_exact(self):

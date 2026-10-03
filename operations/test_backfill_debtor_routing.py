@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from operations import backfill_debtor_routing as b, automatic_debtor_routing as a
 from operations import bacs_debtor_transfer as m, metorik_bacs_evidence as e
+from operations import customer_only_routing as c
 
 ID='00000000-0000-0000-0000-000000000001'
 OTHER='00000000-0000-0000-0000-000000000002'
@@ -17,37 +18,34 @@ class BackfillTests(unittest.IsolatedAsyncioTestCase):
         return conn
 
     async def test_low_or_unknown_budget_does_not_even_build_a_plan(self):
-        for limits in ({},{'remaining':1599}):
+        for limits in ({},{'remaining':b.DAILY_RESERVE+b.BATCH_ALLOWANCE-1}):
             api=MagicMock(limits=limits)
             with patch.object(e,'evidence_plan',AsyncMock()) as planner:
                 self.assertEqual(await b.process_pending(api,self.connection()),'backfill_waiting_for_api_budget')
                 planner.assert_not_awaited()
 
-    async def test_budget_is_checked_again_after_read_only_plan(self):
-        api=MagicMock(limits={'remaining':2000})
-        async def plan(*args):
-            api.limits={'remaining':1500}
-            return {'review':[],'paid_skipped':[],'eligible':[{'entry_id':ID}]}
-        with patch.object(e,'evidence_plan',side_effect=plan),patch.object(m,'apply',AsyncMock()) as apply:
-            self.assertEqual(await b.process_pending(api,self.connection()),'backfill_waiting_for_api_budget')
-            apply.assert_not_awaited()
+    async def test_approved_manifest_reused_without_order_or_balance_replanning(self):
+        api=MagicMock(limits={'remaining':500})
+        with patch.object(e,'evidence_plan',AsyncMock()) as plan,patch.object(m,'apply',AsyncMock()) as old_apply,patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',AsyncMock(return_value={'state':'applied','reason':None})) as change:
+            self.assertEqual(await b.process_pending(api,self.connection()),'backfill_batch_applied')
+            plan.assert_not_awaited();old_apply.assert_not_awaited();change.assert_awaited_once()
+            self.assertEqual(change.await_args.args[1],{'entry_id':ID,'reference':'TD12345','order_id':7,'payment_method':b.METHOD})
 
     async def test_paid_reviewed_and_wrong_method_never_write(self):
         conn=self.connection();api=MagicMock(limits={'remaining':3000})
-        plan={'review':[{'entry_id':ID,'reason':'partial'}],'paid_skipped':[OTHER],'eligible':[]}
-        with patch.object(e,'evidence_plan',AsyncMock(return_value=plan)),patch.object(m,'apply',AsyncMock()) as apply:
+        with patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',AsyncMock(return_value={'state':'skipped','reason':'No remaining open item'})),patch.object(m,'apply',AsyncMock()) as apply:
             await b.process_pending(api,conn)
             apply.assert_not_awaited()
+            self.assertEqual(conn.execute.call_args.args[1],('skipped','No remaining open item',ID))
         conn.execute.return_value.fetchall.return_value=[(ID,'TD12345',7,'plisio')]
         with self.assertRaises(m.Stop): await b.process_pending(api,conn)
 
     async def test_failed_write_pauses_instead_of_replaying(self):
         conn=self.connection();api=MagicMock(limits={'remaining':3000})
-        plan={'plan_sha256':'sha','review':[],'paid_skipped':[],'eligible':[{'entry_id':ID}]}
-        async def failure(api,p,sha,audit,**kw):
+        async def failure(api,selection,accounts,audit):
             audit.persist_event({'event':'write_intent','entry_id':ID})
             raise m.Stop('ambiguous outcome')
-        with patch.object(e,'evidence_plan',AsyncMock(return_value=plan)),patch.object(m,'apply',side_effect=failure),patch.object(a,'pause') as pause:
+        with patch.object(c,'route_accounts',AsyncMock(return_value={})),patch.object(c,'change_selected',side_effect=failure),patch.object(a,'pause') as pause:
             with self.assertRaises(m.Stop): await b.process_pending(api,conn)
             pause.assert_called_once()
 
@@ -71,6 +69,13 @@ class BackfillTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AuditTests(unittest.TestCase):
+    def test_successful_entry_is_committed_without_waiting_for_entire_batch(self):
+        conn=MagicMock();conn.transaction.return_value=nullcontext()
+        audit=b.Audit(conn,{'plan_sha256':'sha','eligible':[{'entry_id':ID},{'entry_id':OTHER}]})
+        audit.persist_event({'event':'customer_applied','entry_id':ID})
+        self.assertIn("state='applied'",conn.execute.call_args.args[0])
+        self.assertEqual(conn.execute.call_args.args[1],(ID,))
+
     def test_durable_multi_entry_intent_and_completion(self):
         conn=MagicMock();conn.transaction.return_value=nullcontext()
         audit=b.Audit(conn,{'plan_sha256':'sha','eligible':[{'entry_id':ID},{'entry_id':OTHER}]})

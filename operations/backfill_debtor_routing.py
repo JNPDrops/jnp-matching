@@ -1,8 +1,8 @@
 """Resumable, explicitly imported Fibonatix catch-up in the existing service.
 
-Only the archived read-only cohort is imported. Each batch repeats all live
-order, open-balance, Customer-only write and before/after checks. New automatic
-entries have priority. A daily API reserve is preserved; no quota bypass.
+Only the archived approved cohort is imported. Its stored order evidence is
+reused for Customer-only writes, without repeated balance or line checks.
+New automatic entries have priority. A daily API reserve is preserved.
 """
 import argparse
 import asyncio
@@ -11,11 +11,12 @@ import json
 from uuid import uuid4
 
 from operations import bacs_debtor_transfer as m, metorik_bacs_evidence as e
+from operations import customer_only_routing as customer_only
 
 METHOD = 'wc_fibonatix'
 BATCH_SIZE = 10
-DAILY_RESERVE = 1000
-BATCH_ALLOWANCE = 600
+DAILY_RESERVE = customer_only.DAILY_RESERVE
+BATCH_ALLOWANCE = BATCH_SIZE * customer_only.CALLS_PER_ENTRY
 
 
 def initialize(conn):
@@ -57,6 +58,8 @@ class Audit:
                     self.conn.execute("UPDATE jnp_debtor_route_backfill SET state='verified',reason=NULL,updated_at=NOW() WHERE entry_id=%s", (entry_id,))
                 self.conn.execute('UPDATE jnp_debtor_manual_archive SET verification=%s::jsonb WHERE plan_sha256=%s',
                                   (json.dumps({'kind':'automatic_backfill','run_id':self.run_id,'result':event},default=str),self.plan_sha))
+            elif event['event'] == 'customer_applied':
+                self.conn.execute("UPDATE jnp_debtor_route_backfill SET state='applied',reason=NULL,updated_at=NOW() WHERE entry_id=%s", (entry,))
         if event['event'] == 'write_intent': self.write_started = True
 
 
@@ -65,27 +68,29 @@ async def process_pending(api, conn):
     if not rows: return None
     if not budget_available(api): return 'backfill_waiting_for_api_budget'
     from operations.automatic_debtor_routing import STATUS
-    STATUS['state'] = 'backfill_read_only_checks'
+    STATUS['state'] = 'backfill_customer_only'
     m.require(all(row[3] == METHOD for row in rows), 'Unauthorized backfill route')
-    manifest = [{'entry_id':row[0],'reference':row[1],'order_id':row[2]} for row in rows]
-    p = await e.evidence_plan(api,manifest,METHOD)
-    for row in p['review']:
-        conn.execute("UPDATE jnp_debtor_route_backfill SET state='review',reason=%s,updated_at=NOW() WHERE entry_id=%s", (row['reason'],row['entry_id']))
-    for entry_id in p['paid_skipped']:
-        conn.execute("UPDATE jnp_debtor_route_backfill SET state='skipped',reason='No remaining open sales entry',updated_at=NOW() WHERE entry_id=%s", (entry_id,))
-    if not p['eligible']: return 'backfill_checked'
-    # Recheck after the read-only plan, before persisting any write intent.
-    if not budget_available(api): return 'backfill_waiting_for_api_budget'
+    accounts = await customer_only.route_accounts(api)
+    manifest = [{'entry_id':row[0],'reference':row[1],'order_id':row[2],
+                 'payment_method':row[3]} for row in rows]
+    p = {'mode':'customer_only','division':m.DIVISION,'created_at':m.utcnow(),
+         'run_id':str(uuid4()),'eligible':manifest}
+    p['plan_sha256'] = m.digest(p)
     audit = Audit(conn,p)
     try:
-        STATUS['state'] = 'backfill_applying_verified_plan'
-        await m.apply(api,p,p['plan_sha256'],audit,accept_derived_changes=True)
+        for selection in manifest:
+            if not customer_only.budget_available(api): break
+            result = await customer_only.change_selected(api,selection,accounts,audit)
+            conn.execute("UPDATE jnp_debtor_route_backfill SET state=%s,reason=%s,updated_at=NOW() WHERE entry_id=%s",
+                         (result['state'],result['reason'],selection['entry_id']))
+            if result.get('confirmation') == 'Exact HTTP acknowledgement':
+                STATUS['applied_since_start'] += 1
     except BaseException:
         if audit.write_started:
             from operations.automatic_debtor_routing import pause
             pause(conn,'Backfill write attempted without a complete verified audit; inspect durable archive')
         raise
-    return 'backfill_batch_verified'
+    return 'backfill_batch_applied'
 
 
 async def seed(app, discovery_sha):

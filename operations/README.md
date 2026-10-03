@@ -1,4 +1,29 @@
-# Eenmalige bacs-debiteurenomzetting
+# Debiteurenomzetting
+
+## Actieve agents: alleen de debiteur wijzigen (3 oktober 2026)
+
+Op expliciet verzoek gebruiken de automatische router en Fibonatix-inhaalqueue
+`customer_only_routing.py`. De goedgekeurde bestemmingen blijven bacs → 109372,
+plisio → 109377 en wc_fibonatix → 109384, vanaf 100100 in administratie 3977752.
+
+- De inhaalqueue hergebruikt de reeds opgeslagen orderkoppeling en betaalmethode.
+- Nieuwe orders worden eenmaal per groep bij Metorik opgezocht; geen herhaalde bewijsplannen.
+- Bestaande debiteur-GUIDs worden eenmaal per proces opgezocht en daarna hergebruikt.
+- Per post: één beperkte kopregelread, één gerichte open-postread en één PUT met
+  uitsluitend `Customer`. Geen volledige snapshots, boekingsregels, btw-,
+  cashflow-, totale balans- of na-controles.
+- De open-postread bewaakt alleen de oorspronkelijke selectie: de bestaande
+  verkoopboeking moet nog op 100100 staan en een positief restbedrag hebben.
+- Een geslaagde Exact-HTTP-respons wordt als `applied` opgeslagen. Dat is geen
+  claim dat de bedragen of saldi opnieuw zijn gecontroleerd. Onzekere PUT-uitkomsten
+  worden niet automatisch herhaald; de bestaande pauzeschakelaar en audit blijven.
+- Eén batch omvat maximaal 10 posten (normaal 30 Exact-aanroepen). De reservering
+  is teruggebracht van 1000 naar 100 aanroepen; de bestaande snelheidslimiet blijft.
+
+De onderstaande eenmalige CLI behoudt zijn oorspronkelijke uitgebreide controles;
+de actieve agents gebruiken deze oude uitvoerder niet meer.
+
+## Eenmalige bacs-debiteurenomzetting
 
 Expliciete operatoractie voor Exact-administratie **3977752**, bestaande debiteur
 **100100 → 109372**. Geen webroute, startup-hook of periodieke taak. De bestaande
@@ -149,17 +174,17 @@ in Exact aangemaakte verkoopboekingen op 100100 worden gevolgd, ongeacht hun
 factuurdatum. Overlappende Modified-scans en een wachtrij voorkomen dat een
 herstart of vertraagde Metorik-import een boeking overslaat. Ontbrekende orders
 worden opnieuw alleen-lezen gezocht; andere betaalmethoden worden overgeslagen.
-Een unieke live webshopkoppeling, originele bedragen en de bestaande volledige
-open-postcontroles zijn verplicht. Deelbetalingen en onduidelijke posten gaan
-naar beoordeling; zij worden niet automatisch gewijzigd.
+De opgezochte betaalmethode en unieke orderreferentie bepalen de vaste route.
+De minimale uitvoerder hierboven controleert alleen de boekingsidentiteit,
+brondebiteur, bewerkbare verkoopstatus en een positieve openstaande post.
 
 De bestaande PostgreSQL-database bewaart controlestatus, wachtrij en audit in
 `jnp_debtor_route_*`. Een databasebrede advisory lock en de lokale executorlock
 voorkomen gelijktijdige runs, ook bij een deployment. Vóór iedere PUT wordt het
-voorgenomen schrijfwerk bestendig opgeslagen. Zonder complete nacontrole blijft
+voorgenomen schrijfwerk bestendig opgeslagen. Zonder bevestigde HTTP-respons blijft
 de post onzeker en stopt de automatisering, ook na herstart. Geen automatische
-herhaling van een onzekere PUT. De audit bevat voor/na-beelden van de geselecteerde
-boeking; globale controlemomenten bewaren aantallen, saldi en SHA256's.
+herhaling van een onzekere PUT. De audit bewaart bron, doel, orderkoppeling en
+schrijfresultaat; er worden geen saldi of volledige voor/na-beelden opgehaald.
 
 ```sh
 python -m operations.automatic_debtor_routing enable --since 2026-10-03T00:00:00+00:00
@@ -186,16 +211,15 @@ De Exact-regels moeten het oorspronkelijke Exact-totaal en btw-totaal reproducer
 De controlegegevens worden vóór uitvoering opnieuw bij Metorik gelezen. Dit
 wijzigt geen enkel bedrag en verklaart de oorzaak van het centverschil niet.
 Een centverschil alleen is nooit voldoende bewijs. De automatische verwerking
-gebruikt deze optie niet en blijft afwijkende bedragen voor beoordeling apart zetten.
+gebruikt deze CLI-optie niet; haar minimale route vergelijkt geen orderbedragen.
 
 ## Fibonatix
 
 Dezelfde vaste route ondersteunt `wc_fibonatix → 109384` (bestaande debiteur
-Verzameldebiteur Fibonatics), vanaf 100100 in administratie 3977752. De live
-Exact-conditie moet `fi / wc_fibonatix / B` zijn. Ook deze route vereist uniek
-Metorik-orderbewijs, werkelijke Exact-restbedragen en alle bovenstaande controles.
-Een PP-verkoopconditie blijft PP. Andere betaalmethoden, voldane en deelbetaalde
-posten worden niet naar 109384 omgezet.
+Verzameldebiteur Fibonatics), vanaf 100100 in administratie 3977752. De handmatige
+CLI controleert de Exact-conditie `fi / wc_fibonatix / B`. De actieve agent gebruikt
+de reeds vastgestelde Metorik-betaalmethode en schrijft uitsluitend Customer.
+Andere betaalmethoden en volledig voldane posten worden niet naar 109384 omgezet.
 
 Voor bestaande open posten: gebruik het manifest en `--payment-method wc_fibonatix`.
 Werk in kleine gecontroleerde batches; een Render-webshell kan een langlopend
@@ -204,8 +228,7 @@ De bestaande automatische verwerking neemt de nieuwe route mee zonder reset van
 controlestatus, cursor, wachtrij of audit. Controleer bij de ingebruikname ook de
 actuele open posten die eerder als andere betaalmethode werden overgeslagen.
 Er worden geen nieuwe infrastructuur, financiële velden of algemene instellingen
-toegevoegd. Alle bestaande bestemmingen worden vóór iedere automatische scan
-opnieuw live gecontroleerd.
+toegevoegd. Bestaande bestemmings-GUIDs worden eenmaal per serviceproces opgezocht.
 
 De Exact- en Metorik-clients hergebruiken dezelfde geverifieerde TLS-certificaatstore.
 Een health-only proef op Render liet bij 25 nieuwe stores ongeveer 24 MiB groei
@@ -222,20 +245,22 @@ entry/order-koppelingen en de bestaande bestemming. Het maakt geen Exact-mutatie
 Alleen dat cohort komt in `jnp_debtor_route_backfill` in de bestaande database.
 
 De bestaande service verwerkt eerst nieuwe boekingen en daarna maximaal tien
-historische posten. Iedere batch gebruikt opnieuw de bestaande live planner en
-Customer-only executor inclusief volledige voor/na- en gezamenlijke saldocontrole.
-Voldane, deelbetaalde en onduidelijke posten worden afzonderlijk gerapporteerd.
-Plannen en auditgebeurtenissen worden vóór de mutatie bestendig gearchiveerd.
+historische posten. Iedere batch hergebruikt de opgeslagen cohortselectie en
+gebruikt de minimale Customer-only uitvoerder zonder herhaalde order- of saldocontrole.
+Voldane en onduidelijke posten worden afzonderlijk gerapporteerd.
+Selectie en auditgebeurtenissen worden vóór de mutatie bestendig gearchiveerd.
 Een onzekere batch pauzeert alle automatische mutaties, ook na een herstart.
 
 De actuele Exact-daglimiet wordt uit de responseheaders gelezen. De inhaalronde
-start uitsluitend met minstens 1.600 aanvragen beschikbaar: 600 voor de batch
-en 1.000 reserve voor normale controles/nieuwe boekingen. Dat wordt vóór en na
-de leesplanning gecontroleerd. Bij minder ruimte wacht de inhaalronde; de
+start met minstens 130 aanvragen beschikbaar: 30 voor de batch en 100 reserve.
+Ook voor iedere post en PUT wordt het laatst ontvangen budget lokaal nagekeken.
+Bij minder ruimte wacht de inhaalronde; de
 bestaande vijfminutencyclus hervat vanzelf zodra er weer voldoende ruimte is.
-Er wordt geen Exact-limiet omzeild. De controle van alle bestemmingen gebruikt
-twee gedeelde leesaanvragen, met dezelfde unieke en actieve debiteurcontroles.
+Er wordt geen Exact-limiet omzeild. Het opzoeken van alle bestemmingen gebruikt
+één gedeelde leesaanvraag per serviceproces.
 
 `python -m operations.backfill_debtor_routing status` toont de cohortvoortgang.
-Een volledig afgeronde batch telt pas na het permanente `complete`-auditmoment
-als geverifieerd. Nieuwe posten en lopende inhaalbatches delen dezelfde locks.
+Iedere succesvolle PUT telt direct na het permanente `customer_applied`-auditmoment
+als toegepast. `applied` betekent HTTP-bevestigd, zonder nacontrole van boeking of
+balans. Oude `verified`-resultaten blijven behouden. Nieuwe posten en lopende
+inhaalbatches delen dezelfde locks.

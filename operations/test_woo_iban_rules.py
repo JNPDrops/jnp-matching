@@ -170,7 +170,11 @@ def test_reference_endpoint_idempotency(monkeypatch):
             if sql.startswith('INSERT'):
                 event,order,raw,digest=args
                 if event not in self.rows and order not in self.orders:
-                    self.rows[event]=(digest,'pending',None,None);self.orders.add(order)
+                    self.rows[event]=(digest,'pending',None,None,json.loads(raw));self.orders.add(order)
+            elif sql.startswith('UPDATE jnp_woo_iban_events SET body='):
+                raw,digest,event,old_digest=args
+                if self.rows[event][0]==old_digest and self.rows[event][1]=='done':
+                    self.rows[event]=(digest,'pending',None,None,json.loads(raw))
             elif sql.startswith('SELECT digest'):self.result=self.rows.get(args[0])
             return self
         def fetchone(self):return self.result
@@ -193,3 +197,60 @@ def test_reference_endpoint_idempotency(monkeypatch):
     assert post({**reference_body(),'transaction_id':'988'})[0]==409
     assert post(reference_body(),m.PATH)[0]==422
     assert post(body())[0]==422
+
+    event=m.ADMINISTRATION+':'+body()['transaction_id']
+    db.rows.clear();db.orders.clear()
+    assert post(body(),m.PATH)[0]==200
+    old=db.rows[event]
+    db.rows[event]=(old[0],'uncertain',None,None,old[4])
+    assert post(reference_body())[0]==409
+    db.rows[event]=(old[0],'done',None,'iban-rule',old[4])
+    assert post({**reference_body(),'amount':'999.00'})[0]==409
+    assert post(reference_body())[1]['state']=='pending'
+    assert db.rows[event][4]['bank_reference']==REFERENCE
+    assert post(reference_body())[1]['state']=='pending'
+
+
+def test_module_payment_cutoff_is_payment_date():
+    b={**reference_body(),'order_date':'2026-09-30','origin':'plugin_completed'}
+    assert m.validate(b,reference_mode=True)==b
+    with pytest.raises(ValueError):m.validate({**b,'payment_date':'2026-09-30'},reference_mode=True)
+    with pytest.raises(ValueError):m.validate({**b,'origin':'historical_paid_exact'},reference_mode=True)
+
+
+@pytest.mark.parametrize('field',['transaction_id','administration_id','financial_account_id','order_id',
+    'order_number','order_date','payment_date','amount','currency','payment_method'])
+def test_legacy_upgrade_cannot_change_payment(field):
+    assert m.can_upgrade_iban(body(),reference_body(),'done')
+    changed={**reference_body(),field:'different'}
+    assert not m.can_upgrade_iban(body(),changed,'done')
+
+
+@pytest.mark.parametrize('state',['pending','creating','uncertain','conflict'])
+def test_legacy_upgrade_requires_confirmed_write(state):
+    assert not m.can_upgrade_iban(body(),reference_body(),state)
+
+
+def test_status_is_read_only_and_reports_verified_rules(monkeypatch):
+    from app import main
+    from starlette.requests import Request
+    class StatusDB:
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def execute(self,sql):
+            assert sql.startswith('SELECT')
+            self.rows=[('done',1)] if 'count(*)' in sql else [('event','48794',REFERENCE,'done','Confirmed','rule')]
+            return self
+        def fetchall(self):return self.rows
+    monkeypatch.setattr(m,'authenticate',lambda headers,raw:None)
+    monkeypatch.setattr(main,'DATABASE_URL','test-db')
+    monkeypatch.setattr(main,'DIVISION',m.DIVISION)
+    monkeypatch.setattr(main,'_db_connect',lambda:StatusDB())
+    a=api([[words_rule(),{**words_rule(),'Account':'other'},{'ID':'iban','Account':ACCOUNT}]])
+    monkeypatch.setattr(m,'ExactAPI',lambda app:a)
+    request=Request({'type':'http','method':'POST','scheme':'https','server':('test',443),
+        'path':'/api/woocommerce/allocation-rule/status','headers':[]})
+    result=asyncio.run(m.check_connection(request))
+    assert result['bosci_rule_count']==1 and result['queue_counts']=={'done':1}
+    assert result['allocation_rule_version']==3
+    a.create.assert_not_awaited();a.create_words.assert_not_awaited()

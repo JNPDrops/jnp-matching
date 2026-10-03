@@ -61,7 +61,9 @@ def validate(data, reference_mode=False):
     if not isinstance(data['order_number'], str) or not re.fullmatch(r'[A-Za-z0-9#_-]{1,80}', data['order_number']): raise ValueError('Ordernummer ongeldig')
     if not isinstance(data['amount'], str) or not re.fullmatch(r'\d{1,10}\.\d{2}', data['amount']) or int(data['amount'].replace('.','')) <= 0: raise ValueError('Bedrag ongeldig')
     for field in ('order_date','payment_date'):
-        if not isinstance(data[field], str) or date.fromisoformat(data[field]).isoformat() != data[field] or not CUTOFF <= data[field] <= date.today().isoformat(): raise ValueError('Datum buiten periode')
+        if not isinstance(data[field], str) or date.fromisoformat(data[field]).isoformat() != data[field] or data[field] > date.today().isoformat(): raise ValueError('Ongeldige datum')
+    if data['payment_date'] < CUTOFF: raise ValueError('Betaling voor 1 oktober 2026')
+    if data['order_date'] < CUTOFF and (not reference_mode or data['origin'] != 'plugin_completed'): raise ValueError('Order voor 1 oktober 2026 zonder modulebevestiging')
     if data['payment_date'] < data['order_date']: raise ValueError('Betaling voor order')
     if reference_mode:
         camt_words(data['bank_reference'])
@@ -88,6 +90,17 @@ def initialize(conn):
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
 
 
+def can_upgrade_iban(old, new, state):
+    """A confirmed IBAN job may gain a bosci rule for the same proven payment."""
+    if state != 'done' or not isinstance(old, dict) or 'iban' not in old or 'bank_reference' in old:
+        return False
+    if 'bank_reference' not in new or new.get('origin') != 'plugin_completed':
+        return False
+    fields = ('transaction_id','administration_id','financial_account_id','order_id',
+              'order_number','order_date','payment_date','amount','currency','payment_method')
+    return all(old.get(k) == new.get(k) for k in fields)
+
+
 @router.post(PATH)
 @router.post(REFERENCE_PATH)
 async def receive(request: Request):
@@ -99,7 +112,8 @@ async def receive(request: Request):
     raw = bytes(raw)
     authenticate(request.headers, raw)
     try: body = validate(json.loads(raw), reference_mode=request.url.path == REFERENCE_PATH)
-    except (ValueError, TypeError, KeyError): raise HTTPException(422,'Ongeldig betalingsbewijs of herkenningscode') from None
+    except ValueError as exc: raise HTTPException(422,str(exc)) from None
+    except (TypeError, KeyError): raise HTTPException(422,'Ongeldig betalingsbewijs of herkenningscode') from None
     from app import main as app_module
     if not app_module.DATABASE_URL: raise HTTPException(503,'Duurzame wachtrij niet beschikbaar')
     event_id = ADMINISTRATION + ':' + body['transaction_id']
@@ -111,7 +125,16 @@ async def receive(request: Request):
             conn.execute('''INSERT INTO jnp_woo_iban_events(event_id,order_id,body,digest)
                 VALUES(%s,%s,%s::jsonb,%s) ON CONFLICT DO NOTHING''',
                 (event_id,body['order_id'],json.dumps(body),digest))
-            row = conn.execute('SELECT digest,state,reason,rule_id FROM jnp_woo_iban_events WHERE event_id=%s',(event_id,)).fetchone()
+            row = conn.execute('SELECT digest,state,reason,rule_id,body FROM jnp_woo_iban_events WHERE event_id=%s',(event_id,)).fetchone()
+            if row and row[0] != digest and can_upgrade_iban(row[4], body, row[1]):
+                # Atomic conversion of a finished job only. An uncertain IBAN write
+                # must be reconciled before a different rule can be requested.
+                conn.execute("""UPDATE jnp_woo_iban_events SET body=%s::jsonb,digest=%s,
+                    state='pending',reason='Bosci-regel voor bevestigde betaling aangevraagd',
+                    rule_id=NULL,attempts=0,next_check=NOW(),updated_at=NOW()
+                    WHERE event_id=%s AND digest=%s AND state='done'""",
+                    (json.dumps(body),digest,event_id,row[0]))
+                row = conn.execute('SELECT digest,state,reason,rule_id,body FROM jnp_woo_iban_events WHERE event_id=%s',(event_id,)).fetchone()
             if row is None or row[0] != digest: raise HTTPException(409,'Transactie of order heeft al een ander betalingsbewijs')
             return {'event_id':event_id,'state':row[1],'message':row[2], 'rule_id':row[3], 'debtor':DEBTOR}
     except HTTPException: raise
@@ -239,14 +262,22 @@ async def serve(app):
 
 
 @router.post('/api/woocommerce/iban-rule/check')
+@router.post('/api/woocommerce/allocation-rule/status')
 async def check_connection(request: Request):
-    # Fixed empty body: no financial records or credentials are returned.
+    # Authenticated, read-only status; never return credentials or full bank data.
     authenticate(request.headers,b'{}')
     from app import main as app_module
     if app_module.DIVISION!=DIVISION or not app_module.DATABASE_URL: raise HTTPException(503,'Verkeerde administratie of ontbrekende database')
     try:
         api=ExactAPI(app_module)
-        await api.account()
+        account=await api.account()
         rules=await api.rules()
-        return {'ok':True,'division':DIVISION,'debtor':DEBTOR,'allocation_rules_readable':True,'rule_count':len(rules),'writes_enabled':os.getenv('ENABLE_WOO_IBAN_RULE_WRITES','false').lower()=='true','allocation_rule_version':2,'rule_types':['iban','bosci_words']}
+        result={'ok':True,'division':DIVISION,'debtor':DEBTOR,'allocation_rules_readable':True,'rule_count':len(rules),'writes_enabled':os.getenv('ENABLE_WOO_IBAN_RULE_WRITES','false').lower()=='true','allocation_rule_version':3,'rule_types':['iban','bosci_words']}
+        if request.url.path.endswith('/allocation-rule/status'):
+            result['bosci_rule_count']=sum(1 for r in rules if str(r.get('Account') or '').lower()==account.lower() and re.fullmatch(r'bosci_[a-f0-9]{29}',str(r.get('Words') or '').strip().lower()))
+            with app_module._db_connect() as conn:
+                result['queue_counts']={state:count for state,count in conn.execute('SELECT state,count(*) FROM jnp_woo_iban_events GROUP BY state').fetchall()}
+                rows=conn.execute("SELECT event_id,body->>'order_number',body->>'bank_reference',state,reason,rule_id FROM jnp_woo_iban_events ORDER BY created_at DESC LIMIT 20").fetchall()
+                result['recent']=[dict(zip(('event_id','order_number','bank_reference','state','reason','rule_id'),row)) for row in rows]
+        return result
     except Exception: raise HTTPException(503,'Exact-verbinding of toewijzingsregels niet beschikbaar') from None

@@ -35,10 +35,13 @@ for an existing event or a second transaction for the same order is rejected.
 The legacy POST `/api/woocommerce/iban-rule` remains compatible with old clients
 and previously dispatched immutable IBAN receipts. The durable table, feature
 flags and secret retain their original names. Both routes share receipt uniqueness.
-Do not rewrite or resubmit legacy dispatched evidence as reference evidence.
+A completed legacy IBAN job may be upgraded to a bosci rule only with identical
+transaction, order, account, currency, dates and amount, and plugin-completion proof.
+The atomic digest/state check prevents converting in-flight or uncertain writes.
+Existing IBAN rules remain untouched.
 
 POST `/api/woocommerce/iban-rule/check` signs the fixed body `{}`. This checks
-debtor resolution and allocation-rule read access without creating a rule. It also returns `allocation_rule_version: 2` and
+debtor resolution and allocation-rule read access without creating a rule. It also returns `allocation_rule_version: 3` and
 `rule_types: ["iban", "bosci_words"]`.
 
 States: pending, creating, done, conflict, uncertain. `done` requires an Exact
@@ -48,14 +51,25 @@ reissue the POST. Investigate persistent uncertain/conflict records with a
 private DB read. After operator investigation, pending may be restored only if
 the original attempt is conclusively known not to have created the rule.
 
-The historical WordPress action scans imported Moneybird transactions and finds
-paid BACS orders created on/after 2026-10-01. It uses the plugin's existing
-confirmed association, or a unique order-number/full-name + exact EUR amount
-match. No historical WooCommerce payment is replayed. On upgrade, the plugin starts one historical scan and upgrades only unsent
-`missing_iban` / `missing_reference` receipts. No historical payment_complete call
-is performed. Missing/ambiguous references and uncertain matches require review; the action cannot infer payments not present in Moneybird.
-Historical scans may be rerun after further Moneybird imports; duplicate events
-are suppressed. Run the bank import only after the relevant jobs are done.
+The historical WordPress action scans only local transactions marked completed
+with their recorded order ID and matching `_mbom_transaction` metadata. Payment
+dates must be on/after 2026-10-01; an earlier order date is allowed for this
+module-confirmed association. No matching against other paid orders is performed.
+Fresh Moneybird evidence must retain the source IDs, date, amount, currency and
+reference. Formatting or unrelated bookkeeping metadata changes are permitted.
+A source error is recorded per payment and does not stall the queue or later rows.
+The scan never repeats payment_complete, changes paid dates or sends customer mail.
+
+On upgrade, one scan is scheduled. An admin-only AJAX action with nonce processes
+small batches while the progress view is open; WP-Cron remains active. Queue
+sending happens before historical scanning. Authentication/configuration failures
+are visible. The diagnosis panel and helper have been removed. There is no CAMT
+upload or parser in WordPress: references always originate from Moneybird.
+
+POST `/api/woocommerce/allocation-rule/status`, signed with the fixed body `{}`,
+is read-only and returns queue counts, the last 20 receipt states and the count
+of exact bosci Words rules belonging to debtor 109372. It never returns secrets
+or IBANs. This allows verification without opening database network access.
 
 Tests: `python -m pytest operations -q`. The PHP ZIP contains separate matching,
 payment-contract, token and queue tests; no live financial writes are used in tests.

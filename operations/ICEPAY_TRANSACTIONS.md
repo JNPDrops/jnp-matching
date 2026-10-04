@@ -30,7 +30,7 @@ en kolomnamen. Fouten kunnen begrensde formuliermetadata tonen onder
 ## Eenmalig activeren
 
 - Gebruik de bestaande ICEPAY_WEB_USERNAME/PASSWORD en optionele TOTP-configuratie.
-- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v13`.
+- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v14`.
 - Render env-merge (`replace=false`) start zelf één deployment. Auto-deploy blijft uit.
 - De taak vervalt op 5 oktober 18:00 UTC en claimt vóór browserstart één poging.
 - Bestaande claims blijven intact; een herstart herhaalt geen export.
@@ -123,6 +123,11 @@ binnen 1–3 oktober vallen. Bedragen en Order #-conflicten blijven strikt.
 Na succesvolle validatie volgt een uitsluitend lezende Exact-controle van dagboek
 27, debiteur 109419, grootboeken 1100/1317/1360 en bestaande 2026-boekingen op
 het ICEPAY-grootboek/debiteur. Er is nog steeds geen upload- of aflettercode.
+
+V13 kon nog geen volledige datuminterpretatie vaststellen. V14 toont daarom de
+begrensde betaal-tijdwaarden en statuswaarden uit uitsluitend deze vaste bron;
+geen klant- of credentialvelden. De Exact-configuratie wordt onafhankelijk gelezen,
+met `source_validated=false` en `ready=false`, totdat de broncontrole slaagt.
 
 `downloaded` betekent dat de bronbestanden zijn opgehaald. Het betekent nog niet
 dat de Exact-import gereed is. De refunds moeten inhoudelijk worden gemapt;

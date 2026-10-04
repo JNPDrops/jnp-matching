@@ -4,10 +4,22 @@
   "tax_account_code": "1",
   "year_policy": "nearest_to_bank_year_tie_earlier",
   "gl_accounts": {
-    "vpb": null,
-    "btw": null,
-    "loonheffingen": null
+    "vpb": "1500",
+    "btw": "1770",
+    "loonheffingen": "1600"
   },
   "exact_writes": false,
-  "reason": "BankEntryLines has no documented update operation. Verify actual tax balance accounts before enabling an independently supported booking path."
+  "reason": "Bank scans remain GET-only. Only complete generated references may be POSTed as AllocationRule. User applies these via Automatically. GL accounts checked live 2026-10-04; BTW 1770 also confirmed in payment history. L subnumber/frequency requires a validated observation.",
+  "allocation_rule_writes": true,
+  "rule_templates": [
+    {
+      "letter": "V",
+      "period": "0112"
+    },
+    {
+      "letter": "B",
+      "subnumber": "01",
+      "frequency": "quarterly"
+    }
+  ]
 }

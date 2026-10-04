@@ -1,8 +1,9 @@
-"""Tax recognition inside the existing service. Exact access is strictly GET-only.
+"""Tax recognition inside the existing service. Bank scans are strictly GET-only.
 
 Existing BankEntryLines have no documented PUT operation. Do not turn a
 classification into a fictitious completed booking or delete/reimport entries.
-The persistent report and authenticated endpoint expose the missing step.
+The separate tax_allocation module creates scoped allocation rules; the user
+applies them in Exact through Automatically. No existing bank entry is rewritten.
 """
 import asyncio
 from collections import Counter
@@ -21,7 +22,7 @@ router = APIRouter()
 log = logging.getLogger('uvicorn.error')
 LOCK_ID = 3977752867393
 INTERVAL = 1800
-SCAN_VERSION = 'supplier-metadata-v2'
+SCAN_VERSION = 'allocation-rules-v1'
 RESERVE = 150
 POLICY = json.loads(Path(__file__).with_name('tax_policy.json').read_text())
 STATUS = {'state': 'starting', 'read_only': True, 'booking_writes': False,
@@ -199,6 +200,14 @@ async def cycle(app):
                 'historical_gl_counts': [{'tax': k[0], 'gl_code': k[1], 'count': v} for k, v in history.items()],
                 'templates': [{'letter': k[0], 'subnumber': k[1], 'year': k[2], 'period': k[3],
                                'kind': k[4], 'direction': k[5], 'count': v} for k, v in templates.items()]}))
+            from operations import tax_allocation
+            try:
+                await tax_allocation.sync(app, conn, POLICY, saved, api.limits)
+                log.info('tax_agent allocation_rules %s', json.dumps(tax_allocation.STATUS))
+            except Exception as exc:
+                tax_allocation.STATUS['state'] = 'error'
+                log.warning('tax_agent allocation_rules_error type=%s status=%s', type(exc).__name__,
+                            exc.status_code if isinstance(exc, transport.ExactRequestError) else None)
         except BudgetDeferred:
             STATUS['state'] = 'waiting_for_api_budget'
         except transport.ExactRequestError as exc:
@@ -230,7 +239,8 @@ async def serve(app):
 
 @router.get('/api/tax/status')
 async def status():
-    return dict(STATUS)
+    from operations.tax_allocation import STATUS as RULE_STATUS
+    return {**STATUS, 'allocation_rules': dict(RULE_STATUS)}
 
 
 @router.get('/api/tax/report')

@@ -21,11 +21,12 @@ import re
 import sys
 import time
 from urllib.parse import urljoin, urlsplit
+from zoneinfo import ZoneInfo
 
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v14'
+JOB = 'icepay-transactions-20261001-03-v15'
 SAVED_SOURCE = 'icepay-transactions-20261001-03-v11'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
@@ -559,21 +560,69 @@ def amount(value):
     return result.quantize(Decimal('.01'))
 
 
-def payment_date(text, *, day_first=False):
+def payment_timestamp(text):
     # ICEPAY CSV's US timestamps were verified in the existing sample export.
     # Portal date controls use a different (day/month) format.
     for fmt in ('%m/%d/%Y %I:%M:%S %p','%m/%d/%Y %I:%M %p','%m/%d/%Y %H:%M:%S',
                 '%Y-%m-%d %H:%M:%S','%Y-%m-%dT%H:%M:%S'):
         try:
-            if day_first:
-                fmt = fmt.replace('%m/%d/','%d/%m/')
-            return datetime.strptime(text.strip(),fmt).date()
+            return datetime.strptime(text.strip(),fmt)
         except ValueError:
             pass
     raise AcquisitionStopped('invalid_payment_date')
 
 
-def parse_payments(content, expected_count, expected_ids=None):
+def payment_date(text, *, utc_to_amsterdam=False):
+    stamp=payment_timestamp(text)
+    if utc_to_amsterdam:
+        stamp=stamp.replace(tzinfo=timezone.utc).astimezone(ZoneInfo('Europe/Amsterdam'))
+    return stamp.date()
+
+
+def verify_csv_timezone(content, evidence, expected_ids):
+    """Prove UTC CSV timestamps against every independently rendered UI row."""
+    source=list(csv.DictReader(io.StringIO(content.decode('utf-8-sig')),delimiter=';'))
+    csv_rows={r['PaymentID']:r for r in source}
+    tables=evidence.get('payments',[])
+    report={'verified':False,'compared_rows':0,'examples':[],'offset_seconds':[]}
+    if len(tables)!=1 or set(csv_rows)!=set(expected_ids):
+        return report
+    table=tables[0]
+    if 'OrderTime' not in table['headers']:
+        return report
+    index=table['headers'].index('OrderTime'); offsets=set(); found=set()
+    formats=('%d/%m/%Y %H:%M:%S','%d/%m/%Y %H:%M','%d-%m-%Y %H:%M:%S','%d-%m-%Y %H:%M',
+        '%Y-%m-%d %H:%M:%S','%Y-%m-%d %H:%M','%b %d, %Y %H:%M:%S','%b %d, %Y %H:%M',
+        '%b %d, %Y %I:%M:%S %p','%b %d, %Y %I:%M %p','%d %b %Y %H:%M:%S','%d %b %Y %H:%M')
+    formats+=('%m/%d/%Y %I:%M:%S %p','%m/%d/%Y %I:%M %p','%b %d, %Y, %I:%M:%S %p',
+              '%b %d, %Y, %I:%M %p','%d %b %Y, %H:%M:%S','%d %b %Y, %H:%M')
+    for row in table['rows']:
+        match=re.fullmatch(r'Select/deselect item (\d+) for bulk actions\.',row['id'])
+        if not match or match[1] not in csv_rows or match[1] in found or len(row['cells'])!=len(table['headers']):
+            return report
+        identifier=match[1]; shown=row['cells'][index].strip(); raw=csv_rows[identifier]['OrderTime']
+        if len(report['examples'])<3 and re.search(r'\d{4}',shown) and re.search(r'\d\d:\d\d',shown):
+            report['examples'].append({'csv':raw,'ui':shown[:80]})
+        original=payment_timestamp(raw)
+        expected=original.replace(tzinfo=timezone.utc).astimezone(ZoneInfo('Europe/Amsterdam')).replace(tzinfo=None)
+        matches=[]
+        for fmt in formats:
+            try:
+                ui=datetime.strptime(shown,fmt)
+                compared=expected if '%S' in fmt else expected.replace(second=0,microsecond=0)
+                if ui==compared:
+                    matches.append(ui)
+            except ValueError:
+                pass
+        if not matches:
+            return report
+        offsets.add(int((expected-original).total_seconds()))
+        found.add(identifier); report['compared_rows']+=1
+    report.update(verified=found==set(expected_ids),offset_seconds=sorted(offsets))
+    return report
+
+
+def parse_payments(content, expected_count, expected_ids=None, *, utc_to_amsterdam=False):
     try:
         text = content.decode('utf-8-sig')
         dialect = csv.Sniffer().sniff(text[:16000],delimiters=',;\t')
@@ -592,23 +641,6 @@ def parse_payments(content, expected_count, expected_ids=None):
         raise AcquisitionStopped('invalid_csv') from None
     if len(source)!=expected_count or len(source)>5000:
         raise AcquisitionStopped('count_mismatch')
-    day_first = False
-    if 'paymentcompleted' in headers and not {'checkoutreference','checkoutdescription'}.intersection(headers):
-        # Legacy has a separate date convention. Establish it from all rows and
-        # the independently observed exact ID/date-filter proof, never one cell.
-        if expected_ids is None or sorted(r.get(headers['paymentid'],'').strip() for r in source)!=sorted(expected_ids):
-            raise AcquisitionStopped('count_mismatch')
-        candidates = {}
-        for candidate in (False,True):
-            try:
-                dates = tuple(payment_date(r.get(headers['paymenttime'],'') or '',day_first=candidate) for r in source)
-                if all(START<=paid<=END for paid in dates):
-                    candidates.setdefault(dates,candidate)
-            except AcquisitionStopped:
-                pass
-        if len(candidates)!=1:
-            raise AcquisitionStopped('out_of_period')
-        day_first = next(iter(candidates.values()))
     seen, selected, statuses = set(), [], Counter()
     for raw in source:
         if None in raw or any(v is None for v in raw.values()):
@@ -620,7 +652,7 @@ def parse_payments(content, expected_count, expected_ids=None):
         if key in seen:
             raise AcquisitionStopped('duplicate_payment')
         seen.add(key)
-        paid = payment_date(row['paymenttime'],day_first=day_first)
+        paid = payment_date(row['paymenttime'],utc_to_amsterdam=utc_to_amsterdam)
         if not START<=paid<=END:
             raise AcquisitionStopped('out_of_period')
         if row['merchantid']!=b.MERCHANT:
@@ -642,7 +674,7 @@ def parse_payments(content, expected_count, expected_ids=None):
         raise AcquisitionStopped('count_mismatch')
     ok = [r for r in selected if r['status']=='OK']
     return selected, {'source_rows':len(source),'td_rows':len(selected),
-        'timestamp_format':'day_first' if day_first else 'month_first_or_iso',
+        'timestamp_format':'UTC to Europe/Amsterdam' if utc_to_amsterdam else 'month_first_or_iso',
         'td_ok_count':len(ok),'td_ok_total':str(sum((Decimal(r['amount']) for r in ok),Decimal('0.00'))),
         'other_merchant_rows':len(source)-len(selected),'non_ok_count':len(selected)-len(ok),
         'missing_order_count':sum(r['order'] is None for r in ok),
@@ -934,9 +966,39 @@ async def run():
             ids = proof.get('ui_payment_ids')
             if not isinstance(ids,list) or any(not isinstance(v,str) or not re.fullmatch(r'\d+',v) for v in ids):
                 raise AcquisitionStopped('invalid_worker_output')
-            rows,payment_summary = parse_payments(content,proof['ui_payment_count'],ids)
+            timezone_evidence=verify_csv_timezone(content,artifacts.get('table_evidence',{}),ids)
+            summary['timezone_evidence']=timezone_evidence
+            # Independently read the account-level financial source before any import.
+            child = await asyncio.create_subprocess_exec(sys.executable,'-m','playwright','install','chromium','--only-shell',
+                env=base,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
+            if await asyncio.wait_for(child.wait(),150)!=0:
+                raise AcquisitionStopped('browser_install')
+            child = await asyncio.create_subprocess_exec(sys.executable,'-m','operations.icepay_finance','--worker',
+                env=child_env,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
+            finance_stdout,_ = await asyncio.wait_for(child.communicate(),timeout=180)
+            if child.returncode!=0 or len(finance_stdout)>1000000:
+                raise AcquisitionStopped('invalid_worker_output')
+            from operations.icepay_finance import summarize
+            artifacts['finance']=json.loads(finance_stdout)
+            summary['finance']=summarize(artifacts['finance'])
+            if not timezone_evidence['verified']:
+                raise AcquisitionStopped('date_not_verified')
+            rows,payment_summary = parse_payments(content,proof['ui_payment_count'],ids,utc_to_amsterdam=True)
             summary.update(payment_summary)
             artifacts['normalized_payments'] = rows
+            source_ids={r['payment_id'] for r in rows}
+            source_orders={r['order'] for r in rows if r.get('order')}
+            hits=[]; order_hits=[]
+            for tx in exact.get('transactions',[]):
+                tx_text=' '.join(str(tx.get(k) or '') for k in ('Description','PaymentReference','YourRef'))
+                if source_ids.intersection(re.findall(r'\b\d+\b',tx_text)):
+                    hits.append(tx['ID'])
+                if str(tx.get('GLAccountCode') or '').strip()=='1317' and source_orders.intersection(re.findall(r'(?:TD|Order\s*#\s*)(\d+)\b',tx_text,re.I)):
+                    order_hits.append(tx['ID'])
+            exact['duplicate_payment_lines']=hits
+            exact['potential_duplicate_order_lines']=order_hits
+            exact_summary.update(source_validated=True,duplicate_payment_lines=len(hits),potential_duplicate_order_lines=len(order_hits),
+                                 ready='reason' not in exact_summary and not hits and not order_hits)
             summary['sha256'] = hashlib.sha256(content).hexdigest()
             if 'source_export_csv' in artifacts:
                 summary['original_export_sha256'] = hashlib.sha256(base64.b64decode(

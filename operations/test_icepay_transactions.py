@@ -72,19 +72,26 @@ class CSV(unittest.TestCase):
         self.assertEqual(rows[0]['order'],'49042')
         self.assertEqual(summary['missing_order_count'],0)
 
-    def test_legacy_date_convention_requires_exact_independent_ids_and_period(self):
-        headers=HEADERS[:6]+['Description','PaymentCompleted']
-        row=ROW[:6]+['Order #49042','True']; row[2]='01/10/2026 2:30:00 PM'
-        output=io.StringIO(); writer=csv.writer(output,delimiter=';')
-        writer.writerow(headers); writer.writerow(row)
-        source=output.getvalue().encode()
-        rows,summary=t.parse_payments(source,1,['123'])
+    def test_utc_conversion_preserves_local_period_boundaries(self):
+        row=ROW.copy(); row[2]='09/30/2026 10:33:54 PM'
+        with self.assertRaises(t.AcquisitionStopped):
+            t.parse_payments(fixture([row]),1,['123'])
+        rows,summary=t.parse_payments(fixture([row]),1,['123'],utc_to_amsterdam=True)
         self.assertEqual(rows[0]['date'],'2026-10-01')
-        self.assertEqual(summary['timestamp_format'],'day_first')
+        self.assertEqual(summary['timestamp_format'],'UTC to Europe/Amsterdam')
+        row[2]='10/03/2026 10:00:00 PM'
         with self.assertRaises(t.AcquisitionStopped):
-            t.parse_payments(source,1)
-        with self.assertRaises(t.AcquisitionStopped):
-            t.parse_payments(source,1,['124'])
+            t.parse_payments(fixture([row]),1,['123'],utc_to_amsterdam=True)
+
+    def test_timezone_requires_every_independent_rendered_order_time(self):
+        source='PaymentID;OrderTime\r\n123;09/30/2026 10:33:00 PM\r\n'.encode()
+        evidence={'payments':[{'headers':['OrderTime'],'rows':[{
+            'id':'Select/deselect item 123 for bulk actions.','cells':['01/10/2026 00:33:00']}]}]}
+        result=t.verify_csv_timezone(source,evidence,['123'])
+        self.assertTrue(result['verified']); self.assertEqual(result['offset_seconds'],[7200])
+        self.assertFalse(t.verify_csv_timezone(source,evidence,['123','124'])['verified'])
+        evidence['payments'][0]['rows'][0]['cells']=['30/09/2026 22:33:00']
+        self.assertFalse(t.verify_csv_timezone(source,evidence,['123'])['verified'])
 
     def test_csv_ids_must_match_every_observed_page(self):
         t.parse_payments(fixture([ROW]),1,['123'])

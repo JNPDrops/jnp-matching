@@ -63,6 +63,13 @@ class ExactConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             b.safe_result('failed', 'password', reason='raw private error')
 
+    def test_only_noop_javascript_form_action_is_supported(self):
+        for action in ['javascript:void(0)', 'JavaScript: void(0);']:
+            self.assertTrue(b.form_action_allowed(action))
+        for action in ['javascript:submit()', 'javascript:fetch("https://evil.test")',
+                       'javascript:void(1)', 'data:text/html,x', 'https://evil.test/']:
+            self.assertFalse(b.form_action_allowed(action))
+
     def test_login_probe_is_opt_in_and_expires(self):
         now = datetime(2026, 10, 4, 15, tzinfo=timezone.utc)
         self.assertFalse(p.eligible({}, now))
@@ -141,6 +148,13 @@ class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
             await b.submit(SimpleNamespace(url=b.TARGET), frame, field)
         button.click.assert_not_awaited()
 
+    async def test_ajax_form_accepts_noop_action_on_trusted_exact_frame(self):
+        field, button = element(action='javascript:void(0);'), element(action='javascript:void(0);')
+        frame = SimpleNamespace(url='https://login.exact.com/signin', get_by_role=lambda *_a, **_kw: collection([button]))
+        await b.check_destination(SimpleNamespace(url=b.TARGET), frame, field)
+        await b.submit(SimpleNamespace(url=b.TARGET), frame, field)
+        button.click.assert_awaited_once()
+
     async def test_captcha_stops_without_submitting(self):
         frame = SimpleNamespace(url=b.TARGET, locator=lambda _: collection([element()]))
         with self.assertRaises(b.LoginStopped) as error:
@@ -167,11 +181,17 @@ class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
         for method, nav, url, blocked in [('POST', False, 'https://evil.test/', True),
                 ('GET', True, 'https://evil.test/', True), ('POST', False, 'https://login.exact.com/path', False),
                 ('GET', False, 'https://cdn.example.invalid/style.css', False)]:
-            route = SimpleNamespace(request=SimpleNamespace(method=method, url=url, is_navigation_request=lambda: nav),
+            route = SimpleNamespace(request=SimpleNamespace(method=method, resource_type='document', url=url, is_navigation_request=lambda: nav),
                                     abort=AsyncMock(), continue_=AsyncMock())
             await guard(route)
             self.assertEqual(route.abort.await_count, int(blocked))
             self.assertEqual(route.continue_.await_count, int(not blocked))
+
+        route = SimpleNamespace(request=SimpleNamespace(method='GET', resource_type='xhr', url='https://evil.test/collect', is_navigation_request=lambda: False),
+                                abort=AsyncMock(), continue_=AsyncMock())
+        await guard(route)
+        route.abort.assert_awaited_once()
+        route.continue_.assert_not_awaited()
 
 
 class ProbeOrchestrationTests(unittest.IsolatedAsyncioTestCase):

@@ -87,7 +87,8 @@ async def audit():
 async def policy(request:Request):
     legacy.authorize(request)
     return {'policy':POLICY,'legacy_cross_order_actions_blocked':True,
-            'order_repair_implemented':False}
+            'order_repair_implemented':True,
+            'historical_matches_repaired':legacy.state().get('historical_matches_repaired', False)}
 
 
 @router.post('/audit_order_matches')

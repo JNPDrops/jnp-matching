@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v6'
+JOB = 'icepay-transactions-20261001-03-v7'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
@@ -288,13 +288,32 @@ async def csv_links(page):
     return found
 
 
-async def payment_export(page, downloads):
-    await b.click_unique_read_control(page,NOTIFICATIONS)
+async def close_notifications(page):
+    marker = page.get_by_role('button',name='Mark all as read',exact=True)
+    if not await b.visible(marker):
+        return False
+    await b.click_unique_read_control(page,re.compile(r'^Close$'))
+    await marker.wait_for(state='hidden',timeout=15000)
+    return True
+
+
+async def open_notifications(page):
+    marker = page.get_by_role('button',name='Mark all as read',exact=True)
+    if not await b.visible(marker):
+        await b.click_unique_read_control(page,NOTIFICATIONS)
+    await marker.wait_for(state='visible',timeout=15000)
+
+
+async def payment_export(page, downloads, artifacts):
+    artifacts['export_state'] = 'not_started'
+    await open_notifications(page)
     await page.wait_for_load_state('networkidle',timeout=20000)
     await asyncio.sleep(.6)
     before = set(await csv_links(page))
-    await page.keyboard.press('Escape')
+    await close_notifications(page)
+    await page.get_by_role('button',name='Actions',exact=True).wait_for(state='visible',timeout=15000)
     await b.click_unique_read_control(page,re.compile(r'^Actions$'))
+    await page.get_by_role('button',name='Export payments',exact=True).wait_for(state='visible',timeout=15000)
     await b.click_unique_read_control(page,re.compile(r'^Export payments$',re.I))
     payment_column = page.locator('input[id="mountedActionSchema0.columnMap.PaymentID.isEnabled"]')
     await payment_column.wait_for(state='visible',timeout=15000)
@@ -304,7 +323,9 @@ async def payment_export(page, downloads):
         checkbox = page.locator('input[id="mountedActionSchema0.columnMap.'+column+'.isEnabled"]')
         if not await checkbox.is_checked():
             raise AcquisitionStopped('export_ambiguous')
+    artifacts['export_state'] = 'submit_attempted'
     await b.click_unique_read_control(page,re.compile(r'^Export$'))
+    artifacts['export_state'] = 'submitted'
     await payment_column.wait_for(state='hidden',timeout=20000)
     deadline, last_open = time.monotonic()+110, 0
     while time.monotonic()<deadline:
@@ -312,8 +333,8 @@ async def payment_export(page, downloads):
         if not downloads.empty():
             return await read_download(await downloads.get())
         if time.monotonic()-last_open>10:
-            await page.keyboard.press('Escape')
-            await b.click_unique_read_control(page,NOTIFICATIONS)
+            await close_notifications(page)
+            await open_notifications(page)
             last_open = time.monotonic()
             await asyncio.sleep(.6)
         links = await csv_links(page)
@@ -383,7 +404,7 @@ def scope_csv(content, expected_ids):
 
 async def resume_payment_export(page, downloads, expected_ids, artifacts):
     """Download a matching existing notification; never create another export."""
-    await b.click_unique_read_control(page,NOTIFICATIONS)
+    await open_notifications(page)
     await page.wait_for_load_state('networkidle',timeout=20000)
     await asyncio.sleep(1)
     links = await csv_links(page)
@@ -420,7 +441,7 @@ async def read_download(download):
 
 
 async def read_refunds(page):
-    await page.keyboard.press('Escape')
+    await close_notifications(page)
     await open_account_page(page,'Refunds')
     await apply_period(page,refunds=True)
     combined, seen, headers, total = [], set(), None, None
@@ -561,8 +582,13 @@ async def worker(resume):
                 artifacts['proof'] = {'period':RANGE,'ui_payment_count':len(identifiers),
                                       'ui_payment_ids':identifiers}
                 stage = 'payments_export'
-                content = await resume_payment_export(page,downloads,identifiers,artifacts)
-                artifacts['payments_csv'] = base64.b64encode(content).decode()
+                content = await payment_export(page,downloads,artifacts)
+                artifacts['source_export_csv'] = base64.b64encode(content).decode()
+                artifacts['candidate_csvs'] = [artifacts['source_export_csv']]
+                scoped,_ = scope_csv(content,identifiers)
+                if scoped is None:
+                    raise AcquisitionStopped('export_not_completed')
+                artifacts['payments_csv'] = base64.b64encode(scoped).decode()
                 stage = 'refunds'
                 artifacts['refunds'] = await read_refunds(page)
                 result = status('downloaded','complete',account_verified=True)
@@ -638,10 +664,12 @@ def decode(stdout):
     result = status(**{k:v for k,v in raw['status'].items() if k!='financial_writes'})
     artifacts = raw['artifacts']
     if not isinstance(artifacts,dict) or set(artifacts)-{'login','proof','payments_csv','refunds','form_metadata','failure',
-                                                      'candidate_csvs','source_export_csv'}:
+                                                      'candidate_csvs','source_export_csv','export_state'}:
         raise AcquisitionStopped('invalid_worker_output')
     if 'form_metadata' in artifacts:
         validate_forms(artifacts['form_metadata'])
+    if artifacts.get('export_state','not_started') not in {'not_started','submit_attempted','submitted'}:
+        raise AcquisitionStopped('invalid_worker_output')
     if 'failure' in artifacts:
         failure = artifacts['failure']
         if (set(failure)!={'kind','function','line'} or type(failure['line']) is not int or
@@ -690,6 +718,8 @@ async def run():
         if child.returncode!=0:
             raise AcquisitionStopped('invalid_worker_output')
         result,artifacts = decode(stdout)
+        if 'export_state' in artifacts:
+            summary['export_state'] = artifacts['export_state']
         if 'proof' in artifacts:
             summary['ui_payment_count'] = validate_proof(artifacts['proof'])['ui_payment_count']
         if 'candidate_csvs' in artifacts:

@@ -136,9 +136,12 @@ async def prepare():
     legacy.update(phase='strict_plan_prepared', strict_target_count=len(targets), strict_exception_count=sum(bool(r['exception']) for r in targets))
 
 
-async def entry_lines(receipt):
+async def entry_lines(receipt, *, full=False):
+    query = "EntryID eq guid'" + receipt['entry_id'] + "'"
+    if not full:
+        query += " and (ID eq guid'" + receipt['bank_line_id'] + "' or ID eq guid'" + receipt['offset_id'] + "')"
     return await legacy.read_all('financialtransaction/TransactionLines', {
-        '$filter': "EntryID eq guid'" + receipt['entry_id'] + "'", '$select': SELECT})
+        '$filter': query, '$select': SELECT})
 
 
 def verify_source(receipt, lines):
@@ -306,7 +309,9 @@ async def process(mode, limit):
     async with session() as (context, page):
         for receipt in queue:
             legacy.update(phase='strict_' + mode, strict_current_order=receipt['source_order'])
-            before = await entry_lines(receipt)
+            full_ledger = bool(receipt.get('difference_decision') or
+                receipt['allocated_reference'] == (plan.get('approved_decision') or {}).get('order'))
+            before = await entry_lines(receipt, full=full_ledger)
             verify_source(receipt, before)
             frame = await open_match(context, page, receipt)
             rows = await match_rows(frame)
@@ -358,7 +363,7 @@ async def process(mode, limit):
                 await save_once(frame, receipt, plan, 'undo')
                 reopened = await open_match(context, page, receipt)
                 after = await match_rows(reopened)
-                actual = await entry_lines(receipt)
+                actual = await entry_lines(receipt, full=full_ledger)
                 verify_source(receipt, actual)
                 if any(r['checked'] for r in after):
                     fail('undo_not_verified')
@@ -416,7 +421,7 @@ async def process(mode, limit):
                     reopened = await open_match(context, page, receipt)
                     after = await match_rows(reopened)
                     selected = [r for r in after if r['checked']]
-                    actual = await entry_lines(receipt)
+                    actual = await entry_lines(receipt, full=full_ledger)
                     verify_source(receipt, actual)
                     if difference and difference_total(actual, receipt['source_order']) != -difference:
                         fail('source_difference_readback_not_verified')

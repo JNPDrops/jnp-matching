@@ -510,7 +510,7 @@ async def verify_final():
         strict_unresolved_count=len(incomplete))
 
 
-async def diagnose_closed(limit):
+async def diagnose_closed(limit, *, pending=False):
     """Read prior invoice-related postings; do not undo an existing payment."""
     plan = load(PLAN)
     if not plan:
@@ -519,14 +519,16 @@ async def diagnose_closed(limit):
     found = []
     for receipt in plan['receipts']:
         invoice = receipt.get('invoice')
-        if receipt['state'] != 'unmatched_verified' or not invoice:
+        if not invoice or (receipt['state'] not in {'pending', 'inspected'} if pending else receipt['state'] != 'unmatched_verified'):
+            continue
+        if pending and receipt.get('existing_invoice_history'):
             continue
         if any(r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == str(invoice['EntryNumber']) for r in opened):
             continue
         if len(found) >= limit:
             break
         legacy.update(phase='strict_existing_invoice_review', strict_current_order=receipt['source_order'])
-        evidence = dict(at=now(), invoice=invoice, invoice_is_open=False)
+        evidence = dict(at=now(), invoice=invoice, invoice_is_open=False, source_lines=await entry_lines(receipt), receivables=opened)
         evidence['related_lines'] = await legacy.read_all('financialtransaction/TransactionLines', {
             '$filter': "YourRef eq '" + receipt['source_order'] + "'", '$select': SELECT + ',Date'})
         try:
@@ -538,7 +540,7 @@ async def diagnose_closed(limit):
         receipt['existing_invoice_history'] = evidence
         found.append(receipt['source_order'])
         legacy.artifact(PLAN, plan)
-    if found:
+    if found and not pending:
         async with session() as (context, page):
             for receipt in plan['receipts']:
                 if receipt['source_order'] not in found:
@@ -584,8 +586,8 @@ async def run(mode, limit):
             await prepare()
         elif mode == 'verify':
             await verify_final()
-        elif mode == 'diagnose_closed':
-            await diagnose_closed(limit)
+        elif mode in {'diagnose_closed', 'history_pending'}:
+            await diagnose_closed(limit, pending=mode == 'history_pending')
         else:
             await process(mode, limit)
     except asyncio.CancelledError:
@@ -605,7 +607,7 @@ async def run(mode, limit):
 @router.post('/strict/{mode}')
 async def start(mode: str, request: Request, limit: int = 1):
     legacy.authorize(request)
-    if mode not in {'prepare', 'inspect', 'undo', 'undo_orphans', 'match', 'correct', 'recover', 'verify', 'diagnose_closed'} or not 1 <= limit <= 5:
+    if mode not in {'prepare', 'inspect', 'undo', 'undo_orphans', 'match', 'correct', 'recover', 'verify', 'diagnose_closed', 'history_pending'} or not 1 <= limit <= 5:
         fail('invalid_strict_operation')
     legacy.state()
     if any(not t.done() for t in legacy.TASKS):
@@ -613,4 +615,4 @@ async def start(mode: str, request: Request, limit: int = 1):
     task = asyncio.create_task(run(mode, limit))
     legacy.TASKS.add(task)
     task.add_done_callback(legacy.TASKS.discard)
-    return dict(accepted=True, mode=mode, limit=limit, read_only=mode in {'prepare', 'inspect', 'recover', 'verify', 'diagnose_closed'})
+    return dict(accepted=True, mode=mode, limit=limit, read_only=mode in {'prepare', 'inspect', 'recover', 'verify', 'diagnose_closed', 'history_pending'})

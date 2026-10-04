@@ -475,13 +475,14 @@ async def legacy_payment_export(page, downloads, expected_ids, artifacts):
     await legacy.wait_for(state='visible',timeout=15000)
     artifacts['export_state'] = 'submit_attempted'
     await legacy.click()
-    artifacts['export_state'] = 'submitted'
+    artifacts['export_state'] = 'legacy_opened'
     try:
         download = await asyncio.wait_for(downloads.get(),timeout=35)
     except asyncio.TimeoutError:
         # A legacy configuration dialog, if any, is retained as form metadata.
         raise AcquisitionStopped('export_not_completed') from None
     content = await read_download(download)
+    artifacts['export_state'] = 'submitted'
     artifacts['source_export_csv'] = base64.b64encode(content).decode()
     artifacts['candidate_csvs'] = [artifacts['source_export_csv']]
     scoped,_ = scope_csv(content,expected_ids)
@@ -722,7 +723,7 @@ def decode(stdout):
         raise AcquisitionStopped('invalid_worker_output')
     if 'form_metadata' in artifacts:
         validate_forms(artifacts['form_metadata'])
-    if artifacts.get('export_state','not_started') not in {'not_started','submit_attempted','submitted'}:
+    if artifacts.get('export_state','not_started') not in {'not_started','submit_attempted','submitted','legacy_opened'}:
         raise AcquisitionStopped('invalid_worker_output')
     if 'export_notices' in artifacts:
         notices = artifacts['export_notices']

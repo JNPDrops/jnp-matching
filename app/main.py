@@ -83,7 +83,7 @@ async def lifespan(_app):
             await exact_login_probe_task
 
 
-app = FastAPI(title="JNP Matching", version="1.13.3", lifespan=lifespan)
+app = FastAPI(title="JNP Matching", version="1.13.4", lifespan=lifespan)
 from operations.allocation_maintenance import router as maintenance_router
 app.include_router(maintenance_router)
 from operations.woo_iban_rules import router as woo_iban_router

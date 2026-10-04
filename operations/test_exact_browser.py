@@ -21,6 +21,7 @@ def element(*, text='', action=b.TARGET, visible=True, enabled=True):
     item.fill = AsyncMock()
     item.click = AsyncMock()
     item.count = AsyncMock(return_value=1)
+    item.get_attribute = AsyncMock(return_value=None)
     return item
 
 
@@ -79,6 +80,30 @@ class ExactConfigurationTests(unittest.TestCase):
 
 
 class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_authenticator_prompt_identifies_uniquely_named_code_field(self):
+        code = element()
+        frame = SimpleNamespace(locator=lambda selector: collection([]) if selector == b.OTP
+            else element(text='Enter the code from your authenticator app') if selector == 'body'
+            else collection([code]))
+        self.assertEqual(await b.locate_otp(frame, after_password=True), [code])
+        self.assertEqual(await b.locate_otp(frame, after_password=False), [])
+
+    async def test_email_code_does_not_trigger_totp_fallback(self):
+        frame = SimpleNamespace(locator=lambda selector: collection([]) if selector == b.OTP
+            else element(text='Enter the verification code sent by email') if selector == 'body'
+            else collection([element()]))
+        self.assertEqual(await b.locate_otp(frame, after_password=True), [])
+
+    async def test_ambiguous_authenticator_fields_are_not_filled(self):
+        fields = [element(), element()]
+        frame = SimpleNamespace(locator=lambda selector: collection([]) if selector == b.OTP
+            else element(text='Use your authenticator app') if selector == 'body'
+            else collection(fields))
+        with self.assertRaises(b.LoginStopped):
+            await b.locate_otp(frame, after_password=True)
+        for field in fields:
+            field.fill.assert_not_awaited()
+
     async def flow(self, sequence, *, error=None, auto_otp=False):
         state = {'index': 0}
         fields = {name: element() for name in ['username', 'password', 'totp']}

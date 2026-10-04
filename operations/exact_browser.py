@@ -29,6 +29,7 @@ ERROR_TEXT = re.compile(r"incorrect password|invalid password|invalid verificati
 AUTH_TEXT = re.compile(r"sign in|log in|inloggen|aanmelden|verification code|verificatiecode|verificatie.code|two.step|tweestaps|authenticator", re.I)
 LOGGED_OUT = re.compile(r"you.ve been logged out|please log in to continue|u bent uitgelogd|je bent uitgelogd", re.I)
 OTP_TEXT = re.compile(r"authenticator|verification code|verificatie.code|verification.code|security code|beveiligingscode", re.I)
+TOTP_APP_TEXT = re.compile(r"authenticator|authentication app|authenticatie.?app|verificatie.?app", re.I)
 
 
 class LoginStopped(Exception):
@@ -114,6 +115,28 @@ async def one_input(frame, selector):
     if len(fields) > 1:
         raise LoginStopped("unsupported_form")
     return fields[0] if fields else None
+
+
+async def locate_otp(frame, *, after_password):
+    fields = [field for field in await visible(frame.locator(OTP)) if await field.is_enabled()]
+    if fields or not after_password:
+        return fields
+    # Exact can render an authenticator field without a standard OTP name or
+    # autocomplete attribute. Use the visible form meaning, only after password
+    # submission and only when it explicitly names an authenticator app.
+    text = await frame.locator('body').inner_text()
+    if not TOTP_APP_TEXT.search(text):
+        return []
+    candidates = [field for field in await visible(frame.locator(
+        'input[type="text"], input[type="tel"], input[type="number"], input:not([type])'))
+        if await field.is_enabled() and await field.get_attribute('autocomplete') != 'username']
+    if len(candidates) == 1:
+        return candidates
+    if len(candidates) == 6 and all([await field.get_attribute('maxlength') == '1' for field in candidates]):
+        return candidates
+    if candidates:
+        raise LoginStopped('unsupported_form')
+    return []
 
 
 async def guard_page(page):
@@ -202,7 +225,7 @@ async def authenticate(page, credentials, *, timeout=75, clock=time.monotonic, p
                     continue
                 password = await one_input(frame, PASSWORD)
                 username = await one_input(frame, USERNAME)
-                otp_fields = [f for f in await visible(frame.locator(OTP)) if await f.is_enabled()]
+                otp_fields = await locate_otp(frame, after_password='password' in completed and password is None)
                 if password is not None:
                     step = 'password'
                 elif otp_fields:

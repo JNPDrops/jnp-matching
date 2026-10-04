@@ -30,7 +30,7 @@ en kolomnamen. Fouten kunnen begrensde formuliermetadata tonen onder
 ## Eenmalig activeren
 
 - Gebruik de bestaande ICEPAY_WEB_USERNAME/PASSWORD en optionele TOTP-configuratie.
-- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v7`.
+- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v8`.
 - Render env-merge (`replace=false`) start zelf één deployment. Auto-deploy blijft uit.
 - De taak vervalt op 5 oktober 18:00 UTC en claimt vóór browserstart één poging.
 - Bestaande claims blijven intact; een herstart herhaalt geen export.
@@ -81,6 +81,12 @@ expliciet via de geobserveerde Close-knop en wacht tot het weg is. Daarna wordt
 `submitted` als afzonderlijk exportbewijs; een herstart herhaalt niets. De CSV
 moet nog steeds de volledige onafhankelijke ID-selectie dekken. Exact blijft
 ongewijzigd.
+
+V7 heeft de gerichte export aantoonbaar ingediend (`export_state=submitted`).
+ICEPAY toont een extra notificatie, maar er verscheen binnen de wachttijd geen
+nieuwe CSV-URL. V8 dient niets opnieuw in: hij controleert de bestaande downloads
+op de vastgelegde IDs en leest uitsluitend de exportmeldingen, zonder links,
+e-mailadressen of credentialgerelateerde teksten te loggen.
 
 `downloaded` betekent dat de bronbestanden zijn opgehaald. Het betekent nog niet
 dat de Exact-import gereed is. De refunds moeten inhoudelijk worden gemapt;

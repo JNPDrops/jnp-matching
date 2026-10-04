@@ -30,7 +30,7 @@ en kolomnamen. Fouten kunnen begrensde formuliermetadata tonen onder
 ## Eenmalig activeren
 
 - Gebruik de bestaande ICEPAY_WEB_USERNAME/PASSWORD en optionele TOTP-configuratie.
-- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v14`.
+- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v15`.
 - Render env-merge (`replace=false`) start zelf één deployment. Auto-deploy blijft uit.
 - De taak vervalt op 5 oktober 18:00 UTC en claimt vóór browserstart één poging.
 - Bestaande claims blijven intact; een herstart herhaalt geen export.
@@ -128,6 +128,17 @@ V13 kon nog geen volledige datuminterpretatie vaststellen. V14 toont daarom de
 begrensde betaal-tijdwaarden en statuswaarden uit uitsluitend deze vaste bron;
 geen klant- of credentialvelden. De Exact-configuratie wordt onafhankelijk gelezen,
 met `source_validated=false` en `ready=false`, totdat de broncontrole slaagt.
+
+V14 toonde Amerikaanse timestamps, waaronder 30 september 22:33:54, en status
+OK/ERR. Dit wijst op UTC-export tegenover de Nederlandse portaalperiode. V15
+controleert de UTC→Europe/Amsterdam-omzetting tegen OrderTime van **alle 38**
+onafhankelijk opgeslagen UI-rijen voordat hij betaaldatums omzet. Een ontbrekende
+of afwijkende vergelijking blokkeert; er wordt geen uurcorrectie gekozen om een
+regel passend te maken. Een geïsoleerde leesbot haalt daarnaast Statements en
+Transfers op; alleen rekeningoverzichten, geen nieuwe export of financiële actie.
+De leescontrole in Exact bevestigde bankboek 27 en grootboek 1317 leeg, debiteur
+109419 aanwezig (Verzameldebiteur Icepay). Na bronvalidatie worden IDs/referenties
+tegen de opgeslagen Exact-controle vergeleken.
 
 `downloaded` betekent dat de bronbestanden zijn opgehaald. Het betekent nog niet
 dat de Exact-import gereed is. De refunds moeten inhoudelijk worden gemapt;

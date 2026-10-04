@@ -63,6 +63,12 @@ class CSV(unittest.TestCase):
         self.assertEqual(summary['non_ok_count'],1)
         self.assertEqual(summary['missing_order_count'],1)
 
+    def test_csv_ids_must_match_every_observed_page(self):
+        t.parse_payments(fixture([ROW]),1,['123'])
+        with self.assertRaises(t.AcquisitionStopped) as caught:
+            t.parse_payments(fixture([ROW]),1,['124'])
+        self.assertEqual(str(caught.exception),'count_mismatch')
+
     def test_amounts_never_round_invalid_or_guess_grouping(self):
         for value in ('1,234.56','1.234,56','NaN','Infinity','1.234','EUR 4',''):
             with self.assertRaises(t.AcquisitionStopped):
@@ -80,6 +86,21 @@ class CSV(unittest.TestCase):
 
 
 class Calendar(unittest.IsolatedAsyncioTestCase):
+    async def test_payment_pages_are_counted_by_ids_without_footer_or_row_text(self):
+        state={'page':0}
+        next_button=element()
+        next_button.is_enabled.side_effect=lambda:state['page']==0
+        next_button.get_attribute.return_value=None
+        async def advance(): state['page']=1
+        next_button.click.side_effect=advance
+        page=SimpleNamespace(locator=lambda _:collection([]),
+            get_by_role=lambda *_a,**_k:collection([next_button]),wait_for_load_state=AsyncMock())
+        async def ids(_): return ['101','102'] if state['page']==0 else ['103']
+        with patch.object(t.b,'wait_verified_account',AsyncMock()), \
+             patch.object(t,'payment_checkbox_ids',side_effect=ids):
+            self.assertEqual(await t.payment_identifiers(page),['101','102','103'])
+        next_button.click.assert_awaited_once()
+
     async def test_date_field_waits_for_filter_drawer_visibility(self):
         field = element()
         locator = SimpleNamespace(wait_for=AsyncMock(),all=AsyncMock(return_value=[field]))

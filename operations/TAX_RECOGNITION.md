@@ -113,3 +113,41 @@ Officiële bronnen gecontroleerd 4 oktober 2026:
 
 - https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=CRMAccounts
 - https://download.belastingdienst.nl/belastingdienst/docs/tijdvakcodes-aangiftedatums-betaaldatums-lh2101t62fd.pdf
+
+## Ledger routing correction — 2026-10-04
+
+The bank UI showed a provisional Vpb payment on 1400/creditor 1 and an ordinary
+BTW refund on 1100/BACS 109372. Both were corrected in Exact to 1500 and 1770
+respectively, with an empty relation field; both then became Completed. The
+open transaction counter fell from 96 to 94. No PSP entries were changed.
+
+The complete allocation-rule list contained a broad tax IBAN-to-creditor rule
+without a ledger, alongside 30 scoped tax-reference rules. Retire only the
+observed legacy rule ID and unchanged payload after confirming the replacement
+reference rules; archive the payload and re-read before and after deletion.
+Unknown rules remain for review. The six current BACS rules are specific BOSCI
+codes, none present in the refund narrative. Exact's generation history was
+empty, so the original cause of that BACS assignment is not proven.
+
+Tax classification now recognises ordinary positive BTW refunds with the
+observed O assessment plus matching OB quarter/year notation, or explicit
+omzetbelasting/BTW wording. O assessments are never converted into generated
+payment references. Rules use the complete observed description and ledger
+1770 only. Foreign RSINs, conflicting periods/types, interest, penalties,
+settlements and OSS stay outside this path. Historical OSS postings use 1771;
+they must never be swept into ordinary BTW rules.
+
+The tax scan covers all candidate ledger accounts, including 1100 and 1400,
+and performs a complete historical rescan after this recognition upgrade.
+Subsequent scans retain the Modified cursor and overlap. The protected tax
+report includes existing ledger/relation and allocation_mismatch. Rule audits
+report tax criteria without a ledger and tax descriptions matching another
+relation. All direct webshop match/enrichment paths reject tax candidates;
+known tax IBANs are rejected for new or queued Woo IBAN-to-BACS rules.
+
+The agent creates allocation rules and reports wrong existing assignments;
+BankEntryLines still have no documented PUT. Automatically did not repair
+already-assigned bank lines in the observed UI run. Thus a rule being confirmed
+is not proof that an existing booking has been corrected. There is no automatic
+browser correction worker in this release, and no guaranteed precedence over
+Exact's own matching mechanisms. Unknown taxes and mixed amounts need review.

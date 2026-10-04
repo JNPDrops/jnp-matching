@@ -28,7 +28,7 @@ def test_vat_refund_description_generates_balance_rule_without_invented_referenc
     metadata={'tax_account_id':A, 'accounts':[dict(ID=G, Code='1770', BalanceType='B', IsBlocked=False)]}
     b=bank('Belastingdienst teruggaaf omzetbelasting tweede kwartaal 2026')
     p=a.vat_refund(b,metadata)
-    assert p == {'Account':A,'GLAccount':G,'Words':b['Description']}
+    assert p == {'GLAccount':G,'Words':b['Description']}
     for d in ('Belastingdienst teruggaaf omzetbelasting met rente', 'Belastingdienst teruggaaf omzetbelasting en loonheffing',
               'Klant teruggaaf omzetbelasting', 'Belastingdienst teruggaaf omzetbelasting 9253586208001120'):
         assert a.vat_refund(bank(d),metadata) is None

@@ -68,7 +68,11 @@ def validate(data, reference_mode=False):
     if reference_mode:
         camt_words(data['bank_reference'])
         return dict(data)
-    return {**data, 'iban': iban(data['iban'])}
+    from operations.tax_reference import TAX_IBANS
+    bank = iban(data['iban'])
+    if bank in TAX_IBANS:
+        raise ValueError('Belastingdienst-IBAN mag niet naar BACS')
+    return {**data, 'iban': bank}
 
 
 def authenticate(headers, raw, now=None):
@@ -211,6 +215,10 @@ def existing_words_rule(rules, words, account):
 
 
 async def process(conn, api, event_id, body, previous):
+    from operations.tax_reference import TAX_IBANS
+    if body.get('iban') in TAX_IBANS:
+        conn.execute("UPDATE jnp_woo_iban_events SET state='conflict',reason='Belastingdienst-IBAN uitgesloten van BACS',updated_at=NOW() WHERE event_id=%s", (event_id,))
+        return
     account=await api.account()
     words=camt_words(body['bank_reference']) if 'bank_reference' in body else None
     def lookup(rules):

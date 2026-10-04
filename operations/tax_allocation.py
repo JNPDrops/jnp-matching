@@ -90,6 +90,17 @@ def plan(policy, metadata, decisions, year):
                     payload = {'Account': account, 'GLAccount': verified[d['tax_bucket']], 'Words': d['payment_reference']}
                     result[payload['Words']] = {'payload': payload, 'tax_bucket': d['tax_bucket'],
                                                'tax_year': target_year, 'assessment_number': d['assessment_number']}
+    for d in decisions:
+        if (d.get('status') == 'TAX_IDENTIFIED' and d.get('reference_source') == 'explicit_refund_description'
+                and d.get('direction') == 'incoming' and d.get('tax_bucket') == 'btw'):
+            # Revalidate stored observations after upgrades, not just their status.
+            checked = tax.vat_refund_decision({'Description': d.get('allocation_words'),
+                'Account': metadata['tax_account_id'], 'AmountDC': d.get('amount_dc'),
+                'Date': f"{d['tax_year']}-12-31"})
+            if checked:
+                payload = {'GLAccount': verified['btw'], 'Words': checked['allocation_words']}
+                result[payload['Words']] = {'payload': payload, 'tax_bucket': 'btw',
+                    'tax_year': d['tax_year'], 'assessment_number': d.get('assessment_number')}
     return result
 
 
@@ -97,13 +108,15 @@ def match_rule(rules, payload):
     matches = []
     for rule in rules:
         words = str(rule.get('Words') or '').strip()
-        if (str(rule.get('Account') or '').lower() == payload['Account'].lower()
+        if (payload.get('Account') and str(rule.get('Account') or '').lower() == payload['Account'].lower()
                 and rule.get('GLAccount') and (not words or 'belastingdienst' in words.lower())):
             return 'conflict', None
         # Detect a matching full reference even when an older rule uses spaces.
-        if payload['Words'] not in re.sub(r'[ .\t\u00a0-]', '', words):
+        wanted = payload['Words']
+        reference_match = wanted in re.sub(r'[ .\t\u00a0-]', '', words) if wanted.isdigit() else words == wanted
+        if not reference_match:
             continue
-        if words != payload['Words'] or any(str(rule.get(k) or '').lower() != payload[k].lower() for k in ('Account', 'GLAccount')) or any(rule.get(k) for k in ('AccountBankAccount', 'Costcenter', 'Costunit', 'VATCode')):
+        if words != wanted or any(str(rule.get(k) or '').lower() != str(payload.get(k) or '').lower() for k in ('Account', 'GLAccount')) or any(rule.get(k) for k in ('AccountBankAccount', 'Costcenter', 'Costunit', 'VATCode')):
             return 'conflict', None
         matches.append(rule)
     if len(matches) > 1:
@@ -199,3 +212,41 @@ async def sync(app, conn, policy, metadata, limits):
     proposals = plan(policy, metadata, decisions, datetime.now(timezone.utc).year)
     api = RuleAPI(allocation.RoutingApp(app), {w: p['payload'] for w, p in proposals.items()}, limits)
     STATUS.update(await reconcile(conn, api, proposals))
+    # Retire only the verified legacy IBAN->creditor fallback, with a saved
+    # payload and a fresh equality check. Unknown conflicting rules are reported.
+    from operations import allocation_maintenance as maintenance
+    cleanup_api = maintenance.MaintenanceAPI(allocation.RoutingApp(app), api.limits)
+    maintenance.initialize(conn)
+    rules = await cleanup_api.rules()
+    retired = {}
+    for rule in rules:
+        if legacy_creditor_fallback(rule, metadata['tax_account_id']):
+            if all(match_rule(rules, p['payload'])[0] == 'confirmed' for p in proposals.values()):
+                retired[rule['ID']] = await maintenance.delete_rule(conn, cleanup_api, rule, 'tax_iban_creditor_fallback')
+    current = await cleanup_api.rules() if retired else rules
+    conflicts = audit_rules(current, metadata, decisions)
+    STATUS.update(legacy_rules_retired=retired, rule_conflicts=conflicts,
+                  tax_counterparty_fallback='review_only')
+
+
+def legacy_creditor_fallback(rule, tax_account_id):
+    return (str(rule.get('ID') or '').lower() == '2a9fa4f3-56eb-462b-843a-919b4fed9e83'
+            and str(rule.get('Account') or '').lower() == tax_account_id.lower()
+            and rule.get('AccountBankAccount') == 'NL04RABO0200112244'
+            and not any(rule.get(k) for k in ('Words', 'GLAccount', 'Costcenter', 'Costunit', 'VATCode')))
+
+
+def audit_rules(rules, metadata, decisions):
+    """Report overlaps without claiming Exact's undocumented rule precedence."""
+    findings = []
+    tax_id = metadata['tax_account_id'].lower()
+    for rule in rules:
+        account = str(rule.get('Account') or '').lower()
+        words = str(rule.get('Words') or '').strip()
+        iban = re.sub(r'\s+', '', str(rule.get('AccountBankAccount') or '')).upper()
+        if (account == tax_id or iban in tax.TAX_IBANS) and not rule.get('GLAccount'):
+            findings.append({'rule_id': rule['ID'], 'reason': 'tax_rule_without_ledger'})
+        elif words and account and account != tax_id and any(
+                words.lower() in str(d.get('allocation_words') or '').lower() for d in decisions):
+            findings.append({'rule_id': rule['ID'], 'reason': 'other_relation_matches_tax_description'})
+    return findings

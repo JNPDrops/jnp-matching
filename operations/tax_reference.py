@@ -9,6 +9,10 @@ from decimal import Decimal, InvalidOperation
 import re
 
 RSIN = '867393051'
+TAX_ACCOUNT_ID = '6659f075-bdcc-4c6f-a4ca-89b836aca6ec'
+# Counterparty accounts observed in this administration, never the own SWAN IBAN.
+TAX_IBANS = frozenset(('NL04RABO0200112244', 'NL86INGB0002445588',
+                       'NL36INGB0003445588', 'NL88INGB0000441047'))
 WEIGHTS = (2, 4, 8, 5, 10, 9, 7, 3, 6, 1)
 NAMES = {'V': 'Vennootschapsbelasting', 'B': 'Omzetbelasting',
          'L': 'Loonheffingen', 'F': 'Naheffing omzetbelasting',
@@ -20,6 +24,82 @@ ASSESSMENT_PATTERN = re.compile(
     r'(?<![A-Za-z0-9])(?P<rsin>[0-9]{9}|[0-9]{4}\.[0-9]{2}\.[0-9]{3})'
     r'\.?\s*(?P<letter>[VABFL])\.?\s*(?P<tail>[0-9]{2,3}\.?[0-9]{4})(?![A-Za-z0-9])', re.I)
 EXTRAS = re.compile(r'boete|rente|aanman|dwangbevel|invordering|betalingsregeling|verreken|verzamel|corona|kosten', re.I)
+REFUND_ASSESSMENT = re.compile(
+    r'(?<![A-Za-z0-9])(?P<rsin>[0-9]{9}|[0-9]{4}\.[0-9]{2}\.[0-9]{3})'
+    r'\.?\s*O\.?\s*(?P<sub>[0-9]{2})\.?(?P<year>[0-9])(?P<period>[0-9]{2})(?P<seq>[0-9])(?![A-Za-z0-9])', re.I)
+
+
+def tax_hint(bank, expected_rsin=RSIN):
+    """Reserve known tax counterparties/references before any debtor matching."""
+    text = ' '.join(str(bank.get(k) or '') for k in
+                    ('Description', 'PaymentReference', 'YourRef', 'AccountName', 'AccountBankAccount'))
+    compact = re.sub(r'[ .\t\u00a0-]', '', text).upper()
+    return (bool(re.search(r'belastingdienst', text, re.I))
+            or str(bank.get('Account') or '').lower() == TAX_ACCOUNT_ID
+            or str(bank.get('AccountCode') or '').strip() == '1'
+            or expected_rsin[:8] in compact or expected_rsin[2:8] in compact
+            or any(iban in compact for iban in TAX_IBANS))
+
+
+def vat_refund_decision(bank, expected_rsin=RSIN):
+    """Operator-approved ordinary BTW refunds, including observed OB quarter text.
+
+    O is a refund assessment, not a generated payment reference. Keep the
+    complete observed narrative as the rule criterion; never generate O numbers.
+    """
+    text = str(bank.get('Description') or '').strip()
+    named = bool(re.search(r'belastingdienst', str(bank.get('AccountName') or '') + ' ' + text, re.I))
+    linked = str(bank.get('Account') or '').lower() == TAX_ACCOUNT_ID
+    if not (named or linked) or EXTRAS.search(text) or re.search(r'\boss\b|loonheffing|loonbelasting|vennootschap|\bvpb\b', text, re.I):
+        return None
+    if not re.search(r'\b(?:teruggaaf|teruggave|restitutie|refund)\b', text, re.I):
+        return None
+    try:
+        amount = Decimal(str(bank.get('AmountDC')))
+        anchor = bank_date(bank.get('Date')).year
+        if not amount.is_finite() or amount <= 0:
+            return None
+        refs = list(REFUND_ASSESSMENT.finditer(text))
+        quarter = re.findall(r'\bOB\.?\s*([1-4])E?\s*KWART(?:AAL)?\s*([0-9]{2}|[0-9]{4})(?![0-9])', text, re.I)
+        explicit = bool(re.search(r'omzetbelasting|\bbtw\b', text, re.I))
+        if not explicit and not (len(refs) == 1 and len(quarter) == 1):
+            return None
+        if len(refs) > 1 or len(quarter) > 1 or not 15 <= len(text) <= 240:
+            return None
+        result = {'tax_letter': 'B', 'tax_year': anchor, 'year_inferred': False,
+                  'subnumber': None, 'period_code': None, 'assessment_number': None}
+        if refs:
+            ref = refs[0]
+            rsin = ref['rsin'].replace('.', '')
+            if rsin != expected_rsin or complete_rsin(rsin[:8]) != rsin or ref['sub'] == '00' or ref['seq'] != '0':
+                return None
+            if ref['period'] not in tuple(f'{i:02}' for i in range(1, 13)) + ('21', '24', '27', '30'):
+                return None
+            year = nearest_year(ref['year'], anchor)
+            if quarter and (ref['period'] != ('21', '24', '27', '30')[int(quarter[0][0])-1]
+                            or year % 100 != int(quarter[0][1]) % 100):
+                return None
+            result.update(tax_letter='O', tax_year=year, year_inferred=True,
+                          subnumber=ref['sub'], period_code=ref['period'], assessment_number=ref.group())
+        decoded = []
+        for pattern, decoder in ((PAYMENT_PATTERN, decode_payment), (ASSESSMENT_PATTERN, decode_assessment)):
+            for match in pattern.finditer(text):
+                d = decoder(match.group(), anchor_year=anchor, expected_rsin=expected_rsin)
+                if d['tax_bucket'] != 'btw' or d['needs_assessment_split']:
+                    return None
+                decoded.append(d)
+        if len({d['payment_reference'] for d in decoded}) > 1 or (refs and decoded):
+            return None
+        if decoded:
+            result.update(decoded[0])
+    except (ReferenceError, InvalidOperation, ValueError, TypeError):
+        return None
+    return {**result, 'status': 'TAX_IDENTIFIED', 'tax_bucket': 'btw', 'tax_type': 'Omzetbelasting teruggaaf',
+            'rsin': expected_rsin, 'direction': 'incoming', 'amount_dc': str(bank.get('AmountDC')),
+            'assessment_kind': 'teruggaaf', 'reference_source': 'explicit_refund_description',
+            'allocation_words': text, 'needs_assessment_split': False, 'review_reasons': [],
+            'booking_executed': False, 'read_only': True,
+            'reason': 'Expliciete btw-teruggaaf; operatorbeleid: rechtstreeks naar 1770, geen debiteur of crediteur'}
 
 
 class ReferenceError(ValueError):
@@ -148,12 +228,15 @@ def classify_bank_line(bank, *, expected_rsin=RSIN):
     """
     fields = [str(bank.get(k) or '') for k in ('Description', 'PaymentReference', 'YourRef')]
     text = ' | '.join(fields)
-    named = bool(re.search(r'belastingdienst', str(bank.get('AccountName') or '') + ' ' + text, re.I))
+    named = tax_hint(bank, expected_rsin)
     own_hint = expected_rsin[:8] in text or expected_rsin[2:8] in text or expected_rsin in text.replace('.', '')
     payments = [m.group() for value in fields for m in PAYMENT_PATTERN.finditer(value)]
     assessments = [m.group() for value in fields for m in ASSESSMENT_PATTERN.finditer(value)]
     if not named and not own_hint and not payments and not assessments:
         return None
+    refund = vat_refund_decision(bank, expected_rsin)
+    if refund:
+        return refund
     result = {'status': 'REVIEW_TAX', 'reason': '', 'booking_executed': False, 'read_only': True,
               'direction': None, 'amount_dc': str(bank.get('AmountDC')), 'review_reasons': []}
     try:

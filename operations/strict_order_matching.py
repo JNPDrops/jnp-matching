@@ -577,6 +577,32 @@ async def diagnose_closed(limit, *, pending=False):
         strict_states={s:sum(r['state']==s for r in plan['receipts']) for s in {r['state'] for r in plan['receipts']}})
 
 
+async def refresh_missing(limit):
+    """Recheck previously missing invoices without posting or matching."""
+    plan = load(PLAN)
+    if not plan:
+        fail('prepare_required')
+    queue = [r for r in plan['receipts'] if r['exception'] == 'invoice_missing_or_ambiguous'
+             and r['state'] in {'pending', 'inspected', 'unmatched_verified', 'exception_verified'}
+             and not r.get('invoice_refresh')][:limit]
+    for receipt in queue:
+        legacy.update(phase='strict_refresh_missing', strict_current_order=receipt['source_order'])
+        rows = await legacy.read_all('financialtransaction/TransactionLines', {
+            '$filter': "JournalCode eq '70' and YourRef eq '" + receipt['source_order'] + "'",
+            '$select': SELECT})
+        invoice, reason = own_invoice(receipt, rows, legacy.application().COLLECTIVE_DEBTOR_CODE)
+        receipt['invoice_refresh'] = dict(at=now(), rows=rows, result=reason or 'own_invoice_found')
+        receipt.update(invoice=invoice, exception=reason, workflow_status='open',
+            suggested_action='match_own_invoice' if invoice else 'inspect_invoice_history')
+        if invoice and receipt['state'] == 'exception_verified':
+            receipt['state'] = 'unmatched_verified'
+        known = {r['ID'] for r in plan['invoices']}
+        plan['invoices'].extend(r for r in rows if r['ID'] not in known)
+        legacy.artifact(PLAN, plan)
+    legacy.update(phase='strict_refresh_missing_complete', strict_missing_invoices_refreshed=len(queue),
+        strict_exception_count=sum(bool(r['exception']) for r in plan['receipts']))
+
+
 async def run(mode, limit):
     conn = legacy.database()
     locked = False
@@ -589,6 +615,8 @@ async def run(mode, limit):
             await prepare()
         elif mode == 'verify':
             await verify_final()
+        elif mode == 'refresh_missing':
+            await refresh_missing(limit)
         elif mode in {'diagnose_closed', 'history_pending'}:
             await diagnose_closed(limit, pending=mode == 'history_pending')
         else:
@@ -610,7 +638,7 @@ async def run(mode, limit):
 @router.post('/strict/{mode}')
 async def start(mode: str, request: Request, limit: int = 1):
     legacy.authorize(request)
-    if mode not in {'prepare', 'inspect', 'undo', 'undo_orphans', 'match', 'correct', 'recover', 'verify', 'diagnose_closed', 'history_pending'} or not 1 <= limit <= 5:
+    if mode not in {'prepare', 'inspect', 'undo', 'undo_orphans', 'match', 'correct', 'recover', 'verify', 'diagnose_closed', 'history_pending', 'refresh_missing'} or not 1 <= limit <= 5:
         fail('invalid_strict_operation')
     legacy.state()
     if any(not t.done() for t in legacy.TASKS):
@@ -618,4 +646,4 @@ async def start(mode: str, request: Request, limit: int = 1):
     task = asyncio.create_task(run(mode, limit))
     legacy.TASKS.add(task)
     task.add_done_callback(legacy.TASKS.discard)
-    return dict(accepted=True, mode=mode, limit=limit, read_only=mode in {'prepare', 'inspect', 'recover', 'verify', 'diagnose_closed', 'history_pending'})
+    return dict(accepted=True, mode=mode, limit=limit, read_only=mode in {'prepare', 'inspect', 'recover', 'verify', 'diagnose_closed', 'history_pending', 'refresh_missing'})

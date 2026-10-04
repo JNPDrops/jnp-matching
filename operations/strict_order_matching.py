@@ -259,7 +259,7 @@ async def process(mode, limit):
     plan = load(PLAN)
     if not plan:
         fail('prepare_required')
-    if mode in {'undo', 'match'} and any(r['state'].endswith('_requested') for r in plan['receipts']):
+    if mode in {'undo', 'undo_orphans', 'match', 'correct'} and any(r['state'].endswith('_requested') for r in plan['receipts']):
         fail('unresolved_save_requires_read_only_recovery')
     # Attach only the existing private, explicitly approved difference decision.
     # No tolerance or request-provided write-off is accepted.
@@ -274,11 +274,13 @@ async def process(mode, limit):
     legacy.artifact(PLAN, plan)
     queue = [r for r in plan['receipts'] if (
         mode == 'inspect' and r['state'] == 'pending' or
-        mode == 'recover' and r['state'] in {'undo_requested', 'match_requested'} or
+        mode == 'recover' and r['state'] in {'undo_requested', 'match_requested', 'correct_requested'} or
         mode == 'undo' and r['state'] in {'pending', 'inspected'} and r['allocated_reference'] != r['source_order'] or
+        mode == 'undo_orphans' and r['state'] in {'pending', 'inspected'} and r['allocated_reference'] != r['source_order'] and r['invoice'] is None or
+        mode == 'correct' and r['state'] in {'pending', 'inspected'} and r['allocated_reference'] != r['source_order'] and not r['exception'] or
         mode == 'match' and (r['state'] == 'unmatched_verified' or r['state'] in {'pending', 'inspected'} and r['allocated_reference'] == r['source_order']) and not r['exception']
     )]
-    if mode == 'match':
+    if mode in {'match', 'correct'}:
         opened = await legacy.receivables()
         # A chain may not yet be fully released. Process available own invoices
         # and leave the others eligible for a later pass after further undo.
@@ -296,7 +298,7 @@ async def process(mode, limit):
             verify_source(receipt, before)
             frame = await open_match(context, page, receipt)
             rows = await match_rows(frame)
-            receipt['evidence'].append(dict(at=now(), phase=mode, rows=rows, ledger=before))
+            receipt['evidence'].append(dict(at=now(), phase='undo' if mode == 'undo_orphans' else mode, rows=rows, ledger=before))
             legacy.artifact(PLAN, plan)
             checked = [r for r in rows if r['checked']]
             if mode == 'recover':
@@ -318,11 +320,17 @@ async def process(mode, limit):
                     difference = money(receipt['amount']) - money(invoice['AmountDC'])
                     if difference and difference_total(before, receipt['source_order']) != -difference:
                         fail('source_difference_outcome_unresolved_no_retry')
+                    if receipt['state'] == 'correct_requested':
+                        previous = [e for e in receipt['evidence'] if e['phase'] == 'correct'][-1]
+                        old_match = verify_wrong_selection(receipt, previous['rows'])
+                        restored = [r for r in opened if r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == old_match['cells'][2]]
+                        if len(restored) != 1 or money(restored[0]['Amount']) != euro(old_match['cells'][6]):
+                            fail('previous_invoice_reopen_unresolved_no_retry')
                     receipt.update(state='matched_verified', workflow_status='decided', execution_status='verified')
                 receipt['attempts'][-1]['outcome'] = 'verified_by_recovery_read'
             elif mode == 'inspect':
                 receipt['state'] = 'inspected'
-            elif mode == 'undo':
+            elif mode in {'undo', 'undo_orphans'}:
                 row = verify_wrong_selection(receipt, rows, plan.get('approved_decision'))
                 if row['writeoff'] == '3' and difference_total(before, row['cells'][4]) != euro(row['cells'][6]) - money(receipt['amount']):
                     fail('existing_difference_ledger_not_unique')
@@ -347,7 +355,13 @@ async def process(mode, limit):
                 receipt['attempts'][-1]['outcome'] = 'verified'
                 receipt['evidence'].append(dict(at=now(), phase='undo_readback', rows=after, ledger=actual))
             else:
-                if checked:
+                old_match = None
+                if mode == 'correct':
+                    # Replace one proven wrong selection with the own invoice
+                    # in a single native save, without a broad match operation.
+                    old_match = verify_wrong_selection(receipt, rows)
+                    await toggle(frame, old_match)
+                elif checked:
                     fail('receipt_already_has_match')
                 invoice = receipt['invoice']
                 hits = [r for r in rows if len(r['cells']) == 10 and r['cells'][4] == receipt['source_order']
@@ -359,8 +373,11 @@ async def process(mode, limit):
                     opened = await legacy.receivables()
                     invoices = [r for r in opened if r.get('YourRef') == receipt['source_order'] and str(r.get('InvoiceNumber')) == str(invoice['EntryNumber']) and r.get('JournalCode') == '70' and r.get('CurrencyCode') == 'EUR']
                     credits = [r for r in opened if r.get('JournalCode') == '26' and receipt['trx'] in (r.get('Description') or '') and r.get('CurrencyCode') == 'EUR']
-                    if len(invoices) != 1 or money(invoices[0]['Amount']) != money(invoice['AmountDC']) or len(credits) != 1 or money(credits[0]['Amount']) != -money(receipt['amount']):
+                    credit_valid = (not credits) if mode == 'correct' else len(credits) == 1 and money(credits[0]['Amount']) == -money(receipt['amount'])
+                    if len(invoices) != 1 or money(invoices[0]['Amount']) != money(invoice['AmountDC']) or not credit_valid:
                         fail('strict_api_preconditions_changed')
+                    if old_match and any(r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == old_match['cells'][2] for r in opened):
+                        fail('previous_invoice_unexpectedly_open')
                     await toggle(frame, row)
                     difference = money(receipt['amount']) - money(invoice['AmountDC'])
                     selected_row = frame.locator('#' + row['id'])
@@ -375,7 +392,7 @@ async def process(mode, limit):
                         fail('strict_selection_changed')
                     if euro(await frame.locator('#Balance').input_value()) != 0:
                         fail('strict_balance_not_zero')
-                    await save_once(frame, receipt, plan, 'match')
+                    await save_once(frame, receipt, plan, 'correct' if mode == 'correct' else 'match')
                     reopened = await open_match(context, page, receipt)
                     after = await match_rows(reopened)
                     selected = [r for r in after if r['checked']]
@@ -389,12 +406,77 @@ async def process(mode, limit):
                     if any((r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == str(invoice['EntryNumber'])) or
                            (r.get('JournalCode') == '26' and receipt['trx'] in (r.get('Description') or '')) for r in opened):
                         fail('strict_api_readback_not_verified')
+                    if old_match:
+                        restored = [r for r in opened if r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == old_match['cells'][2]]
+                        if len(restored) != 1 or money(restored[0]['Amount']) != euro(old_match['cells'][6]):
+                            fail('previous_invoice_reopen_not_verified')
                     receipt.update(state='matched_verified', workflow_status='decided', execution_status='verified')
                     receipt['attempts'][-1]['outcome'] = 'verified'
                     receipt['evidence'].append(dict(at=now(), phase='match_readback', rows=after, ledger=actual))
             legacy.artifact(PLAN, plan)
+            if mode == 'correct' and len(queue) < limit:
+                # The previous verified correction may release the next own
+                # invoice in a chain. Never exceed the explicit small-group cap.
+                for candidate in plan['receipts']:
+                    if len(queue) >= limit:
+                        break
+                    if candidate in queue or candidate['state'] not in {'pending', 'inspected'} or candidate['exception'] or candidate['allocated_reference'] == candidate['source_order']:
+                        continue
+                    if any(r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == str(candidate['invoice']['EntryNumber'])
+                           and r.get('YourRef') == candidate['source_order'] and money(r['Amount']) == money(candidate['invoice']['AmountDC']) for r in opened):
+                        queue.append(candidate)
             # Navigating the parent closes the inspected modal before next item.
     legacy.update(phase='strict_' + mode + '_complete', strict_states={s:sum(r['state']==s for r in plan['receipts']) for s in {r['state'] for r in plan['receipts']}})
+
+
+async def verify_final():
+    plan = load(PLAN)
+    if not plan:
+        fail('prepare_required')
+    legacy.update(phase='strict_final_readback')
+    lines = await legacy.ledger()
+    opened = await legacy.receivables()
+    actual = {r['ID']:r for r in lines}
+    previous_difference = {r['ID'] for r in (load('settlement_after') or {}).get('added_lines', [])}
+    fields = ['EntryID', 'EntryNumber', 'LineNumber', 'Description', 'AmountDC', 'AccountCode', 'GLAccountCode', 'JournalCode']
+    for before in plan['original_ledger']:
+        if before['ID'] in previous_difference:
+            continue
+        after = actual.get(before['ID'])
+        if not after or any(before.get(k) != after.get(k) for k in fields):
+            fail('original_journal_line_changed')
+    def totals(rows):
+        result = {}
+        for row in rows:
+            gl = str(row.get('GLAccountCode') or '').strip()
+            result[gl] = result.get(gl, Decimal(0)) + money(row['AmountDC'])
+        return {k:str(v) for k,v in result.items()}
+    if totals(lines) != totals(plan['original_ledger']):
+        fail('journal_totals_changed')
+    incomplete = []
+    for receipt in plan['receipts']:
+        verify_source(receipt, lines)
+        credits = [r for r in opened if r.get('JournalCode') == '26' and receipt['trx'] in (r.get('Description') or '')]
+        if receipt['state'] == 'matched_verified':
+            invoice = receipt['invoice']
+            if credits or any(r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == str(invoice['EntryNumber']) for r in opened):
+                fail('verified_match_became_open')
+            if any(actual[receipt[k]].get('YourRef') != receipt['source_order'] for k in ['bank_line_id', 'offset_id']):
+                fail('verified_match_reference_changed')
+        elif receipt['exception'] and receipt['state'] in {'pending', 'inspected', 'unmatched_verified', 'exception_verified'}:
+            if len(credits) != 1 or money(credits[0]['Amount']) != -money(receipt['amount']):
+                fail('exception_receipt_not_fully_open')
+            if any(actual[receipt[k]].get('YourRef') not in {None, '', receipt['source_order']} for k in ['bank_line_id', 'offset_id']):
+                fail('exception_has_wrong_order_reference')
+            receipt.update(state='exception_verified', workflow_status='open', execution_status='open_receipt_verified')
+        else:
+            incomplete.append(receipt['source_order'])
+    plan['final_readback'] = dict(at=now(), ledger=lines, receivables=opened, totals=totals(lines), incomplete=incomplete)
+    legacy.artifact(PLAN, plan)
+    legacy.update(phase='strict_repair_verified' if not incomplete else 'strict_repair_incomplete',
+        historical_matches_repaired=not incomplete,
+        strict_states={s:sum(r['state']==s for r in plan['receipts']) for s in {r['state'] for r in plan['receipts']}},
+        strict_unresolved_count=len(incomplete))
 
 
 async def run(mode, limit):
@@ -405,7 +487,12 @@ async def run(mode, limit):
         if not locked:
             return
         legacy.update(running=True, action='strict_' + mode, last_error=None)
-        await prepare() if mode == 'prepare' else await process(mode, limit)
+        if mode == 'prepare':
+            await prepare()
+        elif mode == 'verify':
+            await verify_final()
+        else:
+            await process(mode, limit)
     except asyncio.CancelledError:
         if locked:
             legacy.update(phase='strict_interrupted_readback_required', last_error='worker_cancelled')
@@ -423,7 +510,7 @@ async def run(mode, limit):
 @router.post('/strict/{mode}')
 async def start(mode: str, request: Request, limit: int = 1):
     legacy.authorize(request)
-    if mode not in {'prepare', 'inspect', 'undo', 'match', 'recover'} or not 1 <= limit <= 20:
+    if mode not in {'prepare', 'inspect', 'undo', 'undo_orphans', 'match', 'correct', 'recover', 'verify'} or not 1 <= limit <= 5:
         fail('invalid_strict_operation')
     legacy.state()
     if any(not t.done() for t in legacy.TASKS):
@@ -431,4 +518,4 @@ async def start(mode: str, request: Request, limit: int = 1):
     task = asyncio.create_task(run(mode, limit))
     legacy.TASKS.add(task)
     task.add_done_callback(legacy.TASKS.discard)
-    return dict(accepted=True, mode=mode, limit=limit, read_only=mode in {'prepare', 'inspect', 'recover'})
+    return dict(accepted=True, mode=mode, limit=limit, read_only=mode in {'prepare', 'inspect', 'recover', 'verify'})

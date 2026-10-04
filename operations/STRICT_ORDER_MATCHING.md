@@ -10,7 +10,9 @@
 4. `POST strict/match?limit=N` selects a unique invoice belonging to the source order, with verified administration, debtor, currency, invoice identity, and outstanding amounts. Process available own invoices between undo batches to release chains without a broad matching action.
 5. If interrupted after a save claim, `POST strict/recover` only reads Exact. Never repeat the save. Further financial processing is blocked while an outcome remains unknown.
 
-The limit is at most 20 per invocation. The plan cannot be overwritten once a save was attempted. A durable claim precedes every save. A verified source receipt retains its bank amount, offset amount, original description and transaction identity. Exact clears YourRef when a match is undone; the original source order remains in the description and private plan, and matching the own invoice restores its reference.
+The limit is at most five per invocation. An unattended outer loop is not enabled. Review each small group's private evidence before starting another. The plan cannot be overwritten once a save was attempted. A durable claim precedes every save. A verified source receipt retains its bank amount, offset amount, original description and transaction identity. Exact clears YourRef when a match is undone; the original source order remains in the description and private plan, and matching the own invoice restores its reference.
+
+`strict/correct` can replace a proven wrong selection with the available own invoice in one native save. Both the newly closed own invoice and reopened previous invoice must pass API readback. `strict/undo_orphans` releases wrong allocations whose own invoice is absent, without choosing a substitute invoice. `strict/verify` independently reads the complete journal and receivables, checks original source fields and unchanged account totals, and distinguishes verified own matches from fully open exceptions.
 
 ## Exceptions and decisions
 

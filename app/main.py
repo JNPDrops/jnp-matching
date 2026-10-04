@@ -63,7 +63,7 @@ async def lifespan(_app):
             await tax_task
 
 
-app = FastAPI(title="JNP Matching", version="1.8.0", lifespan=lifespan)
+app = FastAPI(title="JNP Matching", version="1.9.0", lifespan=lifespan)
 from operations.woo_iban_rules import router as woo_iban_router
 app.include_router(woo_iban_router)
 from operations.allocation_connection import router as allocation_router
@@ -1188,9 +1188,10 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 async def health():
     from operations.automatic_debtor_routing import STATUS
     from operations.tax_agent import STATUS as TAX_STATUS
-    return {"ok": True, "division": DIVISION, "version": "1.8.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
+    from operations.tax_allocation import STATUS as TAX_RULE_STATUS
+    return {"ok": True, "division": DIVISION, "version": "1.9.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
             "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES, "debtor_routing": dict(STATUS),
-            "tax_recognition": dict(TAX_STATUS)}
+            "tax_recognition": dict(TAX_STATUS), "tax_allocation_rules": dict(TAX_RULE_STATUS)}
 
 
 @app.get("/", response_class=HTMLResponse)

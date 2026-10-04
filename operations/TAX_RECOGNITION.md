@@ -40,7 +40,7 @@ Opslag in bestaande database: `jnp_tax_control` en `jnp_tax_observations`.
 `/api/tax/status` en `/health` tonen alleen operationele status en aantallen.
 `/api/tax/report` toont de waarnemingen via de bestaande Allocation-operatorsessie.
 De rapportage vermeldt expliciet of de maximaal 500 getoonde regels onvolledig zijn.
-Logs bevatten alleen aantallen en kandidaat-grootboeknummers/omschrijvingen,
+Logs bevatten aantallen, geaggregeerde belastingtemplates en kandidaat-grootboekgegevens,
 geen bankbedragen, betalingskenmerken, bankomschrijvingen of OAuth-gegevens.
 
 ## Rekeningvoorstel en grens aan automatisch boeken
@@ -52,22 +52,55 @@ rekening op alleen een gedeeltelijke naam. Een betaling of teruggaaf is geen
 nieuwe btw-belaste kostenpost. De belastingsoort bepaalt niet de eventuele
 uitsplitsing naar rente/boete of de bijbehorende reeds geboekte openstaande post.
 
-**Er worden nog geen belastingboekingen of nieuwe Exact-toewijzingsregels geschreven.**
-De officiële `BankEntryLines`-API ondersteunt GET/POST, geen PUT. `BankEntries`
-ondersteunt GET/POST/DELETE, geen PUT. Verwijderen/herimporteren, een tweede bankboeking
-of ongevraagde correctiememorialen zijn geen onderdeel van deze module.
-De transportlaag verbiedt iedere Exact-write, ook bij een gewijzigde policy.
+## Exact-toewijzingsregels (4 oktober 2026)
 
-Exact `AllocationRule` ondersteunt wel een grootboek en herkenningswoorden voor
-**geïmporteerde** banktransacties. Een vaste regel kent echter geen ingebouwde
-controle op rente, gemengde betalingen of ontbrekende aanslagspecificaties. Ook
-bewijst het aanmaken van een regel niet dat bestaande bankregels zijn bijgewerkt.
-Voor automatische boeking moet de geverifieerde rekeningmapping worden gekoppeld
-aan een ondersteunde import/toewijzingsstap die deze controles daadwerkelijk gebruikt.
+De gebruiker heeft het toevoegen van volledige gegenereerde betalingskenmerken
+als toewijzingsregel toegestaan. De API-route is `POST cashflow/AllocationRule`
+(beta). De agent maakt uitsluitend regels met `Account`, `GLAccount` en het
+volledige 16-cijferige `Words`-kenmerk; geen nieuwe btw-code of financieel bedrag.
+De bestaande GET-only banktransportlaag blijft GET-only.
+
+Live gecontroleerde balansrekeningen:
+
+| Soort | Rekening | Onderbouwing |
+| --- | --- | --- |
+| Vpb | 1500 Vennootschapsbelasting | Enige actieve Vpb-balansrekening; bevestigd Vpb-kenmerk stond nog op 1400 |
+| Btw | 1770 Afdrachten omzetbelasting | Bestaande B01-betaling voor kwartaal 3 van 2025 stond al op 1770 |
+| Loonheffingen | 1600 Af te dragen loonheffing | Actieve loonheffingenbalansrekening; nog geen geldig L-subnummer in de ingelezen historie |
+
+De generator maakt voor vorig, huidig en volgend kalenderjaar:
+- Vpb voor het bevestigde kalenderjaartijdvak 0112, voorlopige aanslagen 0 t/m 5;
+- B01-kwartaalaangiften met tijdvakken 21/24/27/30;
+- L-kenmerken pas na een geldig, regulier uitgaand kenmerk in de betaalhistorie
+  waaruit subnummer en maand/vierweken/halfjaar/jaarfrequentie blijken.
+
+Bij start in 2026 zijn dit 30 regels (18 Vpb en 12 btw). Alle kenmerken krijgen
+het officiële controlecijfer en worden weer gedecodeerd. Een gegenereerd kenmerk
+betekent **niet** dat de aanslag daadwerkelijk is opgelegd of betaald. Er worden
+geen naheffingen, definitieve Vpb of navorderingen vooruit gegenereerd.
+
+`jnp_tax_rules` bewaart per kenmerk het doel, de aanmaakintentie en het teruggelezen
+Exact-ID. Bestaande gelijke regels worden hergebruikt; afwijkende of dubbele regels
+worden niet overschreven. Ook brede bestaande belastingregels met een grootboek
+leiden tot een conflict. De bestaande Belastingdienst-IBAN-regel zonder grootboek
+blijft staan. Onzekere POSTs worden uitsluitend teruggelezen, nooit blind herhaald.
+Maximaal 40 nieuwe regels per scan, met API-budgetreserve en dezelfde operatorpauze.
+
+**De regels zijn geen bevestiging dat bankregels zijn geboekt.** Gebruik in Exact
+`Automatically` / `Automatisch` om de regels op eerder geïmporteerde afschriften
+te laten toepassen. De agent drukt deze knop niet in. De API voor `BankEntryLines`
+ondersteunt GET/POST, geen PUT; bestaande bankboekingen worden niet vervangen.
+
+Exact-toewijzingsregels hebben geen filter voor betaalrichting, bedrag, rente of
+boetes. Een teruggaaf met hetzelfde kenmerk kan dus dezelfde balansrekening krijgen.
+De reviewstatus in de agent kan toepassing van een Exact-regel **niet blokkeren**.
+Controleer rente, boetes, gemengde betalingen, verrekeningen en reeds geboekte
+openstaande aanslagen afzonderlijk. Automatische rekeningtoewijzing is geen garantie
+op een volledig correcte uitsplitsing of aflettering.
 
 ## Validatie en bronnen
 
-`python -m unittest operations.test_tax_reference -v`
+`python -m pytest operations/test_tax_reference.py operations/test_tax_allocation.py -q`
 
 Officiële bronnen gecontroleerd 4 oktober 2026:
 - https://odb.belastingdienst.nl/wp-content/uploads/2025/07/Specificatie-Betalingskenmerk_bepaling_1.5.pdf
@@ -77,3 +110,6 @@ Officiële bronnen gecontroleerd 4 oktober 2026:
 - https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=FinancialTransactionBankEntries
 - https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=CashflowAllocationRule
 - https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=FinancialGLAccounts
+
+- https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=CRMAccounts
+- https://download.belastingdienst.nl/belastingdienst/docs/tijdvakcodes-aangiftedatums-betaaldatums-lh2101t62fd.pdf

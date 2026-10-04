@@ -1,6 +1,6 @@
 import unittest
 from copy import deepcopy
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from operations import strict_order_matching as strict
@@ -100,6 +100,16 @@ class StrictMatchingTests(unittest.TestCase):
         verify_difference_change([], before, 'TD100', 3)
         with self.assertRaises(HTTPException):
             verify_difference_change(before, before, 'TD100', 3)
+
+
+class LedgerScopeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normal_read_is_scoped_but_difference_read_includes_full_entry(self):
+        receipt = dict(entry_id='entry', bank_line_id='bank', offset_id='offset')
+        with patch.object(strict.legacy, 'read_all', new_callable=AsyncMock) as read:
+            await strict.entry_lines(receipt)
+            self.assertEqual(read.call_args.args[1]['$filter'], "EntryID eq guid'entry' and (ID eq guid'bank' or ID eq guid'offset')")
+            await strict.entry_lines(receipt, full=True)
+            self.assertEqual(read.call_args.args[1]['$filter'], "EntryID eq guid'entry'")
 
 
 if __name__ == '__main__':

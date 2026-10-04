@@ -217,6 +217,8 @@ async def open_match(context, page, receipt):
             fail('match_frame_identity_changed')
     if euro(await frame.locator('#EntryAmount').input_value()) != money(receipt['amount']):
         fail('match_amount_changed')
+    if await frame.locator('#GLAccount_alt').input_value() != '1100' or await frame.locator('#Account_alt').input_value() != legacy.application().COLLECTIVE_DEBTOR_CODE:
+        fail('match_account_or_offset_changed')
     return frame
 
 

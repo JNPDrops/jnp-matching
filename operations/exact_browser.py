@@ -75,6 +75,14 @@ def target_page(url):
             and parse_qs(p.query).get("_Division_") == [DIVISION])
 
 
+def form_action_allowed(action):
+    # AJAX sign-in forms can deliberately have a no-op form action. This is
+    # not a network destination; the request guard still restricts all auth
+    # navigation/POST/XHR/fetch traffic to the existing Exact allowlist.
+    return trusted(action) or bool(isinstance(action, str) and re.fullmatch(
+        r'javascript:\s*void\s*\(\s*0\s*\)\s*;?', action.strip(), re.I))
+
+
 @dataclass(repr=False)
 class Credentials:
     username: str
@@ -160,7 +168,7 @@ async def check_destination(page, frame, field):
     # Check the form action immediately before filling. Never send credentials
     # to an off-origin form, even if it is rendered in a trusted document.
     action = await field.evaluate("el => el.form ? el.form.action : location.href")
-    if not trusted(action):
+    if not form_action_allowed(action):
         raise LoginStopped("unexpected_origin")
 
 
@@ -171,7 +179,7 @@ async def submit(page, frame, field):
         raise LoginStopped("unsupported_form")
     # Overrides such as formaction must be checked as well as the parent form.
     action = await buttons[0].evaluate("el => el.hasAttribute('formaction') ? el.formAction : (el.form ? el.form.action : location.href)")
-    if not trusted(action):
+    if not form_action_allowed(action):
         raise LoginStopped("unexpected_origin")
     await buttons[0].click()
 
@@ -255,7 +263,9 @@ async def authenticate(page, credentials, *, timeout=75, clock=time.monotonic, p
 async def protect_requests(context):
     async def guard(route):
         request = route.request
-        if (request.is_navigation_request() or request.method not in {'GET', 'HEAD', 'OPTIONS'}) and not trusted(request.url):
+        credential_request = (request.is_navigation_request() or request.method not in {'GET', 'HEAD', 'OPTIONS'}
+                              or request.resource_type in {'xhr', 'fetch', 'eventsource', 'websocket'})
+        if credential_request and not trusted(request.url):
             await route.abort()
         else:
             await route.continue_()

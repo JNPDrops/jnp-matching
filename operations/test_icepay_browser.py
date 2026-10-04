@@ -89,6 +89,7 @@ class Configuration(unittest.TestCase):
         for metadata in [
             {'payments':{'path':'/merchant/88293/payments','controls':[]}},
             {'payments':{'path':'/merchant/88292/payments','controls':[{'value':'private-value'}]}},
+            {'payments':{'path':'/merchant/88292/payments','controls':[{'id':'email','date_preview':'private-value'}]}},
             {'payments':{'path':'/merchant/88292/payments','controls':[],'html':'private'}},
             {'cookies':{}}]:
             with self.assertRaises(ValueError):

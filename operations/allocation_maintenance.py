@@ -23,7 +23,7 @@ from operations import bank_resolution as resolution
 router = APIRouter()
 log = logging.getLogger('uvicorn.error')
 LOCK = 397775213600
-VERSION = 'maintenance-v2'
+VERSION = 'maintenance-v3'
 STATUS = {'state': 'starting', 'bank_writes': False, 'automatically_executed': False}
 FIELDS = ('Account', 'AccountBankAccount', 'GLAccount', 'Words', 'Costcenter', 'Costunit', 'VATCode')
 BANK_FIELDS = 'ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,GLAccountCode,Modified'
@@ -369,8 +369,7 @@ async def run(app, conn, api, now):
     payables = await api.rows('read/financial/PayablesList', params={'$select': resolution.OPEN_FIELDS})
     journals = {str(j['Code']).strip(): j for j in await api.rows('financial/Journals', params={
         '$select': 'Code,Description,Type,BankAccountDescription'})}
-    headers = {str(h['EntryID']).lower(): h for h in await api.rows('financialtransaction/BankEntries', params={
-        '$select': 'EntryID,JournalCode,JournalDescription,Currency'})}
+    headers = await resolution.load_headers(api, [b['EntryID'] for b in suspense])
     suspense = [resolution.enrich_bank(b, headers, journals) for b in suspense]
     assigned, unresolved = await resolution.load_assigned(api, journals, headers, BANK_FIELDS)
     banks = list({b['ID']: b for b in suspense + assigned}.values())

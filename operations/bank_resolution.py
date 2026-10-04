@@ -49,6 +49,25 @@ def enrich_bank(bank, headers, journals):
     return b
 
 
+async def load_headers(api, entry_ids):
+    """Read parents of current candidates, never the complete bank history."""
+    result = {}
+    entries = sorted({m.guid(e) for e in entry_ids})
+    for start in range(0, len(entries), 15):
+        selection = ' or '.join("EntryID eq guid'" + e + "'" for e in entries[start:start + 15])
+        rows = await api.rows('financialtransaction/BankEntries', params={'$filter': selection,
+            '$select': 'EntryID,JournalCode,JournalDescription,Currency'})
+        wanted = set(entries[start:start + 15])
+        for h in rows:
+            if code(h.get('EntryID')).lower() not in wanted:
+                raise m.Stop('Unrequested bank header returned')
+            key = code(h['EntryID']).lower()
+            if key in result:
+                raise m.Stop('Duplicate bank header identity')
+            result[key] = h
+    return result
+
+
 def duplicate_candidates(banks):
     """Flag repeated identities; never infer deletion from date+amount alone."""
     groups = defaultdict(list)
@@ -215,6 +234,7 @@ async def load_assigned(api, journals, headers, bank_fields):
         flows.extend(await api.rows(resource, params={'$filter': '(Status ne 50) and (' + clause + ')', '$select': CASH_FIELDS, '$orderby': 'ID'}))
     flows = [f for f in flows if f.get('Status') in (20, 30, 40) and m.amount(f['AmountDC']) != 0]
     entries = sorted({m.guid(f['TransactionEntryID']) for f in flows})
+    headers = {**headers, **await load_headers(api, [e for e in entries if e not in headers])}
     banks, txs = [], {}
     for start in range(0, len(entries), 15):
         selection = ' or '.join("EntryID eq guid'" + e + "'" for e in entries[start:start + 15])

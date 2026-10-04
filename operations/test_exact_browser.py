@@ -190,8 +190,10 @@ class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
         route = SimpleNamespace(request=SimpleNamespace(method='GET', resource_type='xhr', url='https://evil.test/collect', is_navigation_request=lambda: False),
                                 abort=AsyncMock(), continue_=AsyncMock())
         await guard(route)
-        route.abort.assert_awaited_once()
-        route.continue_.assert_not_awaited()
+        # Read-only localization/assets may use cross-origin XHR; the auth
+        # destination checks still cover forms, navigation and POST requests.
+        route.abort.assert_not_awaited()
+        route.continue_.assert_awaited_once()
 
 
 class ProbeOrchestrationTests(unittest.IsolatedAsyncioTestCase):

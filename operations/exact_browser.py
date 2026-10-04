@@ -78,7 +78,7 @@ def target_page(url):
 def form_action_allowed(action):
     # AJAX sign-in forms can deliberately have a no-op form action. This is
     # not a network destination; the request guard still restricts all auth
-    # navigation/POST/XHR/fetch traffic to the existing Exact allowlist.
+    # navigation/POST traffic to the existing Exact allowlist.
     return trusted(action) or bool(isinstance(action, str) and re.fullmatch(
         r'javascript:\s*void\s*\(\s*0\s*\)\s*;?', action.strip(), re.I))
 
@@ -263,8 +263,7 @@ async def authenticate(page, credentials, *, timeout=75, clock=time.monotonic, p
 async def protect_requests(context):
     async def guard(route):
         request = route.request
-        credential_request = (request.is_navigation_request() or request.method not in {'GET', 'HEAD', 'OPTIONS'}
-                              or request.resource_type in {'xhr', 'fetch', 'eventsource', 'websocket'})
+        credential_request = request.is_navigation_request() or request.method not in {'GET', 'HEAD', 'OPTIONS'}
         if credential_request and not trusted(request.url):
             await route.abort()
         else:

@@ -84,12 +84,26 @@ def own_invoice(receipt, invoices, debtor):
     return invoice, None
 
 
+def approved_difference(order, invoice_number, receipt_amount, invoice_amount, decision):
+    if not decision or decision.get('scope') != 'this_case_only' or not decision.get('actor') or not decision.get('approved_at'):
+        return False
+    return (decision.get('order') == order and str(decision.get('invoice')) == str(invoice_number)
+            and money(receipt_amount) - money(invoice_amount) == money(decision.get('payment_difference', 0)) > 0)
+
+
+def difference_total(lines, order):
+    return sum((money(r['AmountDC']) for r in lines if str(r.get('GLAccountCode') or '').strip() == '9920'
+                and r.get('YourRef') == order), Decimal('0'))
+
+
 async def prepare():
+    legacy.update(phase='strict_reading_ledger')
     existing = load(PLAN)
     if existing and any(r.get('attempts') for r in existing['receipts']):
         fail('existing_repair_plan_cannot_be_replaced')
     lines = await legacy.ledger()
     opened = await legacy.receivables()
+    legacy.update(phase='strict_reading_invoice_history')
     debtor = legacy.application().COLLECTIVE_DEBTOR_CODE
     receipts = source_receipts(lines, debtor)
     targets = [r for r in receipts if r['allocated_reference'] != r['source_order'] or any(
@@ -215,7 +229,7 @@ async def toggle(frame, row):
     await checkbox.evaluate('(el)=>{if(el.disabled)throw new Error("disabled");el.click()}')
 
 
-def verify_wrong_selection(receipt, rows):
+def verify_wrong_selection(receipt, rows, decision=None):
     checked = [r for r in rows if r['checked']]
     if len(checked) != 1:
         fail('existing_match_not_single_invoice')
@@ -225,9 +239,9 @@ def verify_wrong_selection(receipt, rows):
         fail('existing_match_does_not_confirm_candidate')
     if euro(row['amount']) != money(receipt['amount']) or not row['matchId']:
         fail('existing_match_amount_or_identity_missing')
-    # Difference reversals require separate evidence before enabling them.
     if row['writeoff'] != '0' or euro(cells[6]) != money(receipt['amount']):
-        fail('existing_writeoff_requires_case_repair')
+        if row['writeoff'] != '3' or not approved_difference(cells[4], cells[2], receipt['amount'], euro(cells[6]), decision):
+            fail('existing_writeoff_requires_case_repair')
     return row
 
 
@@ -245,11 +259,33 @@ async def process(mode, limit):
     plan = load(PLAN)
     if not plan:
         fail('prepare_required')
+    if mode in {'undo', 'match'} and any(r['state'].endswith('_requested') for r in plan['receipts']):
+        fail('unresolved_save_requires_read_only_recovery')
+    # Attach only the existing private, explicitly approved difference decision.
+    # No tolerance or request-provided write-off is accepted.
+    for receipt in plan['receipts']:
+        if receipt['exception'] == 'amount_difference_requires_case_decision':
+            matches = [r for r in plan['invoices'] if r.get('YourRef') == receipt['source_order']
+                and str(r.get('GLAccountCode') or '').strip() == '1100' and money(r['AmountDC']) > 0
+                and str(r.get('AccountCode') or '').strip() == legacy.application().COLLECTIVE_DEBTOR_CODE]
+            if len(matches) == 1 and approved_difference(receipt['source_order'], matches[0]['EntryNumber'],
+                    receipt['amount'], matches[0]['AmountDC'], plan.get('approved_decision')):
+                receipt.update(invoice=matches[0], exception=None, difference_decision=plan['approved_decision'])
+    legacy.artifact(PLAN, plan)
     queue = [r for r in plan['receipts'] if (
         mode == 'inspect' and r['state'] == 'pending' or
+        mode == 'recover' and r['state'] in {'undo_requested', 'match_requested'} or
         mode == 'undo' and r['state'] in {'pending', 'inspected'} and r['allocated_reference'] != r['source_order'] or
-        mode == 'match' and r['state'] in {'pending', 'inspected', 'unmatched_verified'} and not r['exception']
-    )][:limit]
+        mode == 'match' and (r['state'] == 'unmatched_verified' or r['state'] in {'pending', 'inspected'} and r['allocated_reference'] == r['source_order']) and not r['exception']
+    )]
+    if mode == 'match':
+        opened = await legacy.receivables()
+        # A chain may not yet be fully released. Process available own invoices
+        # and leave the others eligible for a later pass after further undo.
+        queue = [r for r in queue if any(x.get('JournalCode') == '70'
+            and str(x.get('InvoiceNumber')) == str(r['invoice']['EntryNumber'])
+            and x.get('YourRef') == r['source_order'] and money(x['Amount']) == money(r['invoice']['AmountDC']) for x in opened)]
+    queue = queue[:limit]
     if not queue:
         legacy.update(phase='strict_' + mode + '_no_eligible_items')
         return
@@ -263,10 +299,33 @@ async def process(mode, limit):
             receipt['evidence'].append(dict(at=now(), phase=mode, rows=rows, ledger=before))
             legacy.artifact(PLAN, plan)
             checked = [r for r in rows if r['checked']]
-            if mode == 'inspect':
+            if mode == 'recover':
+                opened = await legacy.receivables()
+                credits = [r for r in opened if r.get('JournalCode') == '26' and receipt['trx'] in (r.get('Description') or '')]
+                if receipt['state'] == 'undo_requested':
+                    previous = [e for e in receipt['evidence'] if e['phase'] == 'undo'][-1]
+                    old_match = verify_wrong_selection(receipt, previous['rows'], plan.get('approved_decision'))
+                    restored = [r for r in opened if r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == old_match['cells'][2]]
+                    if checked or len(credits) != 1 or money(credits[0]['Amount']) != -money(receipt['amount']) or len(restored) != 1 or money(restored[0]['Amount']) != euro(old_match['cells'][6]):
+                        fail('undo_outcome_unresolved_no_retry')
+                    if old_match['writeoff'] == '3' and difference_total(before, old_match['cells'][4]) != 0:
+                        fail('difference_reversal_unresolved_no_retry')
+                    receipt['state'] = 'unmatched_verified'
+                else:
+                    invoice = receipt['invoice']
+                    if len(checked) != 1 or checked[0]['cells'][4] != receipt['source_order'] or checked[0]['cells'][2] != str(invoice['EntryNumber']) or not checked[0]['matchId'] or credits or any(r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == str(invoice['EntryNumber']) for r in opened):
+                        fail('match_outcome_unresolved_no_retry')
+                    difference = money(receipt['amount']) - money(invoice['AmountDC'])
+                    if difference and difference_total(before, receipt['source_order']) != -difference:
+                        fail('source_difference_outcome_unresolved_no_retry')
+                    receipt.update(state='matched_verified', workflow_status='decided', execution_status='verified')
+                receipt['attempts'][-1]['outcome'] = 'verified_by_recovery_read'
+            elif mode == 'inspect':
                 receipt['state'] = 'inspected'
             elif mode == 'undo':
-                row = verify_wrong_selection(receipt, rows)
+                row = verify_wrong_selection(receipt, rows, plan.get('approved_decision'))
+                if row['writeoff'] == '3' and difference_total(before, row['cells'][4]) != euro(row['cells'][6]) - money(receipt['amount']):
+                    fail('existing_difference_ledger_not_unique')
                 await toggle(frame, row)
                 if any(r['checked'] for r in await match_rows(frame)) or euro(await frame.locator('#SelectedAmount').input_value()) != 0:
                     fail('undo_still_selected')
@@ -280,8 +339,10 @@ async def process(mode, limit):
                 opened = await legacy.receivables()
                 credits = [r for r in opened if r.get('JournalCode') == '26' and receipt['trx'] in (r.get('Description') or '')]
                 restored = [r for r in opened if str(r.get('InvoiceNumber')) == row['cells'][2] and r.get('JournalCode') == '70']
-                if len(credits) != 1 or money(credits[0]['Amount']) != -money(receipt['amount']) or len(restored) != 1 or money(restored[0]['Amount']) != money(receipt['amount']):
+                if len(credits) != 1 or money(credits[0]['Amount']) != -money(receipt['amount']) or len(restored) != 1 or money(restored[0]['Amount']) != euro(row['cells'][6]):
                     fail('undo_api_readback_not_verified')
+                if row['writeoff'] == '3' and difference_total(actual, row['cells'][4]) != 0:
+                    fail('difference_reversal_not_verified')
                 receipt['state'] = 'unmatched_verified'
                 receipt['attempts'][-1]['outcome'] = 'verified'
                 receipt['evidence'].append(dict(at=now(), phase='undo_readback', rows=after, ledger=actual))
@@ -291,17 +352,24 @@ async def process(mode, limit):
                 invoice = receipt['invoice']
                 hits = [r for r in rows if len(r['cells']) == 10 and r['cells'][4] == receipt['source_order']
                         and r['cells'][2] == str(invoice['EntryNumber']) and r['cells'][5].startswith('70 -')]
-                if len(hits) != 1 or euro(hits[0]['cells'][6]) != money(receipt['amount']):
+                if len(hits) != 1 or euro(hits[0]['cells'][6]) != money(invoice['AmountDC']):
                     receipt.update(exception='own_invoice_not_fully_open', suggested_action='inspect_existing_match', workflow_status='open')
                 else:
                     row = hits[0]
                     opened = await legacy.receivables()
                     invoices = [r for r in opened if r.get('YourRef') == receipt['source_order'] and str(r.get('InvoiceNumber')) == str(invoice['EntryNumber']) and r.get('JournalCode') == '70' and r.get('CurrencyCode') == 'EUR']
                     credits = [r for r in opened if r.get('JournalCode') == '26' and receipt['trx'] in (r.get('Description') or '') and r.get('CurrencyCode') == 'EUR']
-                    if len(invoices) != 1 or money(invoices[0]['Amount']) != money(receipt['amount']) or len(credits) != 1 or money(credits[0]['Amount']) != -money(receipt['amount']):
+                    if len(invoices) != 1 or money(invoices[0]['Amount']) != money(invoice['AmountDC']) or len(credits) != 1 or money(credits[0]['Amount']) != -money(receipt['amount']):
                         fail('strict_api_preconditions_changed')
                     await toggle(frame, row)
-                    await frame.locator('#' + row['id']).locator('select').select_option('0')
+                    difference = money(receipt['amount']) - money(invoice['AmountDC'])
+                    selected_row = frame.locator('#' + row['id'])
+                    if difference:
+                        if not approved_difference(receipt['source_order'], invoice['EntryNumber'], receipt['amount'], invoice['AmountDC'], receipt.get('difference_decision')) or difference_total(before, receipt['source_order']) != 0:
+                            fail('source_difference_not_approved_or_already_posted')
+                        await selected_row.locator('input[type="text"]').fill(format(money(receipt['amount']), '.2f').replace('.', ','))
+                        await selected_row.locator('input[type="text"]').press('Tab')
+                    await selected_row.locator('select').select_option('3' if difference else '0')
                     selected = [r for r in await match_rows(frame) if r['checked']]
                     if len(selected) != 1 or selected[0]['cells'][4] != receipt['source_order'] or euro(selected[0]['amount']) != money(receipt['amount']):
                         fail('strict_selection_changed')
@@ -313,6 +381,8 @@ async def process(mode, limit):
                     selected = [r for r in after if r['checked']]
                     actual = await entry_lines(receipt)
                     verify_source(receipt, actual)
+                    if difference and difference_total(actual, receipt['source_order']) != -difference:
+                        fail('source_difference_readback_not_verified')
                     if len(selected) != 1 or selected[0]['cells'][4] != receipt['source_order'] or selected[0]['cells'][2] != str(invoice['EntryNumber']) or not selected[0]['matchId']:
                         fail('strict_match_not_verified')
                     opened = await legacy.receivables()
@@ -353,7 +423,7 @@ async def run(mode, limit):
 @router.post('/strict/{mode}')
 async def start(mode: str, request: Request, limit: int = 1):
     legacy.authorize(request)
-    if mode not in {'prepare', 'inspect', 'undo', 'match'} or not 1 <= limit <= 20:
+    if mode not in {'prepare', 'inspect', 'undo', 'match', 'recover'} or not 1 <= limit <= 20:
         fail('invalid_strict_operation')
     legacy.state()
     if any(not t.done() for t in legacy.TASKS):
@@ -361,4 +431,4 @@ async def start(mode: str, request: Request, limit: int = 1):
     task = asyncio.create_task(run(mode, limit))
     legacy.TASKS.add(task)
     task.add_done_callback(legacy.TASKS.discard)
-    return dict(accepted=True, mode=mode, limit=limit, read_only=mode in {'prepare', 'inspect'})
+    return dict(accepted=True, mode=mode, limit=limit, read_only=mode in {'prepare', 'inspect', 'recover'})

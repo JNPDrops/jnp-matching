@@ -28,11 +28,15 @@ Nieuwe regels zijn alleen toegestaan voor:
 
 ## Beoordeling van al toegewezen betalingen (v1.12)
 
-- Een open cashflowrecord in een gewoon bankdagboek is het bewijs dat een betaling
-  nog openstaat. Een 1100/1400-boeking op zichzelf bewijst dat niet. Koppel via de
-  TransactionID, EntryID en LineNumber aan de bankregel en controleer relatie,
-  grootboek, bedrag en valuta. Onzekere identiteiten blijven in de aparte
-  controlelijst; geen matching of boekingswijziging op een gegiste identiteit.
+- Een actuele bankpost in ReceivablesList/PayablesList is het bewijs dat een
+  betaling nog openstaat. Een 1100/1400-boeking op zichzelf bewijst dat niet.
+  De live Cashflow API liet geïmporteerde bankbetalingen weg; gebruik daarom de
+  open-postenlijsten. Koppel uitsluitend een unieke bankregel op dagboek,
+  boekingsnummer, relatie, datum, valuta, richting en bedrag. Voor een
+  deelaflettering moet ook het oorspronkelijke bankbedrag onderbouwd zijn.
+  Onzekere identiteiten blijven in een aparte controlelijst. Dit levert alleen
+  kandidaten: uitvoering vereist nog actuele transaction-line-identiteit.
+  Haal bankheaders alleen op voor de EntryID's van de huidige kandidaten.
 - Gebruik het resterende bankbedrag en het resterende factuurbedrag. Noem een
   openstaand saldo nooit het oorspronkelijke factuurbedrag.
 - Gebruik alleen verkoop-/inkoopdagboeken als factuurbron, zodat een andere

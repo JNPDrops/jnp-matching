@@ -78,7 +78,7 @@ async def lifespan(_app):
             await paragon_login_probe_task
 
 
-app = FastAPI(title="JNP Matching", version="1.12.1", lifespan=lifespan)
+app = FastAPI(title="JNP Matching", version="1.12.2", lifespan=lifespan)
 from operations.allocation_maintenance import router as maintenance_router
 app.include_router(maintenance_router)
 from operations.woo_iban_rules import router as woo_iban_router
@@ -1229,7 +1229,7 @@ async def health():
     from operations.tax_agent import STATUS as TAX_STATUS
     from operations.tax_allocation import STATUS as TAX_RULE_STATUS
     from operations.allocation_maintenance import STATUS as MAINTENANCE_STATUS
-    return {"ok": True, "division": DIVISION, "version": "1.11.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
+    return {"ok": True, "division": DIVISION, "version": app.version, "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
             "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES, "debtor_routing": dict(STATUS),
             "tax_recognition": dict(TAX_STATUS), "tax_allocation_rules": dict(TAX_RULE_STATUS),
             "allocation_maintenance": dict(MAINTENANCE_STATUS)}

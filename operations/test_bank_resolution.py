@@ -181,7 +181,7 @@ async def test_hourly_run_enriches_assigned_items_and_preserves_write_boundaries
         elif sql.lstrip().startswith('INSERT INTO jnp_suspense_review'):saved.append(json.loads(args[1]))
         return cursor
     conn=MagicMock();conn.execute.side_effect=execute
-    with patch.object(r,'load_assigned',AsyncMock(return_value=([b],[]))), \
+    with patch.object(r,'load_open_bank_items',AsyncMock(return_value=([b],[]))), \
          patch.object(metorik_bacs_evidence,'lookup_orders',AsyncMock(return_value={'orders':{'#48605':order()}})):
         summary=await a.run(MagicMock(),conn,api,now)
     assert summary['bank_lines_1360']==0 and summary['assigned_open_bank_lines']==1
@@ -189,3 +189,38 @@ async def test_hourly_run_enriches_assigned_items_and_preserves_write_boundaries
     assert summary['bank_writes'] is False and summary['automatically_executed'] is False
     assert saved[0]['next_action'].startswith('Letter bestaande bankregel')
     api.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_open_item_lists_recover_bank_receipts_omitted_by_cashflow_api():
+    b=bank()
+    open_bank=invoice(HID=77,Amount='-281',JournalCode='20',InvoiceDate=b['Date'],YourRef=None,EntryNumber=b['EntryNumber'])
+    api=MagicMock();api.rows=AsyncMock(return_value=[b])
+    headers={E:dict(EntryID=E,JournalCode='20',Currency='EUR')}
+    result,unresolved=await r.load_open_bank_items(api,[open_bank],[],J,headers,a.BANK_FIELDS)
+    assert not unresolved and result[0]['ID']==B and result[0]['OpenAmountDC']=='281'
+    assert result[0]['OpenEvidence']=='open_items_list_hid_77'
+    assert api.rows.await_args.kwargs['params']['$filter']=='EntryNumber eq 26200001'
+    # A second indistinguishable receipt is not silently selected.
+    api.rows.return_value=[b,{**b,'ID':T}]
+    result,unresolved=await r.load_open_bank_items(api,[open_bank],[],J,headers,a.BANK_FIELDS)
+    assert not result and len(unresolved)==1
+    # A bank payment on another account is not the same open item.
+    api.rows.return_value=[{**b,'Account':C}]
+    result,unresolved=await r.load_open_bank_items(api,[open_bank],[],J,headers,a.BANK_FIELDS)
+    assert not result and unresolved
+
+
+@pytest.mark.asyncio
+async def test_payable_open_payment_uses_payable_sign_and_excludes_psp_journal():
+    b={**bank(),'GLAccountCode':'1400','AmountDC':'-85','AmountFC':'-85'}
+    payment=invoice(HID=88,Amount='-85',JournalCode='20',InvoiceDate=b['Date'],YourRef=None,EntryNumber=b['EntryNumber'])
+    api=MagicMock();api.rows=AsyncMock(return_value=[b])
+    headers={E:dict(EntryID=E,JournalCode='20',Currency='EUR')}
+    result,unresolved=await r.load_open_bank_items(api,[],[payment],J,headers,a.BANK_FIELDS)
+    assert not unresolved and result[0]['OpenAmountDC']=='-85'
+    psp={**J,'20':{**J['20'],'Description':'Plisio'}}
+    api.rows.reset_mock()
+    result,unresolved=await r.load_open_bank_items(api,[],[payment],psp,headers,a.BANK_FIELDS)
+    assert not result and not unresolved
+    api.rows.assert_not_awaited()

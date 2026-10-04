@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v3'
+JOB = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 RANGE = '01/10/2026 - 03/10/2026'
@@ -191,43 +191,84 @@ async def payment_checkbox_ids(page):
     return identifiers
 
 
+async def stable_payment_page(page, page_size=None):
+    previous, stable = None, 0
+    for _ in range(30):
+        snapshot = await page.evaluate(r'''() => {
+          const visible=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
+          const ids=Array.from(document.querySelectorAll('input[type="checkbox"]'))
+            .filter(visible).map(e=>(e.getAttribute('aria-label')||'').match(/^Select\/deselect item (\d+) for bulk actions\.$/))
+            .filter(Boolean).map(m=>m[1]);
+          const next=Array.from(document.querySelectorAll('button,[role="button"]'))
+            .filter(visible).filter(e=>(e.getAttribute('aria-label')||e.innerText||'').trim()==='Next');
+          return {ids,next_count:next.length,next:next.length===1&&!next[0].disabled&&next[0].getAttribute('aria-disabled')!=='true'};
+        }''')
+        ids = snapshot.get('ids',[])
+        if len(ids)!=len(set(ids)) or snapshot.get('next_count',0)>1:
+            raise AcquisitionStopped('table_not_verified')
+        if page_size and snapshot['next'] and len(ids)!=page_size:
+            stable = 0
+        elif snapshot==previous:
+            stable += 1
+            if stable>=2:
+                return snapshot
+        else:
+            stable = 0
+        previous = snapshot
+        await asyncio.sleep(.5)
+    raise AcquisitionStopped('table_not_verified')
+
+
 async def payment_identifiers(page):
     """Count observed per-row PaymentIDs across pages, independent of footer text."""
+    page_size = None
     for select in await b.visible(page.locator('select')):
         options = [s.strip() for s in await select.locator('option').all_inner_texts()]
         if options==['25','50','100']:
             await select.select_option(label='100')
-            await page.wait_for_load_state('networkidle',timeout=20000)
+            page_size = 100
             break
     combined = set()
     for _ in range(200):
         await b.wait_verified_account(page)
-        current = await payment_checkbox_ids(page)
+        snapshot = await stable_payment_page(page,page_size)
+        current = snapshot['ids']
         if combined.intersection(current):
             raise AcquisitionStopped('duplicate_payment')
         combined.update(current)
         if len(combined)>5000:
             raise AcquisitionStopped('artifact_too_large')
-        buttons = await b.visible(page.get_by_role('button',name='Next',exact=True))
-        more = len(buttons)==1 and await buttons[0].is_enabled() and await buttons[0].get_attribute('aria-disabled')!='true'
-        if not more:
+        if not snapshot['next']:
             if not combined:
                 body = await page.locator('body').inner_text()
                 if not re.search(r'No (?:payments|results|records)(?: found)?',body,re.I):
                     raise AcquisitionStopped('table_not_verified')
             return sorted(combined)
-        if not current or len(buttons)!=1:
+        if not current:
             raise AcquisitionStopped('table_not_verified')
-        await buttons[0].click()
-        await page.wait_for_load_state('networkidle',timeout=20000)
+        await b.click_unique_read_control(page,re.compile(r'^Next$'))
         for _ in range(30):
-            following = await payment_checkbox_ids(page)
+            following = (await stable_payment_page(page,page_size))['ids']
             if following and following!=current:
                 break
             await asyncio.sleep(.2)
         else:
             raise AcquisitionStopped('table_not_verified')
     raise AcquisitionStopped('artifact_too_large')
+
+
+def failure_location(error):
+    """Only public source function/line and enumerated error class, no message."""
+    names = {'TimeoutError','Error','ValueError','TypeError','KeyError','IndexError',
+             'AttributeError','NameError','RuntimeError'}
+    result = {'kind':type(error).__name__ if type(error).__name__ in names else 'Other',
+              'function':'worker','line':0}
+    trace = error.__traceback__
+    while trace:
+        if trace.tb_frame.f_code.co_filename==__file__ and re.fullmatch(r'[a-z_]{1,60}',trace.tb_frame.f_code.co_name):
+            result.update(function=trace.tb_frame.f_code.co_name,line=trace.tb_lineno)
+        trace = trace.tb_next
+    return result
 
 
 async def csv_links(page):
@@ -440,7 +481,9 @@ async def worker():
                 stage = 'refunds'
                 artifacts['refunds'] = await read_refunds(page)
                 result = status('downloaded','complete',account_verified=True)
-            except Exception:
+            except Exception as error:
+                if not isinstance(error,(AcquisitionStopped,b.Stopped)):
+                    artifacts['failure'] = failure_location(error)
                 if verified:
                     try:
                         key = 'refunds_filters' if stage=='refunds' else 'payments_filters'
@@ -488,10 +531,17 @@ def decode(stdout):
         raise AcquisitionStopped('invalid_worker_output')
     result = status(**{k:v for k,v in raw['status'].items() if k!='financial_writes'})
     artifacts = raw['artifacts']
-    if not isinstance(artifacts,dict) or set(artifacts)-{'login','proof','payments_csv','refunds','form_metadata'}:
+    if not isinstance(artifacts,dict) or set(artifacts)-{'login','proof','payments_csv','refunds','form_metadata','failure'}:
         raise AcquisitionStopped('invalid_worker_output')
     if 'form_metadata' in artifacts:
         validate_forms(artifacts['form_metadata'])
+    if 'failure' in artifacts:
+        failure = artifacts['failure']
+        if (set(failure)!={'kind','function','line'} or type(failure['line']) is not int or
+            not re.fullmatch(r'[a-z_]{1,60}',failure['function']) or
+            failure['kind'] not in {'TimeoutError','Error','ValueError','TypeError','KeyError','IndexError',
+                                   'AttributeError','NameError','RuntimeError','Other'}):
+            raise AcquisitionStopped('invalid_worker_output')
     return result,artifacts
 
 
@@ -531,6 +581,8 @@ async def run():
         if child.returncode!=0:
             raise AcquisitionStopped('invalid_worker_output')
         result,artifacts = decode(stdout)
+        if 'failure' in artifacts:
+            summary['failure'] = artifacts['failure']
         if 'payments_csv' in artifacts:
             content = base64.b64decode(artifacts['payments_csv'],validate=True)
             if len(content)>MAX_BYTES:

@@ -86,6 +86,13 @@ class CSV(unittest.TestCase):
 
 
 class Calendar(unittest.IsolatedAsyncioTestCase):
+    async def test_atomic_snapshot_waits_for_page_size_transition(self):
+        old={'ids':['1'],'next':True,'next_count':1}
+        new={'ids':['1','2'],'next':False,'next_count':0}
+        page=SimpleNamespace(evaluate=AsyncMock(side_effect=[old,new,new,new]))
+        with patch.object(t.asyncio,'sleep',AsyncMock()):
+            self.assertEqual(await t.stable_payment_page(page,100),new)
+
     async def test_payment_pages_are_counted_by_ids_without_footer_or_row_text(self):
         state={'page':0}
         next_button=element()
@@ -96,8 +103,11 @@ class Calendar(unittest.IsolatedAsyncioTestCase):
         page=SimpleNamespace(locator=lambda _:collection([]),
             get_by_role=lambda *_a,**_k:collection([next_button]),wait_for_load_state=AsyncMock())
         async def ids(_): return ['101','102'] if state['page']==0 else ['103']
+        async def snapshot(_page,_size):
+            return {'ids':await ids(_page),'next':state['page']==0,'next_count':1}
         with patch.object(t.b,'wait_verified_account',AsyncMock()), \
-             patch.object(t,'payment_checkbox_ids',side_effect=ids):
+             patch.object(t.b,'guard_page',AsyncMock()), \
+             patch.object(t,'stable_payment_page',side_effect=snapshot):
             self.assertEqual(await t.payment_identifiers(page),['101','102','103'])
         next_button.click.assert_awaited_once()
 

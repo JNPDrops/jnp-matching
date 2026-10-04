@@ -16,7 +16,7 @@ import tempfile
 from operations.icepay_browser import (
     Credentials, ENV_NAMES, REQUIRED, FORM_NAMES, safe_result, validate_result, worker)
 
-PROBE_ID = 'icepay-fetch-20261001-03-v4'
+PROBE_ID = 'icepay-fetch-20261001-03-v5'
 ACTIVATION = 'ICEPAY_FETCH_PROBE_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 PERIOD = {'from': '2026-10-01', 'through': '2026-10-03', 'timezone': 'Europe/Amsterdam'}
@@ -54,8 +54,13 @@ def validate_forms(forms):
         if not isinstance(page['controls'], list) or len(page['controls']) > 120:
             raise ValueError('invalid_controls')
         for c in page['controls']:
-            if not isinstance(c, dict) or set(c) - {'tag','type','role','id','name','label','placeholder','options'}:
+            if not isinstance(c, dict) or set(c) - {'tag','type','role','id','name','label','placeholder','options',
+                                                   'context_label','readonly','date_preview'}:
                 raise ValueError('invalid_control_fields')
+            if c.get('date_preview') and c.get('id') not in {
+                'tableFiltersForm.OrderTime.OrderTime','tableFiltersForm.PaymentTime.PaymentTime',
+                'tableFiltersForm.DateCreated.DateCreated'}:
+                raise ValueError('invalid_date_preview')
             for k, v in c.items():
                 if k == 'options':
                     if not isinstance(v, list) or len(v) > 80 or any(

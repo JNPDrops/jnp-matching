@@ -20,7 +20,7 @@ ACCOUNT = '88292'
 MERCHANT = '34950'
 TARGET = ORIGIN + '/merchant/' + ACCOUNT
 FORM_NAMES = {'payments','refunds','statements','payments_filters','refunds_filters',
-              'payments_actions','payments_export'}
+              'payments_actions','payments_export','payments_calendar','refunds_calendar'}
 REQUIRED = ('ICEPAY_WEB_USERNAME', 'ICEPAY_WEB_PASSWORD')
 OPTIONAL = ('ICEPAY_WEB_TOTP_SECRET',)
 ENV_NAMES = REQUIRED + OPTIONAL
@@ -314,16 +314,34 @@ async def inspect_controls(page):
       const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
       const safe = x => String(x || '').replace(/\\s+/g,' ').trim().slice(0,160);
       const clean = x => { x=safe(x); return /@|password|wachtwoord|token|secret|csrf/i.test(x)?'':x; };
-      return Array.from(document.querySelectorAll('button,input,select,[role="combobox"],[role="menuitem"]'))
+      const contextLabel = e => {
+        for(let p=e.parentElement,n=0;p&&n<5;p=p.parentElement,n++) {
+          const labels=Array.from(p.querySelectorAll('label')).filter(visible);
+          if(labels.length===1) return clean(labels[0].innerText);
+          if(labels.length>1) return '';
+        } return '';
+      };
+      const dates = new Set(['tableFiltersForm.OrderTime.OrderTime',
+        'tableFiltersForm.PaymentTime.PaymentTime','tableFiltersForm.DateCreated.DateCreated']);
+      const controls = Array.from(document.querySelectorAll('button,input,select,[role="combobox"],[role="menuitem"]'))
         .filter(e=>visible(e)&&!['password','email','hidden'].includes(e.type||'')&&e.autocomplete!=='one-time-code')
-        .slice(0,120).map(e=>({
+        .filter(e=>!/^Select\\/deselect/.test(e.getAttribute('aria-label')||''))
+        .slice(0,100).map(e=>({
           tag:e.tagName.toLowerCase(), type:clean(e.type), role:clean(e.getAttribute('role')),
           id:clean(e.id), name:clean(e.name),
           placeholder:clean(e.getAttribute('placeholder')),
+          context_label:contextLabel(e), readonly:e.readOnly?'true':'false',
+          date_preview:dates.has(e.id)?clean(e.value):'',
           label:clean(e.getAttribute('aria-label')||Array.from(e.labels||[]).map(x=>x.textContent).join(' ')||
             (e.tagName==='BUTTON'||e.getAttribute('role')==='menuitem'?e.innerText:'')),
           options:e.tagName==='SELECT'?Array.from(e.options).slice(0,80).map(o=>({text:clean(o.text)})):[]
-        })); }''')
+        }));
+      for(const calendar of document.querySelectorAll('.daterangepicker,.flatpickr-calendar')) {
+        if(!visible(calendar)) continue;
+        for(const line of calendar.innerText.split('\\n').filter(Boolean).slice(0,20))
+          controls.push({tag:'calendar',label:clean(line)});
+      }
+      return controls.slice(0,120); }''')
 
 
 async def settled_controls(page):
@@ -354,6 +372,14 @@ async def inspect_filter_and_export_views(page, label, url, result):
     await click_unique_read_control(page,re.compile(r'^Filter(?:\s+\d+)?$'))
     result[name+'_filters'] = {'path':urlsplit(page.url).path,
                               'controls':await settled_controls(page)}
+    date_id = ('tableFiltersForm.PaymentTime.PaymentTime' if label=='Payments'
+               else 'tableFiltersForm.DateCreated.DateCreated')
+    date = page.locator('input[id="'+date_id+'"]')
+    if len(await visible(date)) != 1:
+        raise Stopped('unsupported_form')
+    await date.click()
+    result[name+'_calendar'] = {'path':urlsplit(page.url).path,
+                               'controls':await settled_controls(page)}
     # Return to the observed page URL; do not submit or alter a filter yet.
     await page.goto(url,wait_until='domcontentloaded')
     await wait_verified_account(page)

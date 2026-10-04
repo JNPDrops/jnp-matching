@@ -32,7 +32,7 @@ waarden in GitHub, chat, logs, screenshots of deze documentatie.
 | `ICEPAY_WEB_USERNAME` | E-mailadres waarmee deze ICEPAY-account wordt geopend |
 | `ICEPAY_WEB_PASSWORD` | Het ICEPAY-wachtwoord |
 | `ICEPAY_WEB_TOTP_SECRET` | Alleen als ICEPAY authenticator-2FA vereist: de bijbehorende TOTP-sleutel of otpauth-URI |
-| `ICEPAY_FETCH_PROBE_ID` | Niet-geheim: `icepay-fetch-20261001-03-v4` |
+| `ICEPAY_FETCH_PROBE_ID` | Niet-geheim: `icepay-fetch-20261001-03-v5` |
 
 De eerste twee velden zijn vereist. Ontbrekende gegevens worden uitsluitend
 bij naam gemeld voordat een loginpoging wordt geclaimd. De bot hergebruikt geen
@@ -73,7 +73,7 @@ of downloadroute. Voor een alleen-lezen controle:
 ```sql
 SELECT probe_id, attempted_at, result, forms
 FROM icepay_fetch_probes
-WHERE probe_id = 'icepay-fetch-20261001-03-v4';
+WHERE probe_id = 'icepay-fetch-20261001-03-v5';
 ```
 
 De v1-poging van 4 oktober 19:02 UTC kwam door de accountcontrole na login en
@@ -97,6 +97,13 @@ zitten achter de geobserveerde knoppen Filter 1/2 en de Payments-export achter
 Actions. V4 opent deze filters en het eventuele eenduidige payment-exportvenster
 en leest de zichtbare controls en placeholders. Filters worden niet toegepast
 en het definitieve exportformulier wordt niet ingediend. V3 blijft geclaimd.
+
+V4 slaagde en vond Payment time, Order time, Date created, Apply filters en het
+exportformulier met 22 standaardkolommen. V5 leest de kalenderwidget, de
+readonly-eigenschap en veldlabels rondom keuzeknoppen. Alleen de drie expliciet
+geobserveerde datumfiltervelden mogen hun weergegeven datumselectie teruggeven;
+alle andere invoerwaarden blijven uitgesloten. Rijselectie-checkboxes worden
+uit de metadata verwijderd. Er worden nog geen filters/exportopdrachten ingediend.
 
 Lokale tests (synthetische gegevens, geen netwerk of echte login):
 

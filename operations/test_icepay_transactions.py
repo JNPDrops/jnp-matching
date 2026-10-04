@@ -80,6 +80,13 @@ class CSV(unittest.TestCase):
 
 
 class Calendar(unittest.IsolatedAsyncioTestCase):
+    async def test_date_field_waits_for_filter_drawer_visibility(self):
+        field = element()
+        locator = SimpleNamespace(wait_for=AsyncMock(),all=AsyncMock(return_value=[field]))
+        page = SimpleNamespace(locator=lambda _:locator)
+        self.assertIs(await t.date_field(page,'tableFiltersForm.PaymentTime.PaymentTime'),field)
+        locator.wait_for.assert_awaited_once_with(state='visible',timeout=15000)
+
     async def test_day_selection_excludes_adjacent_month_and_disabled_cells(self):
         current, adjacent, disabled = element(),element(),element()
         current.evaluate.return_value = True

@@ -47,22 +47,29 @@ async def lifespan(_app):
     task = asyncio.create_task(serve(app_module))
     from operations.woo_iban_rules import serve as serve_iban
     iban_task = asyncio.create_task(serve_iban(app_module))
+    from operations.tax_agent import serve as serve_tax
+    tax_task = asyncio.create_task(serve_tax(app_module))
     try:
         yield
     finally:
         task.cancel()
         iban_task.cancel()
+        tax_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
         with suppress(asyncio.CancelledError):
             await iban_task
+        with suppress(asyncio.CancelledError):
+            await tax_task
 
 
-app = FastAPI(title="JNP Matching", version="1.7.0", lifespan=lifespan)
+app = FastAPI(title="JNP Matching", version="1.8.0", lifespan=lifespan)
 from operations.woo_iban_rules import router as woo_iban_router
 app.include_router(woo_iban_router)
 from operations.allocation_connection import router as allocation_router
 app.include_router(allocation_router)
+from operations.tax_agent import router as tax_router
+app.include_router(tax_router)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, https_only=False, same_site="lax")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -692,6 +699,14 @@ async def bank_first_candidates(limit: int = 200) -> dict[str, Any]:
             "reason": "Geen ordernummer herkend in de bankomschrijving.",
         }
 
+        from operations.tax_agent import candidate as tax_candidate
+        tax = tax_candidate(bank)
+        if tax is not None:
+            item.update(status=tax['status'], reason=tax['reason'], tax=tax,
+                        order_number=None, expected_ref=None)
+            items.append(item)
+            continue
+
         if bank_amount <= Decimal("0.00"):
             item.update(status="SKIP_NOT_RECEIPT", reason="Geen positieve bankontvangst; valt buiten deze eerste verkoopflow.")
             items.append(item)
@@ -1172,8 +1187,10 @@ async def execute_direct_match(bank_line_id: str) -> dict[str, Any]:
 @app.get("/health")
 async def health():
     from operations.automatic_debtor_routing import STATUS
-    return {"ok": True, "division": DIVISION, "version": "1.7.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
-            "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES, "debtor_routing": dict(STATUS)}
+    from operations.tax_agent import STATUS as TAX_STATUS
+    return {"ok": True, "division": DIVISION, "version": "1.8.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
+            "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES, "debtor_routing": dict(STATUS),
+            "tax_recognition": dict(TAX_STATUS)}
 
 
 @app.get("/", response_class=HTMLResponse)

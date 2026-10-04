@@ -349,6 +349,8 @@ async def browser_snapshot(automatic=False):
     os.environ['PLAYWRIGHT_BROWSERS_PATH'] = directory
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True,env=child_env)
+        page=None
+        stage='authenticate'
         try:
             context = await browser.new_context(accept_downloads=False,service_workers='block')
             await protect_requests(context)
@@ -358,6 +360,7 @@ async def browser_snapshot(automatic=False):
             update(login=login)
             if not login['administration_verified']:
                 raise HTTPException(409,'exact_login_not_verified')
+            stage='open_statements'; update(browser_stage=stage)
             url = 'https://start.exactonline.nl/docs/CflStatementsToBeCompleted.aspx?' + urlencode({'_Division_':DIVISION,'BankAccount':'{'+BANK+'}'})
             await page.goto(url,wait_until='domcontentloaded',timeout=45000)
             if not trusted(page.url) or 'CflStatementsToBeCompleted.aspx' not in page.url:
@@ -366,18 +369,23 @@ async def browser_snapshot(automatic=False):
                 raise HTTPException(409,'statement_session_expired')
             # Both statuses are deliberately included for a complete inspection.
             # These controls were observed on this account's live statement page.
+            stage='set_filters'; update(browser_stage=stage)
             await page.locator('#Status1').check()
             await page.locator('#Status2').check()
             await page.locator('#EntryDate_Selection').select_option('1100')
             await page.locator('#Notes').fill(JOB)
             for field in ['#GLAccountTypeCheckBoxList1','#GLAccountTypeCheckBoxList2','#GLAccountTypeCheckBoxList3']:
                 await page.locator(field).check()
-            await page.locator('#Filter_btnApply').click()
-            await page.wait_for_load_state('load',timeout=45000)
-            await page.locator('#List_ps-select').select_option('9999')
-            await page.wait_for_load_state('load',timeout=45000)
+            stage='apply_filter'; update(browser_stage=stage)
+            async with page.expect_navigation(wait_until='load',timeout=60000):
+                await page.locator('#Filter_btnApply').click()
+            stage='page_size'; update(browser_stage=stage)
+            if await page.locator('#List_ps-select').input_value() != '9999':
+                async with page.expect_navigation(wait_until='load',timeout=60000):
+                    await page.locator('#List_ps-select').select_option('9999')
             with suppress(Exception):
                 await page.wait_for_load_state('networkidle',timeout=10000)
+            stage='read_statements'; update(browser_stage=stage)
             snapshot=await ui_snapshot(page)
             artifact('ui',snapshot)
             update(phase='statement_inspected')
@@ -387,6 +395,7 @@ async def browser_snapshot(automatic=False):
                 update(statement_verification=verified)
                 claim('automatic_click')
                 update(phase='automatic_requested',automatic_attempted=True)
+                stage='click_automatic'; update(browser_stage=stage)
                 await page.locator('#btnAutomatic').click()
                 with suppress(Exception):
                     await page.wait_for_load_state('networkidle',timeout=45000)
@@ -396,6 +405,17 @@ async def browser_snapshot(automatic=False):
                         snapshots.append({'path':urlsplit(current.url).path,'snapshot':await ui_snapshot(current)})
                 artifact('automatic_after',snapshots)
                 update(phase='automatic_clicked_inspect_result')
+        except Exception as exc:
+            update(browser_stage=stage)
+            # A business-page snapshot is safe; authentication pages are never
+            # captured. Keep diagnostics private and do not repeat UI actions.
+            if page is not None and not page.is_closed() and urlsplit(page.url).path.endswith('CflStatementsToBeCompleted.aspx'):
+                with suppress(Exception):
+                    await page.wait_for_load_state('domcontentloaded',timeout=10000)
+                    artifact('ui',await ui_snapshot(page))
+            if stage not in {'authenticate'}:
+                update(browser_error=(type(exc).__name__+': '+str(exc).split('Call log:')[0])[:500])
+            raise
         finally:
             await browser.close()
 

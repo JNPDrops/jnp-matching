@@ -15,7 +15,7 @@ de portal waargenomen. De datum- en merchantfilters van de Payments-export
 zijn nog niet live geïnspecteerd; daarom wordt hun werking niet aangenomen.
 
 De proef bewaart uitsluitend zichtbare formuliermetadata in de bestaande
-Postgres-database. Geen invoerwaarden, transactietabellen, HTML, screenshots,
+Postgres-database en de private Render-logs. Geen invoerwaarden, transactietabellen, HTML, screenshots,
 cookies of geheimen. Met deze metadata kan de gerichte exportstap worden
 afgerond. **Deze versie downloadt nog geen transacties en importeert niets in
 Exact.** `passed` betekent alleen dat de login en formulierinspectie slaagden;
@@ -32,7 +32,7 @@ waarden in GitHub, chat, logs, screenshots of deze documentatie.
 | `ICEPAY_WEB_USERNAME` | E-mailadres waarmee deze ICEPAY-account wordt geopend |
 | `ICEPAY_WEB_PASSWORD` | Het ICEPAY-wachtwoord |
 | `ICEPAY_WEB_TOTP_SECRET` | Alleen als ICEPAY authenticator-2FA vereist: de bijbehorende TOTP-sleutel of otpauth-URI |
-| `ICEPAY_FETCH_PROBE_ID` | Niet-geheim: `icepay-fetch-20261001-03-v1` |
+| `ICEPAY_FETCH_PROBE_ID` | Niet-geheim: `icepay-fetch-20261001-03-v2` |
 
 De eerste twee velden zijn vereist. Ontbrekende gegevens worden uitsluitend
 bij naam gemeld voordat een loginpoging wordt geclaimd. De bot hergebruikt geen
@@ -62,15 +62,27 @@ Navigatie en POST-verzoeken zijn beperkt tot `portal.icepay.com`; wachtwoorden
 en 2FA-codes worden nooit teruggegeven of in ruwe fouten gelogd.
 
 Private Render-logs onder `ICEPAY_FETCH_PROBE` bevatten alleen vaste statuscodes,
-booleans en namen van ontbrekende variabelen. De tabel `icepay_fetch_probes`
+booleans, beperkte aantallen navigatielinks en namen van ontbrekende variabelen.
+`ICEPAY_FORM_METADATA` bevat dezelfde begrensde formuliermetadata als de database,
+in blokken van tien controls; nooit invoerwaarden of transactieregels. Dit maakt
+de inspectie bereikbaar via de private Render-connector zonder de database voor
+extern verkeer open te zetten. De tabel `icepay_fetch_probes`
 bevat het resultaat en de formuliermetadata. Er is geen publieke uitvoerings-
 of downloadroute. Voor een alleen-lezen controle:
 
 ```sql
 SELECT probe_id, attempted_at, result, forms
 FROM icepay_fetch_probes
-WHERE probe_id = 'icepay-fetch-20261001-03-v1';
+WHERE probe_id = 'icepay-fetch-20261001-03-v2';
 ```
+
+De v1-poging van 4 oktober 19:02 UTC kwam door de accountcontrole na login en
+stopte tijdens exportpagina-inspectie met `login_not_verified`. De oorspronkelijke
+foutafhandeling verloor daarbij de succesvolle loginflags. V2 bewaart die flags
+en gedeeltelijke resultaten, wacht op navigatiegereedheid en accepteert dubbele
+sidebar/breadcrumb-links uitsluitend als ze exact hetzelfde accountdoel hebben.
+Bij een fout worden alleen vaste accountpredicaten en linkaantallen vastgelegd.
+De v1-claim blijft intact; v2 krijgt een eigen eenmalige claim.
 
 Lokale tests (synthetische gegevens, geen netwerk of echte login):
 

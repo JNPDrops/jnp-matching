@@ -118,6 +118,14 @@ class CSV(unittest.TestCase):
 
 
 class Calendar(unittest.IsolatedAsyncioTestCase):
+    async def test_notification_dialog_is_explicitly_closed_before_actions(self):
+        marker=collection([element()]); marker.wait_for=AsyncMock()
+        page=SimpleNamespace(get_by_role=lambda *_a,**_k:marker)
+        with patch.object(t.b,'click_unique_read_control',AsyncMock()) as close:
+            self.assertTrue(await t.close_notifications(page))
+            self.assertEqual(close.await_args.args[1].pattern,'^Close$')
+        marker.wait_for.assert_awaited_once_with(state='hidden',timeout=15000)
+
     async def test_atomic_snapshot_waits_for_page_size_transition(self):
         old={'ids':['1'],'next':True,'next_count':1}
         new={'ids':['1','2'],'next':False,'next_count':0}

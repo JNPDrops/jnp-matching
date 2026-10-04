@@ -16,6 +16,8 @@ POLICY = 'same_source_order_required_20261004_2145_CEST'
 ARTIFACT = 'order_match_audit'
 legacy.ARTIFACTS.add(ARTIFACT)
 router = APIRouter(prefix=legacy.router.prefix)
+from operations.strict_order_matching import router as strict_router
+router.include_router(strict_router)
 
 
 def retired_action(path):

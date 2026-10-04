@@ -30,7 +30,7 @@ en kolomnamen. Fouten kunnen begrensde formuliermetadata tonen onder
 ## Eenmalig activeren
 
 - Gebruik de bestaande ICEPAY_WEB_USERNAME/PASSWORD en optionele TOTP-configuratie.
-- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v6`.
+- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v7`.
 - Render env-merge (`replace=false`) start zelf één deployment. Auto-deploy blijft uit.
 - De taak vervalt op 5 oktober 18:00 UTC en claimt vóór browserstart één poging.
 - Bestaande claims blijven intact; een herstart herhaalt geen export.
@@ -71,6 +71,16 @@ in de bron staat. Zowel het origineel als de afgeleide selectie worden bewaard;
 de afgeleide selectie moet alle bestaande datum-/bedrag-/merchantcontroles door.
 UTF-16 met BOM en een expliciete Excel `sep=`-regel worden ondersteund. Er wordt
 nog steeds geen nieuwe export gestart en niets naar Exact geschreven.
+
+V6 bewaarde één leesbare bestaande CSV met 114 regels, nul overlappende IDs en alle
+38 gevraagde IDs ontbrekend. De foutdiagnose toont het nog geopende Notifications-
+venster. Een Escape sloot dit kennelijk niet; daardoor konden achterliggende
+knoppen niet via hun toegankelijke rol worden bediend. V7 sluit het venster
+expliciet via de geobserveerde Close-knop en wacht tot het weg is. Daarna wordt
+één gerichte export gestart. De taak bewaart `not_started`, `submit_attempted` of
+`submitted` als afzonderlijk exportbewijs; een herstart herhaalt niets. De CSV
+moet nog steeds de volledige onafhankelijke ID-selectie dekken. Exact blijft
+ongewijzigd.
 
 `downloaded` betekent dat de bronbestanden zijn opgehaald. Het betekent nog niet
 dat de Exact-import gereed is. De refunds moeten inhoudelijk worden gemapt;

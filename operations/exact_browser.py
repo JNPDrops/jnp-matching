@@ -18,7 +18,7 @@ from operations.paragon_login_probe import parse_totp
 DIVISION = "3977752"
 TARGET = "https://start.exactonline.nl/docs/MenuPortal.aspx?_Division_=" + DIVISION
 HOSTS = {"start.exactonline.nl", "login.exact.com"}
-ENV_NAMES = ("EXACT_USERNAME", "EXACT_PASSWORD", "EXACT_TOTP_SECRET")
+ENV_NAMES = ("EXACT_WEB_USERNAME", "EXACT_WEB_PASSWORD", "EXACT_WEB_TOTP_SECRET")
 USERNAME = 'input[name="LoginForm$UserName"], input[autocomplete="username"], input[name="signInName"]'
 PASSWORD = 'input[type="password"]'
 OTP = 'input[autocomplete="one-time-code"], input[name="otpCode"], input[id="otpCode"], input[name="VerificationCode"], input[id="verificationCode"]'
@@ -86,13 +86,13 @@ class Credentials:
         if any(not environ.get(name) for name in ENV_NAMES):
             raise LoginStopped("missing_credentials")
         try:
-            generator = parse_totp(environ["EXACT_TOTP_SECRET"])
+            generator = parse_totp(environ["EXACT_WEB_TOTP_SECRET"])
             if generator.digits != 6:
                 raise ValueError()
-            username = environ["EXACT_USERNAME"].strip()
+            username = environ["EXACT_WEB_USERNAME"].strip()
             if not username or len(username) > 256:
                 raise ValueError()
-            return cls(username, environ["EXACT_PASSWORD"], generator)
+            return cls(username, environ["EXACT_WEB_PASSWORD"], generator)
         except Exception:
             raise LoginStopped("invalid_configuration") from None
 

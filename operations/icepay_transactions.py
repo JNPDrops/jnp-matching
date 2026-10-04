@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v2'
+JOB = 'icepay-transactions-20261001-03-v3'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 RANGE = '01/10/2026 - 03/10/2026'
@@ -179,6 +179,57 @@ async def table_snapshot(page):
     return {'headers':headers,'rows':rows,'total':total,'next':next_enabled}
 
 
+async def payment_checkbox_ids(page):
+    identifiers = []
+    for checkbox in await b.visible(page.locator('input[type="checkbox"]')):
+        label = await checkbox.get_attribute('aria-label') or ''
+        match = re.fullmatch(r'Select/deselect item (\d+) for bulk actions\.',label)
+        if match:
+            identifiers.append(match[1])
+    if len(identifiers)!=len(set(identifiers)):
+        raise AcquisitionStopped('duplicate_payment')
+    return identifiers
+
+
+async def payment_identifiers(page):
+    """Count observed per-row PaymentIDs across pages, independent of footer text."""
+    for select in await b.visible(page.locator('select')):
+        options = [s.strip() for s in await select.locator('option').all_inner_texts()]
+        if options==['25','50','100']:
+            await select.select_option(label='100')
+            await page.wait_for_load_state('networkidle',timeout=20000)
+            break
+    combined = set()
+    for _ in range(200):
+        await b.wait_verified_account(page)
+        current = await payment_checkbox_ids(page)
+        if combined.intersection(current):
+            raise AcquisitionStopped('duplicate_payment')
+        combined.update(current)
+        if len(combined)>5000:
+            raise AcquisitionStopped('artifact_too_large')
+        buttons = await b.visible(page.get_by_role('button',name='Next',exact=True))
+        more = len(buttons)==1 and await buttons[0].is_enabled() and await buttons[0].get_attribute('aria-disabled')!='true'
+        if not more:
+            if not combined:
+                body = await page.locator('body').inner_text()
+                if not re.search(r'No (?:payments|results|records)(?: found)?',body,re.I):
+                    raise AcquisitionStopped('table_not_verified')
+            return sorted(combined)
+        if not current or len(buttons)!=1:
+            raise AcquisitionStopped('table_not_verified')
+        await buttons[0].click()
+        await page.wait_for_load_state('networkidle',timeout=20000)
+        for _ in range(30):
+            following = await payment_checkbox_ids(page)
+            if following and following!=current:
+                break
+            await asyncio.sleep(.2)
+        else:
+            raise AcquisitionStopped('table_not_verified')
+    raise AcquisitionStopped('artifact_too_large')
+
+
 async def csv_links(page):
     found = {}
     # Download anchors may have an explicit button role in a notification.
@@ -294,7 +345,7 @@ def payment_date(text):
     raise AcquisitionStopped('invalid_payment_date')
 
 
-def parse_payments(content, expected_count):
+def parse_payments(content, expected_count, expected_ids=None):
     try:
         text = content.decode('utf-8-sig')
         dialect = csv.Sniffer().sniff(text[:16000],delimiters=',;\t')
@@ -340,6 +391,9 @@ def parse_payments(content, expected_count):
             'date':paid.isoformat(),'amount':str(value),'status':row['lastpaymentstatus'],
             'order':next(iter(order_values),None)})
         statuses[row['lastpaymentstatus']] += 1
+    if expected_ids is not None and ({payment for _,payment in seen}!=set(expected_ids)
+                                    or len(expected_ids)!=len(source)):
+        raise AcquisitionStopped('count_mismatch')
     ok = [r for r in selected if r['status']=='OK']
     return selected, {'source_rows':len(source),'td_rows':len(selected),
         'td_ok_count':len(ok),'td_ok_total':str(sum((Decimal(r['amount']) for r in ok),Decimal('0.00'))),
@@ -377,8 +431,9 @@ async def worker():
                 stage = 'payments_filter'
                 await open_account_page(page,'Payments')
                 await apply_period(page)
-                snapshot = await table_snapshot(page)
-                artifacts['proof'] = {'period':RANGE,'ui_payment_count':snapshot['total']}
+                identifiers = await payment_identifiers(page)
+                artifacts['proof'] = {'period':RANGE,'ui_payment_count':len(identifiers),
+                                      'ui_payment_ids':identifiers}
                 stage = 'payments_export'
                 content = await payment_export(page,downloads)
                 artifacts['payments_csv'] = base64.b64encode(content).decode()
@@ -483,7 +538,10 @@ async def run():
             proof = artifacts.get('proof',{})
             if proof.get('period')!=RANGE or type(proof.get('ui_payment_count')) is not int:
                 raise AcquisitionStopped('invalid_worker_output')
-            rows,summary = parse_payments(content,proof['ui_payment_count'])
+            ids = proof.get('ui_payment_ids')
+            if not isinstance(ids,list) or any(not isinstance(v,str) or not re.fullmatch(r'\d+',v) for v in ids):
+                raise AcquisitionStopped('invalid_worker_output')
+            rows,summary = parse_payments(content,proof['ui_payment_count'],ids)
             artifacts['normalized_payments'] = rows
             summary['sha256'] = hashlib.sha256(content).hexdigest()
             refunds = artifacts.get('refunds')

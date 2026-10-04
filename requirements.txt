@@ -8,3 +8,4 @@ openai>=1.0.0
 
 psycopg[binary]>=3.2,<4
 playwright==1.63.0
+msal==1.39.0

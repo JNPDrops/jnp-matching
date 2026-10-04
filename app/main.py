@@ -101,6 +101,8 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="JNP Matching", version="1.14.0", lifespan=lifespan)
+from app.dashboard.auth import create_dashboard_app
+app.mount("/dashboard", create_dashboard_app())
 from operations.fibonatix_import import router as fibonatix_import_router
 app.include_router(fibonatix_import_router)
 from operations.allocation_maintenance import router as maintenance_router

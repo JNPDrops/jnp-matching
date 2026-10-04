@@ -18,6 +18,7 @@ from uuid import UUID
 
 import msal
 import psycopg
+from app.dashboard.worklist import PostgresWorklist, Conflict
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
@@ -219,7 +220,8 @@ def clear_cookie(response, name):
 
 def create_dashboard_app(settings_provider=Settings.from_env,
                          store_factory=postgres_sessions,
-                         client_factory=microsoft_client):
+                         client_factory=microsoft_client,
+                         worklist_factory=PostgresWorklist):
     dashboard = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     assets = Path(__file__).parent
 
@@ -332,14 +334,47 @@ def create_dashboard_app(settings_provider=Settings.from_env,
     def me(request: Request):
         return {"name": request.state.user["name"], "role": request.state.grant["role"],
                 "divisions": request.state.grant["divisions"], "csrf": request.state.user["csrf"],
-                "worklist_connected": False}
+                "worklist_available": True,
+                "can_manage_worklist": request.state.grant["role"] in {"operator", "admin"}}
 
     @dashboard.get("/api/divisions/{division}/worklist")
     def worklist(division: str, request: Request):
         if division not in request.state.grant["divisions"]:
             return JSONResponse({"detail": "Geen toegang tot deze administratie"}, status_code=403)
-        # Live exception data/actions need a separately reviewed backend integration.
-        return {"division": division, "connected": False, "items": []}
+        return worklist_factory(request.state.settings.database_url).read(division)
+
+    @dashboard.post("/api/divisions/{division}/worklist/{case_id}")
+    async def worklist_change(division: str, case_id: str, request: Request):
+        if division not in request.state.grant["divisions"] or request.state.grant["role"] not in {"operator", "admin"}:
+            return JSONResponse({"detail": "Geen behandelrechten voor deze administratie"}, status_code=403)
+        supplied = request.headers.get("x-csrf-token", "")
+        if (request.headers.get("origin") != request.state.settings.origin or not supplied
+                or not secrets.compare_digest(supplied, request.state.user["csrf"])):
+            return JSONResponse({"detail": "Ongeldig verzoek"}, status_code=403)
+        if not re.fullmatch(r"[a-f0-9]{32}", case_id):
+            return JSONResponse({"detail": "Onbekende vraag"}, status_code=404)
+        if request.headers.get("content-type", "").split(";")[0] != "application/json":
+            return JSONResponse({"detail": "JSON vereist"}, status_code=400)
+        body = b""
+        async for part in request.stream():
+            body += part
+            if len(body) > 20000:
+                return JSONResponse({"detail": "Toelichting te lang"}, status_code=413)
+        try:
+            data = json.loads(body)
+            if not isinstance(data, dict) or set(data) != {"action", "note", "decision", "revision", "fingerprint"}:
+                raise ValueError()
+            if (type(data["revision"]) is not int or data["revision"] < 0
+                    or not all(isinstance(data[k], str) for k in ("action", "note", "decision", "fingerprint"))
+                    or not re.fullmatch(r"[a-f0-9]{64}", data["fingerprint"])):
+                raise ValueError()
+            service = worklist_factory(request.state.settings.database_url)
+            return await run_in_threadpool(service.change, division, case_id, request.state.user,
+                                          data["action"], data["note"], data["decision"], data["revision"], data["fingerprint"])
+        except Conflict as error:
+            return JSONResponse({"detail": str(error)}, status_code=409)
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"detail": "Kies een beschikbare actie en vul een toelichting in"}, status_code=400)
 
     @dashboard.post("/auth/logout")
     def logout(request: Request):

@@ -12,7 +12,7 @@ from operations.icepay_fetch_probe import environments
 async def worker():
     from playwright.async_api import async_playwright
     from operations.icepay_transactions import open_account_page, table_evidence, failure_location
-    result={'account_verified':False,'views':{}}
+    result={'account_verified':False,'views':{},'details':{}}
     try:
         credentials=b.Credentials.from_env(os.environ)
         async with async_playwright() as playwright:
@@ -42,6 +42,20 @@ async def worker():
                             break
                     result['views'][label]={'available':True,'tables':await table_evidence(page),
                         'controls':await b.inspect_controls(page)}
+                for identifier in ('S11930739','S11930206'):
+                    await open_account_page(page,'Statements')
+                    await page.wait_for_load_state('networkidle',timeout=20000)
+                    targets=await b.visible(page.get_by_text(identifier,exact=True))
+                    if len(targets)!=1:
+                        result['details'][identifier]={'available':False}
+                        continue
+                    before=page.url
+                    await targets[0].click()
+                    await page.wait_for_load_state('networkidle',timeout=20000)
+                    await b.wait_verified_account(page)
+                    body=await page.locator('body').inner_text()
+                    result['details'][identifier]={'available':page.url!=before,'text':body[:30000],
+                        'controls':await b.inspect_controls(page),'tables':await table_evidence(page)}
             finally:
                 await browser.close()
     except Exception as error:
@@ -57,7 +71,7 @@ def summarize(result):
         tables=[]
         for table in view.get('tables',[]):
             headers=table['headers']
-            keep=[i for i,h in enumerate(headers) if re.search(r'statement|transfer|date|amount|period|status|balance|currency|created',h,re.I)]
+            keep=[i for i,h in enumerate(headers) if re.search(r'statement|transfer|date|amount|period|status|balance|currency|created|operation',h,re.I)]
             recent=[]
             for row in table['rows'][:8]:
                 if len(row['cells'])!=len(headers):
@@ -68,6 +82,20 @@ def summarize(result):
         summary['views'][name]={'available':view.get('available') is True,'tables':tables}
     if 'failure' in result:
         summary['failure']=result['failure']
+    summary['details']={}
+    for identifier,detail in result.get('details',{}).items():
+        if identifier not in {'S11930739','S11930206'}:
+            raise ValueError('unexpected_statement')
+        lines=[s.strip() for s in detail.get('text','').splitlines() if s.strip()]
+        financial=[]
+        for i,line in enumerate(lines):
+            if re.search(r'total|transfer|invoice|holdback|period|balance|turnover|refund|cost|statement|date',line,re.I) and len(line)<180:
+                clean=re.sub(r'\b[A-Z]{2}\d{2}[A-Z0-9 ]{10,34}\b','[bank account]',line)
+                if not re.search(r'password|secret|token|@|https?://',clean,re.I):
+                    financial.append(clean)
+                    if i+1<len(lines) and re.fullmatch(r'[\d.,€+\-\s/():]+|[ST]\d+|[A-Za-z]{3} \d{1,2}, 2026(?: \d\d:\d\d:\d\d)?',lines[i+1]):
+                        financial.append(lines[i+1])
+        summary['details'][identifier]={'available':detail.get('available') is True,'financial_lines':financial[:80]}
     return summary
 
 

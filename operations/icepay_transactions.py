@@ -879,6 +879,10 @@ def decode(stdout):
 
 
 async def run():
+    if os.environ.get(ACTIVATION)=='icepay-booking-20261001-03-prepare-v1':
+        from operations.icepay_booking import run as prepare_booking
+        await prepare_booking()
+        return
     if os.environ.get(ACTIVATION)!=JOB or datetime.now(timezone.utc)>=EXPIRES:
         return
     result, artifacts, summary = status('blocked','configuration','configuration'), {}, {}

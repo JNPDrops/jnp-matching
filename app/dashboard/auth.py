@@ -40,6 +40,8 @@ class Settings:
     client_secret: str = field(default="", repr=False)
     certificate_path: str = field(default="", repr=False)
     certificate_password: str = field(default="", repr=False)
+    allow_tenant_members: bool = False
+    member_divisions: dict = field(default_factory=dict)
 
     @property
     def callback(self):
@@ -58,6 +60,8 @@ class Settings:
             client_secret=os.getenv("DASHBOARD_MICROSOFT_CLIENT_SECRET", ""),
             certificate_path=os.getenv("DASHBOARD_MICROSOFT_CERTIFICATE_PATH", ""),
             certificate_password=os.getenv("DASHBOARD_MICROSOFT_CERTIFICATE_PASSWORD", ""),
+            allow_tenant_members=os.getenv("DASHBOARD_ALLOW_TENANT_MEMBERS", "false").lower() == "true",
+            member_divisions=json.loads(os.getenv("DASHBOARD_MEMBER_DIVISIONS_JSON", "{}")),
         )
         settings.validate()
         return settings
@@ -71,19 +75,51 @@ class Settings:
             raise ValueError("Dashboard origin must be a fixed HTTPS origin")
         if not self.database_url or not (self.client_secret or self.certificate_path):
             raise ValueError("Server-side configuration incomplete")
-        if not isinstance(self.access, dict) or not self.access:
-            raise ValueError("Explicit user access is required")
+        if not isinstance(self.access, dict) or (not self.access and not self.allow_tenant_members):
+            raise ValueError("Explicit users or tenant member access required")
+        self._validate_divisions(self.member_divisions, allow_empty=True)
         for oid, grant in self.access.items():
             if str(UUID(oid)) != oid or not isinstance(grant, dict):
                 raise ValueError("Access must use Entra object UUIDs")
+            if "disabled" in grant and type(grant["disabled"]) is not bool:
+                raise ValueError("Disabled must be boolean")
+            if grant.get("disabled") is True:
+                continue
             if grant.get("role") not in ROLES:
                 raise ValueError("Unknown dashboard role")
-            divisions = grant.get("divisions")
-            if not isinstance(divisions, dict) or not divisions:
-                raise ValueError("Explicit divisions required")
-            for division, name in divisions.items():
-                if not re.fullmatch(r"[1-9][0-9]{0,11}", division) or not isinstance(name, str) or not name.strip():
-                    raise ValueError("Invalid division mapping")
+            self._validate_divisions(grant.get("divisions"))
+
+    @staticmethod
+    def _validate_divisions(divisions, *, allow_empty=False):
+        if not isinstance(divisions, dict) or (not divisions and not allow_empty):
+            raise ValueError("Explicit divisions required")
+        for division, name in divisions.items():
+            if (not isinstance(division, str) or not re.fullmatch(r"[1-9][0-9]{0,11}", division)
+                    or not isinstance(name, str) or not name.strip()):
+                raise ValueError("Invalid division mapping")
+
+
+def access_grant(settings, user):
+    """User is from validated MSAL claims or our server-side session store."""
+    if not user or user.get("tid") != settings.tenant_id:
+        return None
+    oid = user.get("oid")
+    if not isinstance(oid, str):
+        return None
+    try:
+        if str(UUID(oid)) != oid:
+            return None
+    except ValueError:
+        return None
+    if oid in settings.access:
+        grant = settings.access[oid]
+        return None if grant.get("disabled") is True else grant
+    # Never infer membership from an email domain or from a missing claim.
+    # acct is the optional Microsoft claim: 0=member, 1=guest.
+    acct = user.get("account_type")
+    if settings.allow_tenant_members and type(acct) in (int, str) and acct in (0, "0"):
+        return {"role": "viewer", "divisions": settings.member_divisions}
+    return None
 
 
 class PostgresSessions:
@@ -165,10 +201,10 @@ def authorized_user(settings, claims):
             or not isinstance(claims.get("exp"), (int, float))
             or claims["exp"] <= time.time()):
         return None
-    oid = claims.get("oid")
-    if not isinstance(oid, str) or oid not in settings.access:
-        return None
-    return {"oid": oid, "tid": settings.tenant_id, "name": str(claims.get("name") or "Medewerker")[:200]}
+    user = {"oid": claims.get("oid"), "tid": settings.tenant_id,
+            "name": str(claims.get("name") or "Medewerker")[:200],
+            "account_type": claims.get("acct")}
+    return user if access_grant(settings, user) else None
 
 
 def cookie(response, name, value, ttl, *, flow=False):
@@ -198,8 +234,7 @@ def create_dashboard_app(settings_provider=Settings.from_env,
             request.state.nonce = secrets.token_urlsafe(24)
             if route not in ("/login", "/auth/start", "/auth/callback"):
                 session = await run_in_threadpool(store.get, request.cookies.get(SESSION_COOKIE), "session")
-                grant = (settings.access.get(session.get("oid"))
-                         if session and session.get("tid") == settings.tenant_id else None)
+                grant = access_grant(settings, session)
                 if not grant:
                     response = (JSONResponse({"detail": "Aanmelden vereist"}, status_code=401)
                                 if route.startswith("/api/") or request.method != "GET"

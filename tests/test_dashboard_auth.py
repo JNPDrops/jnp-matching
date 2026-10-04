@@ -203,6 +203,65 @@ class DashboardAuthTest(unittest.TestCase):
                 with self.assertRaises((ValueError, TypeError)):
                     replace(self.settings, **change).validate()
 
+    def enable_member_access(self):
+        self.settings = replace(self.settings, access={}, allow_tenant_members=True,
+                                member_divisions={"3977752": "James n Parson B.V."})
+        self.microsoft.result["id_token_claims"]["acct"] = 0
+
+    def test_tenant_members_can_sign_in_without_individual_assignment(self):
+        self.enable_member_access()
+        self.settings.validate()
+        self.assertEqual(self.sign_in().status_code, 303)
+        data = self.client.get("/dashboard/api/me").json()
+        self.assertEqual(data["role"], "viewer")
+        self.assertEqual(data["divisions"], {"3977752": "James n Parson B.V."})
+        self.assertEqual(self.client.get("/dashboard/api/divisions/999999/worklist").status_code, 403)
+
+    def test_members_can_enter_without_receiving_any_administration(self):
+        self.enable_member_access()
+        self.settings = replace(self.settings, member_divisions={})
+        self.settings.validate()
+        self.assertEqual(self.sign_in().status_code, 303)
+        self.assertEqual(self.client.get("/dashboard/api/me").json()["divisions"], {})
+        self.assertEqual(self.client.get("/dashboard/api/divisions/3977752/worklist").status_code, 403)
+
+    def test_member_mode_never_treats_unknown_or_guest_as_member(self):
+        for acct in (1, "1", None, "", "member", False, True, 0.0, [], {}):
+            with self.subTest(acct=acct):
+                self.setUp()
+                self.enable_member_access()
+                self.microsoft.result["id_token_claims"]["acct"] = acct
+                self.assertEqual(self.sign_in().status_code, 403)
+
+    def test_wrong_tenant_still_rejected_in_member_mode(self):
+        self.enable_member_access()
+        self.microsoft.result["id_token_claims"]["tid"] = "44444444-4444-4444-4444-444444444444"
+        self.assertEqual(self.sign_in().status_code, 403)
+
+    def test_explicitly_invited_guest_uses_only_its_own_grant(self):
+        self.enable_member_access()
+        self.microsoft.result["id_token_claims"]["acct"] = 1
+        self.settings = replace(self.settings, access={USER: {"role": "viewer", "divisions": {"7654321": "Guest assigned company"}}})
+        self.assertEqual(self.sign_in().status_code, 303)
+        self.assertEqual(self.client.get("/dashboard/api/me").json()["divisions"], {"7654321": "Guest assigned company"})
+        self.assertEqual(self.client.get("/dashboard/api/divisions/3977752/worklist").status_code, 403)
+        self.settings = replace(self.settings, access={})
+        self.assertEqual(self.client.get("/dashboard/api/me").status_code, 401)
+
+    def test_explicit_block_overrides_automatic_member_access(self):
+        self.enable_member_access()
+        self.assertEqual(self.sign_in().status_code, 303)
+        self.settings = replace(self.settings, access={USER: {"disabled": True}})
+        self.settings.validate()
+        self.assertEqual(self.client.get("/dashboard/api/me").status_code, 401)
+        self.assertEqual(self.sign_in().status_code, 403)
+
+    def test_turning_off_member_access_revokes_existing_member_session(self):
+        self.enable_member_access()
+        self.sign_in()
+        self.settings = replace(self.settings, allow_tenant_members=False)
+        self.assertEqual(self.client.get("/dashboard/api/me").status_code, 401)
+
     def test_real_client_configuration_uses_minimal_identity_scope(self):
         with patch("app.dashboard.auth.msal.ConfidentialClientApplication") as factory:
             microsoft_client(self.settings)

@@ -20,7 +20,7 @@ import httpx
 from operations import allocation_connection as allocation
 from operations import bacs_debtor_transfer as m
 
-REPORT = 'fibonetics-20261004-1119-v1'
+REPORT = 'fibonetics-20261004-1140-v2'
 EXPIRES = datetime(2026,10,4,13,tzinfo=timezone.utc)
 LOCK = 3977752100401
 LOG = logging.getLogger('uvicorn.error')
@@ -119,12 +119,23 @@ async def collect(app):
         '$filter':f"AccountId eq guid'{source}'",'$select':','.join(OPEN_FIELDS)})
     m.require(len(open_rows)<10000,'Open-item completeness limit reached')
     emit('open_100100',{'read_at':m.utcnow(),'rows':[{k:r.get(k) for k in OPEN_FIELDS} for r in open_rows]})
-    headers=await api.rows('salesentry/SalesEntries',{'$filter':f"Customer eq guid'{source}'",
+    headers=await api.rows('salesentry/SalesEntries',{'$filter':f"Customer eq guid'{source}' and EntryDate ge datetime'2026-09-15T00:00:00'",
         '$select':','.join(HEADER_FIELDS)+',Description'})
     m.require(len(headers)<10000 and len({r['EntryID'] for r in headers})==len(headers),
               'Sales-entry completeness limit reached')
+    # Retain every currently open source item, even when its booking is older
+    # than the PSP export. Paid older bookings are queried separately by CSV order.
+    present_entries={r['EntryNumber'] for r in headers}
+    older=sorted({r['EntryNumber'] for r in open_rows}-present_entries)
+    for start in range(0,len(older),20):
+        batch=older[start:start+20]
+        headers+=await api.rows('salesentry/SalesEntries',{
+            '$filter':f"Customer eq guid'{source}' and ("+' or '.join(f'EntryNumber eq {int(n)}' for n in batch)+')',
+            '$select':','.join(HEADER_FIELDS)+',Description'})
+    m.require(len({r['EntryID'] for r in headers})==len(headers),'Duplicate source headers')
     headers=project_headers(headers)
-    emit('headers_100100',{'read_at':m.utcnow(),'rows':headers})
+    emit('headers_100100',{'read_at':m.utcnow(),'rows':headers,
+         'scope':'All source sales entries dated since 2026-09-15 plus all older currently open source sales entries'})
     refs={ref for h in headers for ref in (h.get('YourRef'),h.get('original_order_ref'))
           if isinstance(ref,str) and re.fullmatch(r'TD[0-9]{4,10}',ref)}
     wanted=set(json.loads(Path(__file__).with_name('fibonetics_report_ids.json').read_text()))

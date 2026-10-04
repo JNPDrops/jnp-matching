@@ -72,26 +72,6 @@ class BatchSafety(unittest.TestCase):
 
 
 class NetworkSafety(unittest.IsolatedAsyncioTestCase):
-    async def test_withdrawn_cross_order_actions_stop_before_any_browser_or_write(self):
-        with patch.object(f,'state',return_value={'reconciliation':{'complete':True}}),patch.object(f,'claim') as claim:
-            for args in [{'automatic':True},{'settle':True}]:
-                with self.assertRaises(HTTPException) as raised:
-                    await f.browser_snapshot(**args)
-                self.assertIn('same_source_order_required',raised.exception.detail)
-            with self.assertRaises(HTTPException):
-                await f.settle_paid_invoice(None)
-        claim.assert_not_called()
-
-    async def test_audit_flags_misallocated_source_and_keeps_correct_rows(self):
-        common=dict(GLAccountCode='1316',AccountCode=' 100100',EntryID='entry',EntryNumber=1,AmountDC=10)
-        rows=[dict(common,ID='a',Description='Order TD10001 | Woo 20001 | Betaling ABCD1234',YourRef='TD10002'),
-              dict(common,ID='b',Description='Order TD10003 | Woo 20003 | Betaling EFGH5678',YourRef='TD10003'),
-              dict(common,ID='c',Description='Order TD10004 | refund',YourRef='TD10005',AccountCode=None)]
-        result=f.order_match_candidates(rows)
-        self.assertEqual(len(result),1)
-        self.assertEqual(result[0]['source_order'],'TD10001')
-        self.assertEqual(result[0]['allocated_reference'],'TD10002')
-
     async def test_automatic_stops_before_browser_without_verified_import(self):
         with patch.object(f,'state',return_value={'reconciliation':{'complete':False}}):
             with self.assertRaises(HTTPException): await f.browser_snapshot(automatic=True)

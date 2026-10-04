@@ -10,9 +10,9 @@ Geheimen blijven in Render Environment van `jnp-matching`:
 
 | Variabele | Inhoud |
 | --- | --- |
-| `EXACT_USERNAME` | Exact-gebruikersnaam of e-mailadres |
-| `EXACT_PASSWORD` | Wachtwoord van die Exact-gebruiker |
-| `EXACT_TOTP_SECRET` | De bij dit Exact-account ingestelde TOTP-sleutel, of de volledige otpauth-URI |
+| `EXACT_WEB_USERNAME` | Exact-gebruikersnaam of e-mailadres |
+| `EXACT_WEB_PASSWORD` | Wachtwoord van die Exact-gebruiker |
+| `EXACT_WEB_TOTP_SECRET` | De bij dit Exact-account ingestelde TOTP-sleutel, of de volledige otpauth-URI |
 
 Dit zijn andere gegevens dan `EXACT_CLIENT_ID` en `EXACT_CLIENT_SECRET` van de
 OAuth-koppeling, en andere dan de Paragon-gegevens. Bestaande variabelen en

@@ -480,6 +480,10 @@ async def verify_final():
         return {k:str(v) for k,v in result.items()}
     if totals(lines) != totals(plan['original_ledger']):
         fail('journal_totals_changed')
+    target_ids = {r['bank_line_id'] for r in plan['receipts']}
+    for source in source_receipts(plan['original_ledger'], legacy.application().COLLECTIVE_DEBTOR_CODE):
+        if source['bank_line_id'] not in target_ids and any(actual[source[k]].get('YourRef') != source['source_order'] for k in ['bank_line_id', 'offset_id']):
+            fail('previously_correct_source_reference_changed')
     incomplete = []
     for receipt in plan['receipts']:
         verify_source(receipt, lines)
@@ -534,7 +538,38 @@ async def diagnose_closed(limit):
         receipt['existing_invoice_history'] = evidence
         found.append(receipt['source_order'])
         legacy.artifact(PLAN, plan)
-    legacy.update(phase='strict_existing_invoice_review_complete', strict_closed_invoice_reviews=len(found))
+    if found:
+        async with session() as (context, page):
+            for receipt in plan['receipts']:
+                if receipt['source_order'] not in found:
+                    continue
+                invoice = receipt['invoice']
+                actual = await entry_lines(receipt)
+                verify_source(receipt, actual)
+                frame = await open_match(context, page, receipt)
+                rows = await match_rows(frame)
+                current = await legacy.receivables()
+                selected = [r for r in rows if r['checked']]
+                credits = [r for r in current if r.get('JournalCode') == '26' and receipt['trx'] in (r.get('Description') or '')]
+                invoice_open = any(r.get('JournalCode') == '70' and str(r.get('InvoiceNumber')) == str(invoice['EntryNumber']) for r in current)
+                receipt['evidence'].append(dict(at=now(), phase='existing_match_readback', rows=rows, ledger=actual))
+                receipt['existing_invoice_history']['screen'] = rows
+                if (len(selected) == 1 and selected[0]['cells'][4] == receipt['source_order']
+                        and selected[0]['cells'][2] == str(invoice['EntryNumber']) and selected[0]['matchId']
+                        and euro(selected[0]['amount']) == money(receipt['amount']) and not credits and not invoice_open):
+                    receipt.update(state='matched_verified', workflow_status='decided', execution_status='existing_match_verified',
+                        verified_without_new_save=True)
+                    receipt['existing_invoice_history']['result'] = 'existing_own_match_verified_without_save'
+                elif not selected and not invoice_open and len(credits) == 1 and money(credits[0]['Amount']) == -money(receipt['amount']):
+                    receipt.update(exception='own_invoice_already_closed_requires_review', workflow_status='open',
+                        suggested_action='inspect_existing_payment_or_credit')
+                    receipt['existing_invoice_history']['result'] = 'open_receipt_closed_invoice_exception'
+                else:
+                    legacy.artifact(PLAN, plan)
+                    fail('existing_match_state_requires_review')
+                legacy.artifact(PLAN, plan)
+    legacy.update(phase='strict_existing_invoice_review_complete', strict_closed_invoice_reviews=len(found),
+        strict_states={s:sum(r['state']==s for r in plan['receipts']) for s in {r['state'] for r in plan['receipts']}})
 
 
 async def run(mode, limit):

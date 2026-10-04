@@ -34,7 +34,7 @@ EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 LOCK = 397775226
 router = APIRouter(prefix='/ops/fibonatix-20261002')
 TASKS = set()
-ARTIFACTS = {'ledger_before', 'ledger_after', 'receivables_before', 'receivables_after', 'ui', 'xml_response'}
+ARTIFACTS = {'ledger_before', 'ledger_after', 'receivables_before', 'receivables_after', 'ui', 'xml_response', 'automatic_before', 'automatic_after'}
 
 
 def application():
@@ -167,7 +167,19 @@ def brief(rows):
 
 async def read_all(path, params):
     app = application()
-    page = await app.exact_get(path, params)
+    async def get(url=None):
+        for attempt in range(4):
+            try:
+                result = await app._request_json('GET',url) if url else await app.exact_get(path,params)
+                # Leave room for the existing agents in Exact's minute budget.
+                await asyncio.sleep(1.5)
+                return result
+            except HTTPException as exc:
+                if exc.status_code not in {429,502,503,504} or attempt == 3:
+                    raise
+                update(read_wait_status=exc.status_code)
+                await asyncio.sleep(30)
+    page = await get()
     rows, seen = [], set()
     for _ in range(200):
         rows.extend(app._extract_results(page))
@@ -179,7 +191,7 @@ async def read_all(path, params):
         if not nxt.startswith(prefix) or nxt in seen:
             raise HTTPException(409, 'unsafe_or_repeated_pagination')
         seen.add(nxt)
-        page = await app._request_json('GET', nxt)
+        page = await get(nxt)
     raise HTTPException(409, 'incomplete_pagination')
 
 
@@ -299,12 +311,32 @@ async def ui_snapshot(page):
             value:(e.tagName==='SELECT'||(e.tagName==='INPUT'&&business(e)))?e.value:undefined,
             checked:e.type==='checkbox'?e.checked:undefined,
             options:e.tagName==='SELECT'?Array.from(e.options).map(o=>({value:o.value,text:o.text})).slice(0,100):undefined})),
-          rows:Array.from(document.querySelectorAll('tr')).filter(visible).slice(0,10000).map(e=>({id:e.id,text:e.innerText,
+          rows:Array.from(document.querySelectorAll('tr')).filter(visible).slice(0,10000).map(e=>({id:e.id,text:e.innerText.slice(0,5000),content:e.textContent.slice(0,5000),
             cells:Array.from(e.children).filter(c=>['TD','TH'].includes(c.tagName)).map(c=>c.innerText),
             titles:Array.from(e.querySelectorAll('[title]')).map(x=>x.title)}))}; }''')
 
 
-async def browser_snapshot():
+def verify_statements(snapshot, rows):
+    controls={c['id']:c for c in snapshot['controls'] if c.get('id')}
+    if controls.get('BankAccount',{}).get('value','').strip('{}').lower() != BANK:
+        raise HTTPException(409,'wrong_statement_bank')
+    if controls.get('Notes',{}).get('value') != JOB:
+        raise HTTPException(409,'statement_batch_filter_missing')
+    found=[]
+    for source in rows:
+        hits=[r for r in snapshot['rows'] if len(r['cells'])>=15 and source['trx'] in (r.get('content','')+' '.join(r.get('titles',[])))]
+        if len(hits)!=1:
+            raise HTTPException(409,'statement_reference_not_unique_'+source['trx'])
+        hit=hits[0]; text=hit.get('content','')+' '.join(hit.get('titles',[]))
+        if source['description'] not in text or JOB not in text or not hit['cells'][7].startswith(source['gl']+' -'):
+            raise HTTPException(409,'statement_note_or_offset_mismatch_'+source['trx'])
+        found.append(source['trx'])
+    return {'verified_ids':found,'complete':len(found)==845}
+
+
+async def browser_snapshot(automatic=False):
+    if automatic and not state().get('reconciliation',{}).get('complete'):
+        raise HTTPException(409,'ledger_not_verified')
     from operations.exact_browser import Credentials, authenticate, protect_requests, trusted, PASSWORD, USERNAME, visible
     from playwright.async_api import async_playwright
     directory = str(Path(tempfile.gettempdir()) / 'jnp-paragon-browser-1.63.0')
@@ -337,14 +369,33 @@ async def browser_snapshot():
             await page.locator('#Status1').check()
             await page.locator('#Status2').check()
             await page.locator('#EntryDate_Selection').select_option('1100')
+            await page.locator('#Notes').fill(JOB)
+            for field in ['#GLAccountTypeCheckBoxList1','#GLAccountTypeCheckBoxList2','#GLAccountTypeCheckBoxList3']:
+                await page.locator(field).check()
             await page.locator('#Filter_btnApply').click()
             await page.wait_for_load_state('load',timeout=45000)
             await page.locator('#List_ps-select').select_option('9999')
             await page.wait_for_load_state('load',timeout=45000)
             with suppress(Exception):
                 await page.wait_for_load_state('networkidle',timeout=10000)
-            artifact('ui',await ui_snapshot(page))
+            snapshot=await ui_snapshot(page)
+            artifact('ui',snapshot)
             update(phase='statement_inspected')
+            if automatic:
+                verified=verify_statements(snapshot,parse_batch(payload()))
+                artifact('automatic_before',snapshot)
+                update(statement_verification=verified)
+                claim('automatic_click')
+                update(phase='automatic_requested',automatic_attempted=True)
+                await page.locator('#btnAutomatic').click()
+                with suppress(Exception):
+                    await page.wait_for_load_state('networkidle',timeout=45000)
+                snapshots=[]
+                for current in context.pages:
+                    if trusted(current.url):
+                        snapshots.append({'path':urlsplit(current.url).path,'snapshot':await ui_snapshot(current)})
+                artifact('automatic_after',snapshots)
+                update(phase='automatic_clicked_inspect_result')
         finally:
             await browser.close()
 
@@ -357,14 +408,15 @@ async def run(action):
         if not locked:
             raise HTTPException(409,'job_already_running')
         update(running=True, action=action, last_error=None)
-        operations={'preflight':preflight,'import':import_xml,'reconcile':reconcile,'inspect':browser_snapshot}
+        operations={'preflight':preflight,'import':import_xml,'reconcile':reconcile,'inspect':browser_snapshot,
+                    'automatic':lambda:browser_snapshot(automatic=True)}
         await operations[action]()
     except asyncio.CancelledError:
         update(phase='interrupted_reconcile_before_write',last_error='worker_cancelled')
         raise
     except Exception as exc:
         error = str(exc.detail)[:1500] if isinstance(exc,HTTPException) else type(exc).__name__
-        update(phase='stopped',last_error=error)
+        update(phase='stopped',last_error=error,last_error_status=exc.status_code if isinstance(exc,HTTPException) else None)
     finally:
         if locked:
             update(running=False)
@@ -417,7 +469,7 @@ async def get_artifact(name:str,request:Request):
 @router.post('/{action}')
 async def start(action:str,request:Request):
     authorize(request)
-    if action not in {'preflight','import','reconcile','inspect'}:
+    if action not in {'preflight','import','reconcile','inspect','automatic'}:
         raise HTTPException(404,'Not found')
     state()
     if any(not task.done() for task in TASKS):

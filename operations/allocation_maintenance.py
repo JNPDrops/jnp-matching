@@ -88,7 +88,7 @@ def duplicates(rules, preferred=()):
 
 
 def order_reference(description):
-    if PSP.search(description) or re.search(r'refund|double payment|terugbetaling', description, re.I):
+    if tax.tax_hint({'Description': description}) or PSP.search(description) or re.search(r'refund|double payment|terugbetaling', description, re.I):
         return None
     explicit = re.findall(r'(?<![A-Za-z0-9])(?:TD|order(?:\s*(?:number|nummer|no\.?))?\s*[:#-]?\s*)([0-9]{4,7})(?![0-9])', description, re.I)
     numbers = explicit or re.findall(r'(?<![A-Za-z0-9])([0-9]{5,6})(?![A-Za-z0-9])', BOSCI.sub('', description))
@@ -101,36 +101,17 @@ def vat_refund(bank, metadata):
     A description can establish the tax without a reversible payment reference.
     It never establishes settlement of the return or any interest component.
     """
-    text = str(bank.get('Description') or '').strip()
-    named = 'belastingdienst' in (str(bank.get('AccountName') or '') + ' ' + text).lower()
-    linked = str(bank.get('Account') or '').lower() == str(metadata['tax_account_id']).lower()
-    if not (named or linked) or m.amount(bank['AmountDC']) <= 0 or tax.EXTRAS.search(text):
+    source = dict(bank)
+    if str(bank.get('Account') or '').lower() == str(metadata['tax_account_id']).lower():
+        source['AccountName'] = 'Belastingdienst'
+    decision = tax.vat_refund_decision(source)
+    if not decision:
         return None
-    if not re.search(r'teruggaaf|teruggave|restitutie|refund', text, re.I) or not re.search(r'omzetbelasting|\bbtw\b', text, re.I):
-        return None
-    if re.search(r'loonheffing|loonbelasting|vennootschap|\bvpb\b', text, re.I):
-        return None
-    for match in tax.PAYMENT_PATTERN.finditer(text):
-        try:
-            d = tax.decode_payment(match.group(), anchor_year=tax.bank_date(bank['Date']).year)
-            if d['tax_bucket'] != 'btw' or d['needs_assessment_split']:
-                return None
-        except tax.ReferenceError:
-            return None
-    for match in tax.ASSESSMENT_PATTERN.finditer(text):
-        try:
-            d = tax.decode_assessment(match.group(), anchor_year=tax.bank_date(bank['Date']).year)
-            if d['tax_bucket'] != 'btw' or d['needs_assessment_split']:
-                return None
-        except tax.ReferenceError:
-            return None
     gl = [a for a in metadata['accounts'] if str(a.get('Code') or '').strip() == '1770'
           and a.get('BalanceType') == 'B' and a.get('IsBlocked') is False]
-    codes = BOSCI.findall(text)
-    words = codes[0][:35].lower() if len(codes) == 1 else text
-    if len(gl) != 1 or not 15 <= len(words) <= 240:
+    if len(gl) != 1:
         return None
-    return {'Account': m.guid(metadata['tax_account_id']), 'GLAccount': m.guid(gl[0]['ID']), 'Words': words}
+    return {'GLAccount': m.guid(gl[0]['ID']), 'Words': decision['allocation_words']}
 
 
 def normal_name(text):
@@ -141,7 +122,7 @@ def normal_name(text):
 
 def supplier_proposal(bank, suppliers, history_counts):
     desc = str(bank.get('Description') or '').strip()
-    if m.amount(bank['AmountDC']) >= 0 or PSP.search(desc) or re.search(r'refund|double payment|terugbetaling|belastingdienst', desc, re.I):
+    if tax.tax_hint(bank) or m.amount(bank['AmountDC']) >= 0 or PSP.search(desc) or re.search(r'refund|double payment|terugbetaling|belastingdienst', desc, re.I):
         return None
     text = ' ' + normal_name(desc) + ' '
     matches = []

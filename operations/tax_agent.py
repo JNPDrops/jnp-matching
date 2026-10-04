@@ -22,7 +22,7 @@ router = APIRouter()
 log = logging.getLogger('uvicorn.error')
 LOCK_ID = 3977752867393
 INTERVAL = 1800
-SCAN_VERSION = 'allocation-rules-v1'
+SCAN_VERSION = 'tax-ledger-routing-v2'
 RESERVE = 150
 POLICY = json.loads(Path(__file__).with_name('tax_policy.json').read_text())
 STATUS = {'state': 'starting', 'read_only': True, 'booking_writes': False,
@@ -103,7 +103,7 @@ async def metadata(api):
 
 def selection(account_id, cursor):
     terms = [f"Account eq guid'{transport.guid(account_id)}'"]
-    for value in ('BELASTINGDIENST', 'Belastingdienst', 'belastingdienst', tax.RSIN[:8], tax.RSIN[2:8]):
+    for value in ('BELASTINGDIENST', 'Belastingdienst', 'belastingdienst', tax.RSIN[:8], tax.RSIN[2:8], *sorted(tax.TAX_IBANS)):
         terms.append(f"substringof('{value}',Description)")
     where = '(' + ' or '.join(terms) + ')'
     if cursor:
@@ -150,6 +150,9 @@ async def cycle(app):
                 STATUS['state'] = 'waiting_for_api_budget'
                 return
             api = TaxAPI(allocation.RoutingApp(app))
+            if scan_version != SCAN_VERSION:
+                # Preserve full-rescan intent even if the first attempt fails.
+                conn.execute('UPDATE jnp_tax_control SET cursor_at=NULL')
             # Persist cadence before calls, including failed reads/restarts.
             conn.execute('UPDATE jnp_tax_control SET next_scan=%s,scan_version=%s',
                          (now + timedelta(seconds=INTERVAL), SCAN_VERSION))
@@ -164,7 +167,9 @@ async def cycle(app):
                     for k, v in candidates.items()}))
             ACCOUNT_CACHE = saved['accounts']
             STATUS['read_stage'] = 'bank_lines'
-            banks = await api.rows('financialtransaction/BankEntryLines', selection(saved['tax_account_id'], cursor))
+            # Reclassify historical misallocations when recognition changes.
+            banks = await api.rows('financialtransaction/BankEntryLines', selection(
+                saved['tax_account_id'], cursor if scan_version == SCAN_VERSION else None))
             counts = Counter()
             observations = []
             history = Counter()
@@ -174,6 +179,9 @@ async def cycle(app):
                 if decision is None:
                     continue
                 decision['existing_gl_account_code'] = str(bank.get('GLAccountCode') or '').strip()
+                decision['existing_account_code'] = str(bank.get('AccountCode') or '').strip()
+                decision['allocation_mismatch'] = bool(decision.get('gl_account_code')
+                    and decision['existing_gl_account_code'] != decision['gl_account_code'])
                 counts[decision['status']] += 1
                 if decision.get('tax_bucket'):
                     history[(decision['tax_bucket'], decision['existing_gl_account_code'])] += 1
@@ -193,7 +201,8 @@ async def cycle(app):
                 summary = {'state': 'ready', 'last_scan': now.isoformat(), 'scanned_in_last_batch': len(banks),
                     'tax_lines_in_last_batch': len(observations), 'classifications': dict(counts),
                     'read_only': True, 'booking_writes': False, 'existing_bank_update_supported': False,
-                    'account_mapping_complete': all(POLICY['gl_accounts'].values())}
+                    'account_mapping_complete': all(POLICY['gl_accounts'].values()),
+                    'allocation_mismatches': conn.execute("SELECT COUNT(*) FROM jnp_tax_observations WHERE decision->>'allocation_mismatch' = 'true'").fetchone()[0]}
                 conn.execute('UPDATE jnp_tax_control SET cursor_at=%s,summary=%s::jsonb', (now, json.dumps(summary)))
             STATUS.update(summary)
             log.info('tax_agent scan_complete %s', json.dumps({'read_only': True, 'counts': dict(counts),

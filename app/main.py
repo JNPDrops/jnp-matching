@@ -73,7 +73,7 @@ async def lifespan(_app):
             await fibonetics_report_task
 
 
-app = FastAPI(title="JNP Matching", version="1.10.0", lifespan=lifespan)
+app = FastAPI(title="JNP Matching", version="1.11.0", lifespan=lifespan)
 from operations.allocation_maintenance import router as maintenance_router
 app.include_router(maintenance_router)
 from operations.woo_iban_rules import router as woo_iban_router
@@ -256,7 +256,8 @@ async def exact_beta_post(path: str, payload: dict[str, Any]) -> Any:
 
 
 def extract_order_number(description: str | None) -> str | None:
-    if not description:
+    from operations.tax_reference import tax_hint
+    if not description or tax_hint({'Description': description}):
         return None
     explicit = re.search(r"(?i)(?:order\s*(?:td\s*)?#?|\btd\s*#?|#)\s*(\d{4,10})\b", description)
     if explicit:
@@ -779,12 +780,18 @@ async def candidate_detail(bank_line_id: str) -> dict[str, Any]:
     description = str(bank.get("Description") or "")
     order_no = extract_order_number(description)
     bank_amount = money(bank.get("AmountDC"))
+    from operations.tax_agent import candidate as tax_candidate
+    tax_decision = tax_candidate(bank)
+    if tax_decision:
+        order_no = None
     recs = await find_receivable(order_no) if order_no else []
 
     status = "REVIEW_NO_ORDER"
     reason = "Geen ordernummer herkend in de bankomschrijving."
     rec = None
-    if bank_amount <= Decimal("0.00"):
+    if tax_decision:
+        status, reason = tax_decision['status'], tax_decision['reason']
+    elif bank_amount <= Decimal("0.00"):
         status = "SKIP_NOT_RECEIPT"
         reason = "Geen positieve bankontvangst; valt buiten deze eerste verkoopflow."
     elif order_no:
@@ -849,6 +856,11 @@ async def classify_direct_woo_bank(bank: dict[str, Any]) -> dict[str, Any]:
         "account_code": None,
         "account_name": None,
     }
+
+    from operations.tax_agent import candidate as tax_candidate
+    if tax_candidate(bank) is not None:
+        base.update(payment_method='TAX', confidence='REVIEW', reason='Belastingdienst valt buiten webshopmatching.')
+        return base
 
     if amount <= Decimal("0.00"):
         base["reason"] = "Geen positieve bankontvangst."
@@ -1104,6 +1116,9 @@ async def run_allocated_dry_run(limit: int = 100) -> list[dict[str, Any]]:
 
 async def build_direct_match_plan(bank_line_id: str) -> dict[str, Any]:
     bank = await bank_line_by_id(bank_line_id)
+    from operations.tax_agent import candidate as tax_candidate
+    if tax_candidate(bank) is not None:
+        raise HTTPException(409, 'Belastingbetaling mag niet aan een webshopfactuur worden afgeletterd.')
     if str(bank.get("AccountCode") or "").strip() != COLLECTIVE_DEBTOR_CODE:
         raise HTTPException(409, "Bankregel is niet aan de verzameldebiteur toegewezen; directe match is geblokkeerd.")
     order_no = extract_order_number(bank.get("Description"))
@@ -1209,7 +1224,7 @@ async def health():
     from operations.tax_agent import STATUS as TAX_STATUS
     from operations.tax_allocation import STATUS as TAX_RULE_STATUS
     from operations.allocation_maintenance import STATUS as MAINTENANCE_STATUS
-    return {"ok": True, "division": DIVISION, "version": "1.10.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
+    return {"ok": True, "division": DIVISION, "version": "1.11.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
             "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES, "debtor_routing": dict(STATUS),
             "tax_recognition": dict(TAX_STATUS), "tax_allocation_rules": dict(TAX_RULE_STATUS),
             "allocation_maintenance": dict(MAINTENANCE_STATUS)}

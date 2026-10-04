@@ -57,6 +57,8 @@ async def lifespan(_app):
     paragon_login_probe_task = asyncio.create_task(run_paragon_login_probe())
     from operations.exact_login_probe import run as run_exact_login_probe
     exact_login_probe_task = asyncio.create_task(run_exact_login_probe())
+    from operations.icepay_journal_task import run as run_icepay_journal_task
+    icepay_journal_task = asyncio.create_task(run_icepay_journal_task(app_module))
     try:
         yield
     finally:
@@ -67,6 +69,7 @@ async def lifespan(_app):
         fibonetics_report_task.cancel()
         paragon_login_probe_task.cancel()
         exact_login_probe_task.cancel()
+        icepay_journal_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
         with suppress(asyncio.CancelledError):
@@ -81,6 +84,8 @@ async def lifespan(_app):
             await paragon_login_probe_task
         with suppress(asyncio.CancelledError):
             await exact_login_probe_task
+        with suppress(asyncio.CancelledError):
+            await icepay_journal_task
 
 
 app = FastAPI(title="JNP Matching", version="1.13.9", lifespan=lifespan)

@@ -879,6 +879,10 @@ def decode(stdout):
 
 
 async def run():
+    if os.environ.get(ACTIVATION) in {'icepay-booking-20261001-03-import-v1','icepay-booking-20261001-03-reconcile-v1'}:
+        from operations.icepay_apply import run as apply_booking
+        await apply_booking()
+        return
     if os.environ.get(ACTIVATION)=='icepay-booking-20261001-03-prepare-v2':
         from operations.icepay_booking import run as prepare_booking
         await prepare_booking()

@@ -389,7 +389,14 @@ async def settle_paid_invoice(frame):
     if len(targets)!=1 or not re.fullmatch(r'List_row_\d+',targets[0]['id']):
         raise HTTPException(409,'settlement_invoice_not_unique')
     row=frame.locator('#'+targets[0]['id'])
-    await row.locator('input[type="checkbox"]').check()
+    checkbox=row.locator('input[type="checkbox"]')
+    if not await checkbox.is_enabled():
+        raise HTTPException(409,'settlement_invoice_disabled')
+    # Exact's modal intercepts pointer clicks; invoke the verified native
+    # checkbox's normal click handler, without overriding disabled controls.
+    await checkbox.evaluate('(el)=>{if(el.disabled)throw new Error("disabled");el.click()}')
+    if not await checkbox.is_checked():
+        raise HTTPException(409,'settlement_invoice_not_selected')
     await row.locator('input[type="text"]').fill('90,99')
     await row.locator('input[type="text"]').press('Tab')
     await row.locator('select').select_option('3')

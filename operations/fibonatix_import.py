@@ -34,7 +34,7 @@ EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 LOCK = 397775226
 router = APIRouter(prefix='/ops/fibonatix-20261002')
 TASKS = set()
-ARTIFACTS = {'ledger_before', 'ledger_after', 'receivables_before', 'receivables_after', 'ui', 'xml_response', 'automatic_before', 'automatic_after'}
+ARTIFACTS = {'ledger_before', 'ledger_after', 'receivables_before', 'receivables_after', 'ui', 'xml_response', 'automatic_before', 'automatic_after', 'match_ui'}
 
 
 def application():
@@ -308,7 +308,7 @@ async def ui_snapshot(page):
         return {title:document.title,text:document.body.innerText.slice(0,500000),
           controls:Array.from(document.querySelectorAll('input,select,button,a')).filter(e=>visible(e)||(e.tagName==='INPUT'&&business(e))).slice(0,300).map(e=>({
             tag:e.tagName,id:e.id,name:e.name||'',type:e.type||'',text:(e.innerText||e.getAttribute('aria-label')||'').slice(0,180),
-            value:(e.tagName==='SELECT'||(e.tagName==='INPUT'&&business(e)))?e.value:undefined,
+            value:(e.tagName==='SELECT'||(e.tagName==='INPUT'&&(business(e)||e.type==='checkbox'||(visible(e)&&e.type==='text'))))?e.value:undefined,
             checked:e.type==='checkbox'?e.checked:undefined,
             options:e.tagName==='SELECT'?Array.from(e.options).map(o=>({value:o.value,text:o.text})).slice(0,100):undefined})),
           rows:Array.from(document.querySelectorAll('tr')).filter(visible).slice(0,10000).map(e=>({id:e.id,text:e.innerText.slice(0,5000),content:e.textContent.slice(0,5000),
@@ -355,7 +355,7 @@ def verify_statements(snapshot, rows):
     return {'verified_ids':found,'complete':len(found)==845}
 
 
-async def browser_snapshot(automatic=False,all_statements=False):
+async def browser_snapshot(automatic=False,all_statements=False,inspect_match=False):
     if automatic and not state().get('reconciliation',{}).get('complete'):
         raise HTTPException(409,'ledger_not_verified')
     from operations.exact_browser import Credentials, authenticate, protect_requests, trusted, PASSWORD, USERNAME, visible
@@ -410,6 +410,25 @@ async def browser_snapshot(automatic=False,all_statements=False):
             snapshot=await ui_snapshot(page)
             artifact('ui',snapshot)
             update(phase='statement_inspected')
+            if inspect_match:
+                verify_statements(snapshot,parse_batch(payload()))
+                # Open the observed Match link for the first proven wrong
+                # same-amount match. Opening this screen is read-only.
+                stage='open_match'; update(browser_stage=stage)
+                link=page.locator('xpath=//tr[count(td)=6 and contains(td[1],"Y20Tnqtb")]/preceding-sibling::tr[1]//a[@id="LinkMatch"]')
+                if await link.count()!=1:
+                    raise HTTPException(409,'target_match_link_not_unique')
+                await link.click()
+                await asyncio.sleep(3)
+                screens=[]
+                for current in context.pages:
+                    with suppress(Exception):
+                        await current.wait_for_load_state('networkidle',timeout=10000)
+                    for frame in current.frames:
+                        if trusted(frame.url) and urlsplit(frame.url).path.startswith('/docs/'):
+                            screens.append({'url':frame.url,'snapshot':await ui_snapshot(frame)})
+                artifact('match_ui',screens)
+                update(phase='match_screen_inspected')
             if automatic:
                 verified=verify_statements(snapshot,parse_batch(payload()))
                 artifact('automatic_before',snapshot)
@@ -451,7 +470,8 @@ async def run(action):
         update(running=True, action=action, last_error=None)
         operations={'preflight':preflight,'import':import_xml,'reconcile':reconcile,'inspect':browser_snapshot,
                     'automatic':lambda:browser_snapshot(automatic=True),
-                    'inspect_all':lambda:browser_snapshot(all_statements=True)}
+                    'inspect_all':lambda:browser_snapshot(all_statements=True),
+                    'inspect_match':lambda:browser_snapshot(inspect_match=True)}
         await operations[action]()
     except asyncio.CancelledError:
         update(phase='interrupted_reconcile_before_write',last_error='worker_cancelled')
@@ -511,7 +531,7 @@ async def get_artifact(name:str,request:Request):
 @router.post('/{action}')
 async def start(action:str,request:Request):
     authorize(request)
-    if action not in {'preflight','import','reconcile','inspect','inspect_all','automatic'}:
+    if action not in {'preflight','import','reconcile','inspect','inspect_all','inspect_match','automatic'}:
         raise HTTPException(404,'Not found')
     state()
     if any(not task.done() for task in TASKS):

@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v10'
+JOB = 'icepay-transactions-20261001-03-v11'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
@@ -180,6 +180,22 @@ async def table_snapshot(page):
     if total is None or total>5000 or (total and not headers):
         raise AcquisitionStopped('table_not_verified')
     return {'headers':headers,'rows':rows,'total':total,'next':next_enabled}
+
+
+async def table_evidence(page):
+    """Private bounded visible row evidence; only headers/counts reach logs."""
+    await b.guard_page(page)
+    return await page.evaluate(r'''() => {
+      const visible=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
+      const text=e=>(e.innerText||'').replace(/\s+/g,' ').trim().slice(0,500);
+      return Array.from(document.querySelectorAll('table,[role="table"]')).filter(visible).slice(0,5).map(table=>({
+        headers:Array.from(table.querySelectorAll('thead th,[role="columnheader"]')).map(text).slice(0,40),
+        rows:Array.from(table.querySelectorAll('tbody tr,[role="row"]')).filter(visible).slice(0,100).map(row=>({
+          id:(row.querySelector('input[type="checkbox"]')?.getAttribute('aria-label')||'').slice(0,100),
+          cells:Array.from(row.querySelectorAll('td,[role="cell"]')).map(text).slice(0,40)
+        }))
+      }));
+    }''')
 
 
 async def payment_checkbox_ids(page):
@@ -646,17 +662,26 @@ async def worker(resume):
                     raise AcquisitionStopped('count_mismatch')
                 artifacts['proof'] = {'period':RANGE,'ui_payment_count':len(identifiers),
                                       'ui_payment_ids':identifiers}
+                artifacts['table_evidence'] = {'payments':await table_evidence(page)}
                 stage = 'payments_export'
-                content = await legacy_payment_export(page,downloads,identifiers,artifacts)
-                artifacts['payments_csv'] = base64.b64encode(content).decode()
+                export_error = None
+                try:
+                    content = await resume_payment_export(page,downloads,identifiers,artifacts)
+                    artifacts['payments_csv'] = base64.b64encode(content).decode()
+                except AcquisitionStopped as error:
+                    export_error = error
                 stage = 'refunds'
                 artifacts['refunds'] = await read_refunds(page)
+                if export_error:
+                    stage = 'payments_export'
+                    raise export_error
                 result = status('downloaded','complete',account_verified=True)
             except Exception as error:
                 if not isinstance(error,(AcquisitionStopped,b.Stopped)):
                     artifacts['failure'] = failure_location(error)
                 if verified:
                     try:
+                        artifacts.setdefault('table_evidence',{})[stage] = await table_evidence(page)
                         key = 'refunds_filters' if stage=='refunds' else 'payments_filters'
                         artifacts['form_metadata'] = {key:{'path':urlsplit(page.url).path,
                             'controls':await b.inspect_controls(page)}}
@@ -724,10 +749,28 @@ def decode(stdout):
     result = status(**{k:v for k,v in raw['status'].items() if k!='financial_writes'})
     artifacts = raw['artifacts']
     if not isinstance(artifacts,dict) or set(artifacts)-{'login','proof','payments_csv','refunds','form_metadata','failure',
-                                                      'candidate_csvs','source_export_csv','export_state','export_notices','download_controls'}:
+                                                      'candidate_csvs','source_export_csv','export_state','export_notices','download_controls','table_evidence'}:
         raise AcquisitionStopped('invalid_worker_output')
     if 'form_metadata' in artifacts:
         validate_forms(artifacts['form_metadata'])
+    if 'table_evidence' in artifacts:
+        evidence = artifacts['table_evidence']
+        if (not isinstance(evidence,dict) or set(evidence)-{'payments','payments_export','refunds'}
+            or len(json.dumps(evidence))>500000):
+            raise AcquisitionStopped('invalid_worker_output')
+        for tables in evidence.values():
+            if not isinstance(tables,list) or len(tables)>5:
+                raise AcquisitionStopped('invalid_worker_output')
+            for table in tables:
+                if (set(table)!={'headers','rows'} or not isinstance(table['headers'],list)
+                    or len(table['headers'])>40 or any(not isinstance(v,str) or len(v)>500 for v in table['headers'])
+                    or not isinstance(table['rows'],list) or len(table['rows'])>100):
+                    raise AcquisitionStopped('invalid_worker_output')
+                for row in table['rows']:
+                    if (set(row)!={'id','cells'} or not isinstance(row['id'],str) or len(row['id'])>100
+                        or not isinstance(row['cells'],list) or len(row['cells'])>40
+                        or any(not isinstance(v,str) or len(v)>500 for v in row['cells'])):
+                        raise AcquisitionStopped('invalid_worker_output')
     if artifacts.get('export_state','not_started') not in {'not_started','submit_attempted','submitted','legacy_opened'}:
         raise AcquisitionStopped('invalid_worker_output')
     if 'export_notices' in artifacts:
@@ -810,6 +853,16 @@ async def run():
                 summary['candidate_exports'].append(report)
         if 'failure' in artifacts:
             summary['failure'] = artifacts['failure']
+        if 'table_evidence' in artifacts:
+            summary['tables'] = {name:[{'headers':table['headers'],'rows':len(table['rows']),
+                'row_widths':sorted(set(len(row['cells']) for row in table['rows']))} for table in tables]
+                for name,tables in artifacts['table_evidence'].items()}
+        refunds = artifacts.get('refunds')
+        if refunds is not None:
+            if refunds.get('period')!=RANGE or len(refunds.get('rows',[]))!=refunds.get('total'):
+                raise AcquisitionStopped('invalid_worker_output')
+            summary['refund_rows'] = refunds['total']
+            summary['refund_columns'] = [re.sub(r'[^\w .()/\-]','',s)[:100] for s in refunds['headers']]
         if 'payments_csv' in artifacts:
             content = base64.b64decode(artifacts['payments_csv'],validate=True)
             if len(content)>MAX_BYTES:

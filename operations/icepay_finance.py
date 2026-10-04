@@ -42,8 +42,8 @@ async def worker():
                             break
                     result['views'][label]={'available':True,'tables':await table_evidence(page),
                         'controls':await b.inspect_controls(page)}
-                for identifier in ('S11930739','S11930206'):
-                    await open_account_page(page,'Statements')
+                for identifier in ('S11930739','S11930206','T11930206'):
+                    await open_account_page(page,'Transfers' if identifier.startswith('T') else 'Statements')
                     await page.wait_for_load_state('networkidle',timeout=20000)
                     targets=await b.visible(page.get_by_text(identifier,exact=True))
                     if len(targets)!=1:
@@ -84,12 +84,12 @@ def summarize(result):
         summary['failure']=result['failure']
     summary['details']={}
     for identifier,detail in result.get('details',{}).items():
-        if identifier not in {'S11930739','S11930206'}:
+        if identifier not in {'S11930739','S11930206','T11930206'}:
             raise ValueError('unexpected_statement')
         lines=[s.strip() for s in detail.get('text','').splitlines() if s.strip()]
         financial=[]
         for i,line in enumerate(lines):
-            if re.search(r'total|transfer|invoice|holdback|period|balance|turnover|refund|cost|statement|date',line,re.I) and len(line)<180:
+            if re.search(r'total|transfer|invoice|holdback|period|balance|turnover|refund|cost|statement|date|status|operation|created|updated|completed',line,re.I) and len(line)<180:
                 clean=re.sub(r'\b[A-Z]{2}\d{2}[A-Z0-9 ]{10,34}\b','[bank account]',line)
                 if not re.search(r'password|secret|token|@|https?://',clean,re.I):
                     financial.append(clean)

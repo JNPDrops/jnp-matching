@@ -96,6 +96,16 @@ def difference_total(lines, order):
                 and r.get('YourRef') == order), Decimal('0'))
 
 
+def verify_difference_change(before, after, order, amount, *, reverse=False):
+    def total(rows):
+        return sum((money(r['AmountDC']) for r in rows if str(r.get('GLAccountCode') or '').strip() == '9920'), Decimal(0))
+    expected = money(amount) if reverse else -money(amount)
+    if total(after) - total(before) != expected:
+        fail('difference_general_ledger_delta_not_verified')
+    if difference_total(after, order) != (Decimal(0) if reverse else -money(amount)):
+        fail('difference_order_ledger_delta_not_verified')
+
+
 async def prepare():
     legacy.update(phase='strict_reading_ledger')
     existing = load(PLAN)
@@ -312,6 +322,9 @@ async def process(mode, limit):
                         fail('undo_outcome_unresolved_no_retry')
                     if old_match['writeoff'] == '3' and difference_total(before, old_match['cells'][4]) != 0:
                         fail('difference_reversal_unresolved_no_retry')
+                    if old_match['writeoff'] == '3':
+                        verify_difference_change(previous['ledger'], before, old_match['cells'][4],
+                            money(receipt['amount']) - euro(old_match['cells'][6]), reverse=True)
                     receipt['state'] = 'unmatched_verified'
                 else:
                     invoice = receipt['invoice']
@@ -320,6 +333,9 @@ async def process(mode, limit):
                     difference = money(receipt['amount']) - money(invoice['AmountDC'])
                     if difference and difference_total(before, receipt['source_order']) != -difference:
                         fail('source_difference_outcome_unresolved_no_retry')
+                    if difference:
+                        prior = [e for e in receipt['evidence'] if e['phase'] in {'match', 'correct'}][-1]
+                        verify_difference_change(prior['ledger'], before, receipt['source_order'], difference)
                     if receipt['state'] == 'correct_requested':
                         previous = [e for e in receipt['evidence'] if e['phase'] == 'correct'][-1]
                         old_match = verify_wrong_selection(receipt, previous['rows'])
@@ -351,6 +367,8 @@ async def process(mode, limit):
                     fail('undo_api_readback_not_verified')
                 if row['writeoff'] == '3' and difference_total(actual, row['cells'][4]) != 0:
                     fail('difference_reversal_not_verified')
+                if row['writeoff'] == '3':
+                    verify_difference_change(before, actual, row['cells'][4], money(receipt['amount']) - euro(row['cells'][6]), reverse=True)
                 receipt['state'] = 'unmatched_verified'
                 receipt['attempts'][-1]['outcome'] = 'verified'
                 receipt['evidence'].append(dict(at=now(), phase='undo_readback', rows=after, ledger=actual))
@@ -400,6 +418,8 @@ async def process(mode, limit):
                     verify_source(receipt, actual)
                     if difference and difference_total(actual, receipt['source_order']) != -difference:
                         fail('source_difference_readback_not_verified')
+                    if difference:
+                        verify_difference_change(before, actual, receipt['source_order'], difference)
                     if len(selected) != 1 or selected[0]['cells'][4] != receipt['source_order'] or selected[0]['cells'][2] != str(invoice['EntryNumber']) or not selected[0]['matchId']:
                         fail('strict_match_not_verified')
                     opened = await legacy.receivables()

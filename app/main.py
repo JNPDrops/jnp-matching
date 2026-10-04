@@ -60,6 +60,8 @@ async def lifespan(_app):
     try:
         yield
     finally:
+        from operations.fibonatix_import import shutdown as shutdown_fibonatix
+        await shutdown_fibonatix()
         task.cancel()
         iban_task.cancel()
         tax_task.cancel()
@@ -83,7 +85,9 @@ async def lifespan(_app):
             await exact_login_probe_task
 
 
-app = FastAPI(title="JNP Matching", version="1.13.9", lifespan=lifespan)
+app = FastAPI(title="JNP Matching", version="1.14.0", lifespan=lifespan)
+from operations.fibonatix_import import router as fibonatix_import_router
+app.include_router(fibonatix_import_router)
 from operations.allocation_maintenance import router as maintenance_router
 app.include_router(maintenance_router)
 from operations.woo_iban_rules import router as woo_iban_router

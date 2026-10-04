@@ -30,7 +30,7 @@ en kolomnamen. Fouten kunnen begrensde formuliermetadata tonen onder
 ## Eenmalig activeren
 
 - Gebruik de bestaande ICEPAY_WEB_USERNAME/PASSWORD en optionele TOTP-configuratie.
-- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v9`.
+- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v10`.
 - Render env-merge (`replace=false`) start zelf één deployment. Auto-deploy blijft uit.
 - De taak vervalt op 5 oktober 18:00 UTC en claimt vóór browserstart één poging.
 - Bestaande claims blijven intact; een herstart herhaalt geen export.
@@ -95,6 +95,10 @@ eerdere export met 114 andere IDs. V9 gebruikt eenmaal de al geobserveerde
 Het moderne exportpad wordt niet herhaald. Als legacy eerst een configuratievenster
 opent, stopt de taak met de zichtbare formuliermetadata; er wordt niet blind op
 een onbekende verzendknop gedrukt. Alle bestaande broncontroles blijven gelden.
+
+V9 opende de legacy-bevestiging met alleen Close, Export (submit) en Cancel;
+er waren geen extra invoervelden. V10 bevestigt deze geobserveerde Export-knop
+eenmaal en wacht op de download. De 38 onafhankelijke IDs blijven verplicht.
 
 `downloaded` betekent dat de bronbestanden zijn opgehaald. Het betekent nog niet
 dat de Exact-import gereed is. De refunds moeten inhoudelijk worden gemapt;

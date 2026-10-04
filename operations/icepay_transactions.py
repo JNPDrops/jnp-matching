@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v9'
+JOB = 'icepay-transactions-20261001-03-v10'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
@@ -476,8 +476,13 @@ async def legacy_payment_export(page, downloads, expected_ids, artifacts):
     artifacts['export_state'] = 'submit_attempted'
     await legacy.click()
     artifacts['export_state'] = 'legacy_opened'
+    confirmation = page.get_by_role('button',name='Export',exact=True)
+    await confirmation.wait_for(state='visible',timeout=15000)
+    artifacts['export_state'] = 'submit_attempted'
+    await b.click_unique_read_control(page,re.compile(r'^Export$'))
+    artifacts['export_state'] = 'submitted'
     try:
-        download = await asyncio.wait_for(downloads.get(),timeout=35)
+        download = await asyncio.wait_for(downloads.get(),timeout=60)
     except asyncio.TimeoutError:
         # A legacy configuration dialog, if any, is retained as form metadata.
         raise AcquisitionStopped('export_not_completed') from None

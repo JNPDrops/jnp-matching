@@ -1,7 +1,7 @@
 import unittest
 from copy import deepcopy
 from fastapi import HTTPException
-from operations.strict_order_matching import own_invoice, source_receipts, verify_wrong_selection, verify_source
+from operations.strict_order_matching import own_invoice, source_receipts, verify_wrong_selection, verify_source, approved_difference, difference_total
 
 
 class StrictMatchingTests(unittest.TestCase):
@@ -62,6 +62,21 @@ class StrictMatchingTests(unittest.TestCase):
         for lines in [[bank], [bank, offset, {**offset, 'ID':'duplicate'}], [bank, bank, offset]]:
             with self.assertRaises(HTTPException):
                 source_receipts(lines, 'customer')
+
+    def test_difference_approval_cannot_transfer_to_another_order(self):
+        decision = dict(order='TD100', invoice=1001, payment_difference='3.00', scope='this_case_only', actor='operator', approved_at='recorded')
+        self.assertTrue(approved_difference('TD100', 1001, 25, 22, decision))
+        for order, invoice, paid, due in [('TD200',1001,25,22), ('TD100',1002,25,22), ('TD100',1001,25,21)]:
+            self.assertFalse(approved_difference(order, invoice, paid, due, decision))
+        self.assertFalse(approved_difference('TD100', 1001, 25, 22, None))
+        self.assertFalse(approved_difference('TD100', 1001, 25, 22, {**decision, 'scope':'all_cases'}))
+
+    def test_difference_reversal_is_scoped_to_the_approved_order(self):
+        lines = [dict(GLAccountCode='9920', YourRef='TD100', AmountDC=-3),
+                 dict(GLAccountCode='9920', YourRef='TD200', AmountDC=-.01)]
+        self.assertEqual(difference_total(lines, 'TD100'), -3)
+        lines.append(dict(GLAccountCode='9920', YourRef='TD100', AmountDC=3))
+        self.assertEqual(difference_total(lines, 'TD100'), 0)
 
 
 if __name__ == '__main__':

@@ -62,7 +62,7 @@ def account_page(url):
 
 
 def safe_result(status, stage, *, reason='none', password_submitted=False,
-                totp_submitted=False, account_verified=False, missing=(), pages=()):
+                totp_submitted=False, account_verified=False, missing=(), pages=(), diagnostics=None):
     if status not in STATUSES or stage not in STAGES or reason not in REASONS:
         raise ValueError('invalid_result')
     return dict(status=status, stage=stage, reason=reason, fresh_session=True,
@@ -72,12 +72,22 @@ def safe_result(status, stage, *, reason='none', password_submitted=False,
                 account=ACCOUNT, merchant=MERCHANT, financial_writes=False,
                 transactions_downloaded=False,
                 missing=[k for k in missing if k in ENV_NAMES],
-                pages=sorted({p for p in pages if p in {'payments', 'refunds', 'statements'}}))
+                pages=sorted({p for p in pages if p in {'payments', 'refunds', 'statements'}}),
+                diagnostics=clean_diagnostics(diagnostics))
+
+
+def clean_diagnostics(raw):
+    raw = raw if isinstance(raw, dict) else {}
+    allowed = {'trusted_origin', 'account_path', 'company_present',
+               'login_fields_visible', 'payments_links', 'statements_links'}
+    return {k:v for k,v in raw.items() if k in allowed and
+            (type(v) is bool if k not in {'payments_links', 'statements_links'}
+             else type(v) is int and 0 <= v <= 20)}
 
 
 def validate_result(raw):
     allowed = {'status', 'stage', 'reason', 'password_submitted', 'totp_submitted',
-               'account_verified', 'missing', 'pages'}
+               'account_verified', 'missing', 'pages', 'diagnostics'}
     return safe_result(**{k: v for k, v in raw.items() if k in allowed})
 
 
@@ -158,13 +168,53 @@ async def verify_account(page):
     if not COMPANY.search(body):
         raise Stopped('wrong_account')
     for label in ('Payments', 'Statements'):
-        links = await visible(page.get_by_role('link', name=label, exact=True))
-        if len(links) != 1:
-            return False
-        href = await links[0].get_attribute('href')
-        if not href or not account_page(urljoin(page.url, href)):
+        if await unique_account_link(page, label) is None:
             return False
     return True
+
+
+async def unique_account_link(page, label):
+    """Sidebar and breadcrumb may repeat a link, but must agree on one target."""
+    links = await visible(page.get_by_role('link', name=label, exact=True))
+    targets = set()
+    for link in links:
+        href = await link.get_attribute('href')
+        target = urljoin(page.url, href or '')
+        if not href or not account_page(target):
+            return None
+        targets.add(target)
+    return links[0] if links and len(targets) == 1 else None
+
+
+async def wait_verified_account(page, *, timeout=12, clock=time.monotonic, pause=asyncio.sleep):
+    deadline = clock() + timeout
+    while clock() < deadline:
+        try:
+            await guard_page(page)
+            if await verify_account(page):
+                return
+        except Stopped:
+            raise
+        except Exception as error:
+            if not transient_read(error):
+                raise
+        await pause(.4)
+    raise Stopped('login_not_verified')
+
+
+async def account_diagnostics(page):
+    """Fixed predicates/counts only; never return URLs, body text or values."""
+    result = {'trusted_origin':trusted(page.url), 'account_path':account_page(page.url)}
+    if not result['trusted_origin']:
+        return result
+    try:
+        result['company_present'] = bool(COMPANY.search(await page.locator('body').inner_text(timeout=2000)))
+        result['login_fields_visible'] = bool(await visible(page.locator(EMAIL + ', ' + PASSWORD)))
+        for label in ('Payments', 'Statements'):
+            result[label.lower() + '_links'] = min(20,len(await visible(page.get_by_role('link',name=label,exact=True))))
+    except Exception:
+        pass
+    return clean_diagnostics(result)
 
 
 def transient_read(error):
@@ -256,9 +306,7 @@ async def protect_requests(context):
 
 async def inspect_controls(page):
     """Only static form metadata. No input values, rows, HTML, cookies or tokens."""
-    await guard_page(page)
-    if not await verify_account(page):
-        raise Stopped('login_not_verified')
+    await wait_verified_account(page)
     return await page.evaluate('''() => {
       const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
       const safe = x => String(x || '').replace(/\\s+/g,' ').trim().slice(0,160);
@@ -274,24 +322,24 @@ async def inspect_controls(page):
         })); }''')
 
 
-async def inspect_export_pages(page):
+async def inspect_export_pages(page, result=None, progress=None):
     """Navigate only observed account links; do not submit any export yet."""
-    result = {}
+    result = {} if result is None else result
     for label in ('Payments', 'Refunds', 'Statements'):
-        await guard_page(page)
-        if not await verify_account(page):
-            raise Stopped('login_not_verified')
-        links = await visible(page.get_by_role('link', name=label, exact=True))
-        if len(links) != 1:
+        if progress is not None:
+            progress['stage'] = label.lower()
+        await wait_verified_account(page)
+        link = await unique_account_link(page, label)
+        if link is None:
             raise Stopped('unsupported_form')
-        href = await links[0].get_attribute('href')
+        href = await link.get_attribute('href')
         url = urljoin(page.url, href or '')
         if not href or not account_page(url):
             raise Stopped('unexpected_origin')
-        await links[0].click()
-        await page.wait_for_load_state('domcontentloaded')
+        await link.click()
         # The portal can update through AJAX; wait for the observed target path.
         await page.wait_for_url(lambda current: urlsplit(str(current)).path == urlsplit(url).path, timeout=15000)
+        await page.wait_for_load_state('domcontentloaded')
         result[label.lower()] = {'path': urlsplit(page.url).path,
                                  'controls': await inspect_controls(page)}
     return result
@@ -299,6 +347,7 @@ async def inspect_export_pages(page):
 
 async def worker():
     stage = 'configuration'
+    forms, flags, progress, diagnostics = {}, {}, {}, {}
     try:
         credentials = Credentials.from_env(os.environ)
         from playwright.async_api import async_playwright
@@ -315,16 +364,22 @@ async def worker():
                 login = await authenticate(page, credentials)
                 if not login['account_verified']:
                     return {'result': login, 'forms': {}}
+                flags = {k:login[k] for k in ('password_submitted','totp_submitted','account_verified')}
                 stage = 'payments'
-                forms = await inspect_export_pages(page)
+                try:
+                    await inspect_export_pages(page, forms, progress)
+                except Exception:
+                    diagnostics = await account_diagnostics(page)
+                    raise
                 return {'result': safe_result('passed', 'complete',
-                         password_submitted=login['password_submitted'],
-                         totp_submitted=login['totp_submitted'], account_verified=True,
+                         **flags,
                          pages=forms), 'forms': forms}
             finally:
                 await browser.close()
     except Stopped as exc:
-        return {'result':safe_result('blocked',stage,reason=exc.args[0],
-                missing=[n for n in REQUIRED if not os.environ.get(n)]),'forms':{}}
+        return {'result':safe_result('blocked',progress.get('stage',stage),reason=exc.args[0],
+                **flags, diagnostics=diagnostics, pages=forms,
+                missing=[n for n in REQUIRED if not os.environ.get(n)]),'forms':forms}
     except Exception:
-        return {'result':safe_result('failed',stage,reason='runtime_error'),'forms':{}}
+        return {'result':safe_result('failed',progress.get('stage',stage),reason='runtime_error',
+                **flags, diagnostics=diagnostics, pages=forms),'forms':forms}

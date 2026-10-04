@@ -94,8 +94,43 @@ class Configuration(unittest.TestCase):
             with self.assertRaises(ValueError):
                 p.validate_forms(metadata)
 
+    def test_diagnostics_only_allow_fixed_predicates_and_bounded_counts(self):
+        result = b.safe_result('blocked','payments',account_verified=True,
+            password_submitted=True, diagnostics={'company_present':True,
+            'payments_links':2,'statements_links':'private-value','url':'private-url',
+            'login_fields_visible':'private-password'})
+        self.assertEqual(result['diagnostics'],{'company_present':True,'payments_links':2})
+        self.assertTrue(b.validate_result(result)['account_verified'])
+        self.assertTrue(b.validate_result(result)['password_submitted'])
+
 
 class Login(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_navigation_and_breadcrumb_accept_same_target_only(self):
+        first, second = element(), element()
+        first.get_attribute.return_value = b.TARGET + '/payments'
+        second.get_attribute.return_value = b.TARGET + '/payments'
+        page = SimpleNamespace(url=b.TARGET,get_by_role=lambda *_a,**_k:collection([first,second]))
+        self.assertIs(await b.unique_account_link(page,'Payments'),first)
+        for bad in [b.TARGET+'/other','https://evil.test/',b.ORIGIN+'/merchant/88293/payments']:
+            second.get_attribute.return_value = bad
+            self.assertIsNone(await b.unique_account_link(page,'Payments'))
+
+    async def test_navigation_settles_without_resubmitting_login(self):
+        with patch.object(b,'guard_page',AsyncMock()), \
+             patch.object(b,'verify_account',AsyncMock(side_effect=[False,False,True])), \
+             patch.object(b,'submit',AsyncMock()) as submit:
+            await b.wait_verified_account(SimpleNamespace(),clock=itertools.count().__next__,pause=AsyncMock())
+            submit.assert_not_awaited()
+
+    async def test_waiting_never_ignores_account_or_human_verification_blocks(self):
+        for reason in ['wrong_account','verification_required','credentials_rejected']:
+            with patch.object(b,'guard_page',AsyncMock(side_effect=b.Stopped(reason))), \
+                 patch.object(b,'verify_account',AsyncMock()) as verify:
+                with self.assertRaises(b.Stopped) as error:
+                    await b.wait_verified_account(SimpleNamespace(),pause=AsyncMock())
+                self.assertEqual(str(error.exception),reason)
+                verify.assert_not_awaited()
+
     async def flow(self, sequence, *, totp=False, auto_otp=False, error=None, read_race=False):
         state = {'index':0}
         fields = {n:element() for n in ('email','password','totp')}

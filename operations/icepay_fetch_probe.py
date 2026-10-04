@@ -16,7 +16,7 @@ import tempfile
 from operations.icepay_browser import (
     Credentials, ENV_NAMES, REQUIRED, safe_result, validate_result, worker)
 
-PROBE_ID = 'icepay-fetch-20261001-03-v2'
+PROBE_ID = 'icepay-fetch-20261001-03-v3'
 ACTIVATION = 'ICEPAY_FETCH_PROBE_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 PERIOD = {'from': '2026-10-01', 'through': '2026-10-03', 'timezone': 'Europe/Amsterdam'}
@@ -75,6 +75,24 @@ def publish_forms(forms):
             LOG.warning('ICEPAY_FORM_METADATA %s', json.dumps({
                 'probe':PROBE_ID, 'page':name, 'path':page['path'], 'offset':start,
                 'controls':page['controls'][start:start+10]}, sort_keys=True))
+
+
+def decode_worker_output(stdout):
+    try:
+        if len(stdout) > 300000:
+            raise ValueError()
+        raw = json.loads(stdout)
+        if not isinstance(raw, dict) or set(raw) != {'result', 'forms'}:
+            raise ValueError()
+        result = validate_result(raw['result'])
+    except Exception:
+        return safe_result('failed','runtime',reason='invalid_worker_output'), {}
+    try:
+        return result, validate_forms(raw['forms'])
+    except Exception:
+        # Preserve verified login evidence even if form serialization failed.
+        result.update(status='failed', reason='invalid_form_metadata')
+        return validate_result(result), {}
 
 
 def claim(database_url):
@@ -149,11 +167,10 @@ async def run():
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True)
         stdout, _ = await asyncio.wait_for(child.communicate(), timeout=180)
-        if child.returncode == 0 and len(stdout) <= 300000:
-            raw = json.loads(stdout)
-            if set(raw) != {'result', 'forms'}:
-                raise ValueError('invalid_worker_output')
-            result, forms = validate_result(raw['result']), validate_forms(raw['forms'])
+        if child.returncode == 0:
+            result, forms = decode_worker_output(stdout)
+        else:
+            result = safe_result('failed','runtime',reason='worker_exit')
     except asyncio.CancelledError:
         raise
     except Exception:

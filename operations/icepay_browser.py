@@ -35,7 +35,8 @@ AUTH_ERROR = re.compile(r'these credentials do not match|incorrect password|inva
 REASONS = {'none', 'missing_credentials', 'invalid_configuration', 'unexpected_origin',
            'verification_required', 'credentials_rejected', 'unsupported_form',
            'repeated_step', 'timeout', 'wrong_account', 'login_not_verified',
-           'export_controls_unverified', 'runtime_error'}
+           'export_controls_unverified', 'runtime_error', 'invalid_worker_output',
+           'invalid_form_metadata', 'worker_exit'}
 STAGES = {'configuration', 'claim', 'browser_install', 'browser_launch', 'login_form',
           'password', 'totp', 'account', 'payments', 'refunds', 'statements', 'complete', 'runtime'}
 STATUSES = {'disabled', 'started', 'passed', 'blocked', 'failed', 'skipped'}
@@ -318,7 +319,7 @@ async def inspect_controls(page):
           id:clean(e.id), name:clean(e.name),
           label:clean(e.getAttribute('aria-label')||Array.from(e.labels||[]).map(x=>x.textContent).join(' ')||
             (e.tagName==='BUTTON'?e.innerText:'')),
-          options:e.tagName==='SELECT'?Array.from(e.options).slice(0,80).map(o=>({text:clean(o.text)})):undefined
+          options:e.tagName==='SELECT'?Array.from(e.options).slice(0,80).map(o=>({text:clean(o.text)})):[]
         })); }''')
 
 

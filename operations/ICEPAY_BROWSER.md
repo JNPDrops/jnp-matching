@@ -32,7 +32,7 @@ waarden in GitHub, chat, logs, screenshots of deze documentatie.
 | `ICEPAY_WEB_USERNAME` | E-mailadres waarmee deze ICEPAY-account wordt geopend |
 | `ICEPAY_WEB_PASSWORD` | Het ICEPAY-wachtwoord |
 | `ICEPAY_WEB_TOTP_SECRET` | Alleen als ICEPAY authenticator-2FA vereist: de bijbehorende TOTP-sleutel of otpauth-URI |
-| `ICEPAY_FETCH_PROBE_ID` | Niet-geheim: `icepay-fetch-20261001-03-v2` |
+| `ICEPAY_FETCH_PROBE_ID` | Niet-geheim: `icepay-fetch-20261001-03-v3` |
 
 De eerste twee velden zijn vereist. Ontbrekende gegevens worden uitsluitend
 bij naam gemeld voordat een loginpoging wordt geclaimd. De bot hergebruikt geen
@@ -73,7 +73,7 @@ of downloadroute. Voor een alleen-lezen controle:
 ```sql
 SELECT probe_id, attempted_at, result, forms
 FROM icepay_fetch_probes
-WHERE probe_id = 'icepay-fetch-20261001-03-v2';
+WHERE probe_id = 'icepay-fetch-20261001-03-v3';
 ```
 
 De v1-poging van 4 oktober 19:02 UTC kwam door de accountcontrole na login en
@@ -83,6 +83,13 @@ en gedeeltelijke resultaten, wacht op navigatiegereedheid en accepteert dubbele
 sidebar/breadcrumb-links uitsluitend als ze exact hetzelfde accountdoel hebben.
 Bij een fout worden alleen vaste accountpredicaten en linkaantallen vastgelegd.
 De v1-claim blijft intact; v2 krijgt een eigen eenmalige claim.
+
+V2 stopte in de verwerking van het workerresultaat. De metadata-extractor gaf
+voor niet-selectvelden JavaScript `undefined` terug voor `options`; bij een
+Python/JSON-overdracht kan dit `null` worden, wat de strikte validator afwijst.
+V3 gebruikt expliciet een lege lijst. De decoder onderscheidt ongeldige
+workeroutput, een mislukt proces en ongeldige formuliermetadata en bewaart de
+loginflags onafhankelijk van de formuliervalidatie. De v2-claim blijft intact.
 
 Lokale tests (synthetische gegevens, geen netwerk of echte login):
 

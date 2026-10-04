@@ -1,0 +1,288 @@
+"""Render-only Exact username/password/TOTP login; no accounting actions.
+
+Credentials, cookies, OTPs, page text and exception messages never leave this
+module. The caller receives a small, enumerated result. A fresh browser context
+is used for each job; an authenticated Page may be reused only inside that job.
+"""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+import os
+import re
+import time
+from urllib.parse import parse_qs, urlsplit
+
+from operations.paragon_login_probe import parse_totp
+
+DIVISION = "3977752"
+TARGET = "https://start.exactonline.nl/docs/MenuPortal.aspx?_Division_=" + DIVISION
+HOSTS = {"start.exactonline.nl", "login.exact.com"}
+ENV_NAMES = ("EXACT_USERNAME", "EXACT_PASSWORD", "EXACT_TOTP_SECRET")
+USERNAME = 'input[name="LoginForm$UserName"], input[autocomplete="username"], input[name="signInName"]'
+PASSWORD = 'input[type="password"]'
+OTP = 'input[autocomplete="one-time-code"], input[name="otpCode"], input[id="otpCode"], input[name="VerificationCode"], input[id="verificationCode"]'
+SUBMIT = re.compile(r"^(Continue|Sign in|Log in|Login|Next|Verify|Doorgaan|Inloggen|Aanmelden|Volgende|Verifiëren)$", re.I)
+CAPTCHA = 'iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="challenges.cloudflare"], .g-recaptcha, .h-captcha'
+BLOCK_TEXT = re.compile(r"verify you are human|checking your browser|unusual traffic|verifieer dat je een mens|controleer of je een mens", re.I)
+ERROR_TEXT = re.compile(r"incorrect password|invalid password|invalid verification code|invalid code|incorrect code|ongeldig.{0,20}(wachtwoord|code)|onjuist.{0,20}(wachtwoord|code)|something went wrong|an error occurred|er is een fout opgetreden", re.I)
+AUTH_TEXT = re.compile(r"sign in|log in|inloggen|aanmelden|verification code|verificatiecode|verificatie.code|two.step|tweestaps|authenticator", re.I)
+LOGGED_OUT = re.compile(r"you.ve been logged out|please log in to continue|u bent uitgelogd|je bent uitgelogd", re.I)
+OTP_TEXT = re.compile(r"authenticator|verification code|verificatie.code|verification.code|security code|beveiligingscode", re.I)
+
+
+class LoginStopped(Exception):
+    """Only an enumerated reason is allowed, never raw page/exception text."""
+    def __init__(self, reason):
+        super().__init__(reason if reason in REASONS else "runtime_error")
+
+
+REASONS = {"none", "missing_credentials", "invalid_configuration", "unexpected_origin",
+           "verification_required", "site_error", "unsupported_form", "repeated_step",
+           "timeout", "wrong_administration", "runtime_error"}
+STAGES = {"configuration", "browser_install", "browser_launch", "login_form", "username",
+          "password", "totp", "administration", "complete", "claim", "runtime"}
+STATUSES = {"disabled", "ready", "started", "passed", "blocked", "failed", "skipped"}
+
+
+def safe_result(status, stage, *, reason="none", username_submitted=False,
+                password_submitted=False, totp_submitted=False,
+                administration_verified=False, missing=()):
+    if status not in STATUSES or stage not in STAGES or reason not in REASONS:
+        raise ValueError("invalid_result")
+    return {"status": status, "stage": stage, "reason": reason,
+            "financial_writes": False, "fresh_session": True,
+            "username_submitted": username_submitted is True,
+            "password_submitted": password_submitted is True,
+            "totp_submitted": totp_submitted is True,
+            "administration_verified": administration_verified is True,
+            "missing": [name for name in missing if name in ENV_NAMES]}
+
+
+def trusted(url):
+    try:
+        p = urlsplit(url)
+        return p.scheme == "https" and p.hostname in HOSTS and p.port in (None, 443) and not p.username and not p.password
+    except (ValueError, TypeError):
+        return False
+
+
+def target_page(url):
+    if not trusted(url):
+        return False
+    p = urlsplit(url)
+    return (p.hostname == "start.exactonline.nl" and p.path.lower() == "/docs/menuportal.aspx"
+            and parse_qs(p.query).get("_Division_") == [DIVISION])
+
+
+@dataclass(repr=False)
+class Credentials:
+    username: str
+    password: str
+    totp: object
+
+    @classmethod
+    def from_env(cls, environ):
+        if any(not environ.get(name) for name in ENV_NAMES):
+            raise LoginStopped("missing_credentials")
+        try:
+            generator = parse_totp(environ["EXACT_TOTP_SECRET"])
+            if generator.digits != 6:
+                raise ValueError()
+            username = environ["EXACT_USERNAME"].strip()
+            if not username or len(username) > 256:
+                raise ValueError()
+            return cls(username, environ["EXACT_PASSWORD"], generator)
+        except Exception:
+            raise LoginStopped("invalid_configuration") from None
+
+
+async def visible(locator):
+    return [item for item in await locator.all() if await item.is_visible()]
+
+
+async def one_input(frame, selector):
+    fields = [field for field in await visible(frame.locator(selector)) if await field.is_enabled()]
+    if len(fields) > 1:
+        raise LoginStopped("unsupported_form")
+    return fields[0] if fields else None
+
+
+async def guard_page(page):
+    if not trusted(page.url):
+        raise LoginStopped("unexpected_origin")
+    # Inspect for blocks before filtering frames to the allowed credential hosts.
+    for frame in page.frames:
+        if await visible(frame.locator(CAPTCHA)):
+            raise LoginStopped("verification_required")
+        if trusted(frame.url):
+            text = await frame.locator("body").inner_text(timeout=2000)
+            if BLOCK_TEXT.search(text):
+                raise LoginStopped("verification_required")
+            if ERROR_TEXT.search(text):
+                raise LoginStopped("site_error")
+
+
+async def verify_administration(page):
+    """A cached menu wrapped around an expired iframe is NOT a valid login."""
+    if not target_page(page.url):
+        return False
+    company = page.locator('#Administration')
+    if await company.count() != 1 or not await company.is_visible():
+        return False
+    if "James n Parson B.V." not in await company.inner_text():
+        raise LoginStopped("wrong_administration")
+    body = await page.locator('body').inner_text()
+    if LOGGED_OUT.search(body):
+        return False
+    frames = [frame for frame in page.frames if frame.name == "MainWindow"]
+    if len(frames) != 1:
+        return False
+    main = frames[0]
+    p = urlsplit(main.url)
+    if not trusted(main.url) or p.hostname != "start.exactonline.nl" or not p.path.lower().startswith('/docs/'):
+        return False
+    if not (await main.locator('body').inner_text()).strip():
+        return False
+    for frame in page.frames:
+        if trusted(frame.url):
+            if await visible(frame.locator(USERNAME + ', ' + PASSWORD + ', ' + OTP)):
+                return False
+            text = await frame.locator('body').inner_text()
+            if LOGGED_OUT.search(text) or AUTH_TEXT.search(await frame.title()):
+                return False
+    return await page.locator('#EnhancedNavigation').is_visible()
+
+
+async def check_destination(page, frame, field):
+    if not trusted(page.url) or not trusted(frame.url):
+        raise LoginStopped("unexpected_origin")
+    # Check the form action immediately before filling. Never send credentials
+    # to an off-origin form, even if it is rendered in a trusted document.
+    action = await field.evaluate("el => el.form ? el.form.action : location.href")
+    if not trusted(action):
+        raise LoginStopped("unexpected_origin")
+
+
+async def submit(page, frame, field):
+    await check_destination(page, frame, field)
+    buttons = await visible(frame.get_by_role('button', name=SUBMIT))
+    if len(buttons) != 1 or not await buttons[0].is_enabled():
+        raise LoginStopped("unsupported_form")
+    # Overrides such as formaction must be checked as well as the parent form.
+    action = await buttons[0].evaluate("el => el.hasAttribute('formaction') ? el.formAction : (el.form ? el.form.action : location.href)")
+    if not trusted(action):
+        raise LoginStopped("unexpected_origin")
+    await buttons[0].click()
+
+
+async def authenticate(page, credentials, *, timeout=75, clock=time.monotonic, pause=asyncio.sleep):
+    stage = "login_form"
+    completed = set()
+    flags = {}
+    try:
+        await page.goto(TARGET, wait_until='domcontentloaded', timeout=30000)
+        deadline = clock() + timeout
+        last_submit = 0.0
+        while clock() < deadline:
+            await guard_page(page)
+            if await verify_administration(page):
+                return safe_result('passed', 'complete', administration_verified=True, **flags)
+            progressed = False
+            for frame in page.frames:
+                if not trusted(frame.url):
+                    continue
+                password = await one_input(frame, PASSWORD)
+                username = await one_input(frame, USERNAME)
+                otp_fields = [f for f in await visible(frame.locator(OTP)) if await f.is_enabled()]
+                if password is not None:
+                    step = 'password'
+                elif otp_fields:
+                    step = 'totp'
+                elif username is not None:
+                    step = 'username'
+                else:
+                    continue
+                if step in completed:
+                    # A DOM may remain visible briefly after clicking submit.
+                    if clock() - last_submit > 8:
+                        raise LoginStopped('repeated_step')
+                    continue
+                stage = step
+                if step == 'password':
+                    if username is not None:
+                        await check_destination(page, frame, username)
+                        await username.fill(credentials.username)
+                    await check_destination(page, frame, password)
+                    await password.fill(credentials.password)
+                    await submit(page, frame, password)
+                elif step == 'username':
+                    await check_destination(page, frame, username)
+                    await username.fill(credentials.username)
+                    await submit(page, frame, username)
+                else:
+                    text = await frame.locator('body').inner_text()
+                    if not OTP_TEXT.search(text) or len(otp_fields) not in (1, 6):
+                        raise LoginStopped('unsupported_form')
+                    remaining = credentials.totp.period - time.time() % credentials.totp.period
+                    if remaining < 6:
+                        await pause(remaining + 0.2)
+                    code = credentials.totp.code(time.time())
+                    for i, field in enumerate(otp_fields):
+                        await check_destination(page, frame, field)
+                        await field.fill(code if len(otp_fields) == 1 else code[i])
+                    # A code widget can submit itself. Do not click a new page.
+                    await pause(0.3)
+                    if await verify_administration(page):
+                        flags['totp_submitted'] = True
+                        return safe_result('passed', 'complete', administration_verified=True, **flags)
+                    if await otp_fields[-1].is_visible():
+                        await submit(page, frame, otp_fields[-1])
+                flags[step + '_submitted'] = True
+                completed.add(step)
+                last_submit = clock()
+                progressed = True
+                break
+            await pause(0.25 if progressed else 0.5)
+        return safe_result('blocked', stage, reason='timeout', **flags)
+    except LoginStopped as exc:
+        return safe_result('blocked', stage, reason=exc.args[0], **flags)
+    except Exception:
+        # Playwright errors may contain fill values, URLs, or page contents.
+        return safe_result('failed', stage, reason='runtime_error', **flags)
+
+
+async def protect_requests(context):
+    async def guard(route):
+        request = route.request
+        if (request.is_navigation_request() or request.method not in {'GET', 'HEAD', 'OPTIONS'}) and not trusted(request.url):
+            await route.abort()
+        else:
+            await route.continue_()
+    await context.route('**/*', guard)
+
+
+async def probe_worker():
+    """Only the isolated Render child process calls this. Never import a file."""
+    stage = 'configuration'
+    try:
+        credentials = Credentials.from_env(os.environ)
+        from playwright.async_api import async_playwright
+        stage = 'browser_launch'
+        async with async_playwright() as playwright:
+            # Browser children do not inherit accounting or login secrets.
+            child_env = {k: v for k, v in os.environ.items() if k in
+                         {'PATH', 'HOME', 'TMPDIR', 'LANG', 'LD_LIBRARY_PATH', 'PLAYWRIGHT_BROWSERS_PATH'}}
+            browser = await playwright.chromium.launch(headless=True, env=child_env)
+            try:
+                context = await browser.new_context(accept_downloads=False, service_workers='block')
+                await protect_requests(context)
+                page = await context.new_page()
+                page.set_default_timeout(10000)
+                return await authenticate(page, credentials)
+            finally:
+                await browser.close()
+    except LoginStopped as exc:
+        return safe_result('blocked', stage, reason=exc.args[0], missing=[n for n in ENV_NAMES if not os.environ.get(n)])
+    except Exception:
+        return safe_result('failed', stage, reason='runtime_error')

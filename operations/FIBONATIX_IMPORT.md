@@ -1,57 +1,54 @@
-# Eenmalige Fibonatix-import t/m 2 oktober 2026
+# Eenmalige Fibonatix-importcontroller
 
-De beveiligde routes onder `/ops/fibonatix-20261002` zijn alleen actief met een
-minstens 40 tekens lange `EXACT_IMPORT_CONTROL_TOKEN` en vervallen op 5 oktober
-2026 om 18:00 UTC. Het token hoort uitsluitend in Render Environment en een
-privé operatorclient. Geen tokens, XML-bronregels of browsercookies in Git,
-gezondheidsstatus of logs.
+De expirerend beveiligde controller verwerkt uitsluitend de eerder goedgekeurde,
+vaste importbatch. Administratie, bankboek, payloadhash en controles staan in de
+controller. Brongegevens, bedragen, individuele order-/factuurreferenties en
+browserartefacten horen in het private batchdossier, niet in deze documentatie.
 
-Deze controller accepteert uitsluitend de door de gebruiker goedgekeurde batch
-`FIBO-20260922-20261002`, met SHA-256
-`18574a6b7fd6cad2fc9144c1d8c0a1c279830d92739cd70f5410db89b9de94f2`.
-Het bestand heeft 845 transacties in 11 dagboekingen: 842 ontvangsten van
-€85.681,83 en 3 refunds van €180,97, netto €85.500,86. Administratie 3977752,
-dagboek 26, bankgrootboek 1316, debiteur 100100 op 1100; refunds volgens het
-gevalideerde bronbestand op 1350 zonder relatie. Geen fees of uitbetalingen
-toevoegen en geen eerder geïmporteerde eerste-weekregels wijzigen.
+Een Bearer-token uit Render Environment beveiligt de routes. Het token hoort
+uitsluitend in de bestaande beveiligde omgeving en de private operatorclient.
+Geen tokens, bronregels of browsercookies in Git, healthstatus of logs.
 
-De operator uploadt het ongewijzigde XML via `POST /prepare`. Daarna:
+## Beschikbare verwerking
 
-1. `POST /preflight`: alle pagina's van Exact dagboek 26 lezen, transacties en
-   vrije boekingsnummers controleren, oorspronkelijke toestand bewaren.
-2. `POST /inspect`: met de bestaande Exact-loginfunctie de afschriftpagina
-   voor Fibonatix openen; alleen lezen. De beveiligde `artifact/ui` bevat de
-   zichtbare pagina voor het afronden van de gecontroleerde verwerking.
-3. `POST /import`: opnieuw controleren, duurzaam één uploadpoging claimen,
-   GLTransactions één keer uploaden via de bestaande Exact XML API, en elke
-   transactie teruglezen. Een timeout/401/andere onduidelijke uitkomst wordt
-   nooit door een tweede upload gevolgd.
-4. `POST /reconcile`: uitsluitend teruglezen en controleren. Gebruik dit na
-   een herstart of twijfel over de uitkomst; verwijder geen write-claim.
+1. `POST /prepare`: valideer het vaste bronbestand en bewaar het onveranderd.
+2. `POST /preflight`: lees alle Exact-pagina's en controleer op bestaande
+   transacties en bezette boekingsnummers; bewaar de uitgangstoestand.
+3. `POST /inspect`: lees de bankafschriftpagina met de bestaande Exact-login.
+4. `POST /import`: herhaal de controles, claim duurzaam precies één upload en
+   verifieer iedere geïmporteerde regel. Herhaal nooit een onzekere upload.
+5. `POST /reconcile`: lees uitsluitend terug; verwijder nooit een write-claim.
+6. Voorbereid, nog niet actief: `POST /audit_order_matches`: inventariseer afwijkingen tussen bronorder en
+   toegewezen referentie over de hele geïmporteerde periode. Bewaar de volledige
+   private inventarisatie in `artifact/order_match_audit`.
 
-`GET /status` en `GET /artifact/{name}` vereisen hetzelfde Bearer-token. De
-artefacten en het XML blijven in de bestaande Postgres-database. Een
-database-lock voorkomt gelijktijdige runs van deze controller. Er start geen
-financiële actie op deployment of herstart. Bestaande MatchSets-schakelaars,
-toewijzingsregels, dagelijkse agents en de handmatige deployinstelling blijven
-ongewijzigd.
+`GET /status` en `GET /artifact/{name}` vereisen hetzelfde token. De gegevens
+blijven in de bestaande Postgres-database. Een database-lock voorkomt gelijktijdige
+controllerruns. Een deployment of herstart voert geen financiële actie uit.
 
-`POST /automatic` is eenmaal uitgevoerd na verificatie van alle 845 regels.
-Exact heeft daarbij 77 orderreferenties vervangen bij aflettering op gelijke
-bedragen. De oorspronkelijke order, Woo-ID en transactiereferentie blijven in
-omschrijving/notitie staan. Jasper accepteert deze aflettering binnen 100100
-als het saldo klopt en betaalde orders gesloten zijn (4 oktober, 21:13 CEST).
-Daarom geen massale herstelactie uitsluitend vanwege een andere YourRef.
-De strikte importvergelijking blijft deze referentiewijzigingen rapporteren;
-dat is na Automatically geen bewijs van een verkeerd geïmporteerd bedrag.
+## Gewijzigde afletterregel
 
-`POST /settle_48189` is begrensd tot factuur 26722396 / TD48189 (€85,00) en
-de bestaande ontvangst j8hJ8KLB (€90,99). Jasper heeft de €5,99 expliciet als
-betalingsverschil goedgekeurd op 4 oktober om 21:19 CEST. De controller controleert
-de actuele bedragen en identiteit vóór éénmalig opslaan, en leest daarna de
-gesloten posten en de €5,99 op 9920 terug. Een onzekere uitkomst leidt tot
-teruglezen, nooit tot nogmaals opslaan. Dit stelt geen algemene afboekgrens in.
+De instructie van 4 oktober 2026, 21:45 CEST vervangt het eerdere akkoord voor
+afletteren op verzameldebiteuren-saldo. Iedere betaling moet aan de eigen order
+en factuur worden gekoppeld. De voorbereide policy-middleware blokkeert de oude
+Automatically-actie en de historische afwikkeling met een betaling van een andere
+order zodra deze aan de app is gekoppeld. Die activering is nog niet uitgevoerd.
+De directe
+MatchSets-schakelaar blijft uitgeschakeld.
 
-Beslisregels en vereisten voor de dashboardwerklijst staan in
-[DASHBOARD_EXCEPTIONS.md](DASHBOARD_EXCEPTIONS.md). De dagelijkse Paragon-import
-en de dashboardimplementatie zijn afzonderlijke vervolgstappen.
+De bestaande import is vóór automatisch afletteren gecontroleerd. Exact kan bij
+afletteren de toegewezen referentie wijzigen terwijl bronomschrijving en bedrag
+gelijk blijven. De strikte importvergelijking meldt zo'n referentiewijziging;
+dit signaleert onderzoek naar de koppeling, niet vanzelf een verkeerd importbedrag.
+
+Een afwijkende referentie is een kandidaat voor herstel. Controleer de echte
+aflettering en de bijbehorende factuur voordat die wordt losgemaakt. Bewaar
+reeds goedgekeurde betalingsverschillen bij de eigen order zonder dubbele
+afboeking. Er is geen algemene automatische afboekgrens afgesproken.
+
+De inventarisatie corrigeert nog geen bestaande afletteringen. Een gerichte
+herstelfunctie en de dagelijkse verwerking moeten de eigen order en factuur
+vóór iedere match controleren en de werkelijke uitkomst daarna teruglezen.
+
+De dashboardvereisten en volledige beslisregels staan in
+[DASHBOARD_EXCEPTIONS.md](DASHBOARD_EXCEPTIONS.md).

@@ -59,7 +59,8 @@ SIGNALS = set(SIGNAL_PATTERNS) | {'password_field', 'standard_otp_field', 'usern
     'administration_header', 'expected_portal_url', 'exact_login_origin',
     'administration_matches', 'main_window_named', 'main_window_by_id',
     'main_window_documents_url', 'main_window_content', 'navigation_present',
-    'navigation_visible', 'auth_title', 'logged_out_text'}
+    'navigation_visible', 'auth_title', 'logged_out_text', 'browser_navigation_race',
+    'browser_timeout', 'browser_other_error'}
 
 
 def safe_result(status, stage, *, reason="none", username_submitted=False,
@@ -271,6 +272,16 @@ async def submit(page, frame, field):
     await buttons[0].click()
 
 
+def read_error_signal(error):
+    # Inspect internally, but return only a fixed category. Browser errors can
+    # contain sensitive page details and are never returned or logged raw.
+    if type(error).__name__ == 'TimeoutError':
+        return 'browser_timeout'
+    if re.search(r'execution context was destroyed|cannot find context with specified id|frame was detached|frame has been detached', str(error), re.I):
+        return 'browser_navigation_race'
+    return 'browser_other_error'
+
+
 async def authenticate(page, credentials, *, timeout=75, clock=time.monotonic, pause=asyncio.sleep):
     stage = "login_form"
     completed = set()
@@ -280,16 +291,32 @@ async def authenticate(page, credentials, *, timeout=75, clock=time.monotonic, p
         deadline = clock() + timeout
         last_submit = 0.0
         while clock() < deadline:
-            await guard_page(page)
-            if await verify_administration(page):
+            try:
+                await guard_page(page)
+                verified = await verify_administration(page)
+            except LoginStopped:
+                raise
+            except Exception as error:
+                if read_error_signal(error) in {'browser_navigation_race', 'browser_timeout'}:
+                    await pause(0.5)
+                    continue
+                raise
+            if verified:
                 return safe_result('passed', 'complete', administration_verified=True, **flags)
             progressed = False
             for frame in page.frames:
                 if not trusted(frame.url):
                     continue
-                password = await one_input(frame, PASSWORD)
-                username = await one_input(frame, USERNAME)
-                otp_fields = await locate_otp(frame, after_password='password' in completed and password is None)
+                try:
+                    password = await one_input(frame, PASSWORD)
+                    username = await one_input(frame, USERNAME)
+                    otp_fields = await locate_otp(frame, after_password='password' in completed and password is None)
+                except LoginStopped:
+                    raise
+                except Exception as error:
+                    if read_error_signal(error) in {'browser_navigation_race', 'browser_timeout'}:
+                        break
+                    raise
                 if password is not None:
                     step = 'password'
                 elif otp_fields:
@@ -342,9 +369,10 @@ async def authenticate(page, credentials, *, timeout=75, clock=time.monotonic, p
         return safe_result('blocked', stage, reason='timeout', signals=await collect_signals(page), **flags)
     except LoginStopped as exc:
         return safe_result('blocked', stage, reason=exc.args[0], signals=await collect_signals(page), **flags)
-    except Exception:
+    except Exception as error:
         # Playwright errors may contain fill values, URLs, or page contents.
-        return safe_result('failed', stage, reason='runtime_error', signals=await collect_signals(page), **flags)
+        return safe_result('failed', stage, reason='runtime_error',
+                           signals=await collect_signals(page) + [read_error_signal(error)], **flags)
 
 
 async def protect_requests(context):

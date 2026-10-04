@@ -133,7 +133,7 @@ class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
         for field in fields:
             field.fill.assert_not_awaited()
 
-    async def flow(self, sequence, *, error=None, auto_otp=False):
+    async def flow(self, sequence, *, error=None, auto_otp=False, read_race=False):
         state = {'index': 0}
         fields = {name: element() for name in ['username', 'password', 'totp']}
         frame = MagicMock(url='https://login.exact.com/signin')
@@ -153,14 +153,27 @@ class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
             if auto_otp:
                 state['index'] = min(state['index'] + 1, len(sequence) - 1)
         fields['totp'].fill.side_effect = otp_filled
+        raced = False
+        async def read_guard(_page):
+            nonlocal raced
+            if read_race and not raced and state['index'] == 1:
+                raced = True
+                raise RuntimeError('Execution context was destroyed, most likely because of a navigation')
         clock = itertools.count().__next__
-        with patch.object(b, 'guard_page', AsyncMock()), \
+        with patch.object(b, 'guard_page', AsyncMock(side_effect=read_guard)), \
              patch.object(b, 'verify_administration', AsyncMock(side_effect=lambda _: sequence[state['index']] == 'success')), \
              patch.object(b, 'one_input', AsyncMock(side_effect=current_input)), \
              patch.object(b, 'check_destination', AsyncMock()), \
              patch.object(b, 'submit', AsyncMock(side_effect=submitted)) as submit:
             result = await b.authenticate(page, b.Credentials.from_env(TEST_ENV), clock=clock, pause=AsyncMock(), timeout=60)
         return result, fields, submit
+
+    async def test_navigation_read_race_does_not_repeat_credential_submission(self):
+        result, fields, submit = await self.flow(['username', 'password', 'totp', 'success'], read_race=True)
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(submit.await_count, 3)
+        fields['username'].fill.assert_awaited_once()
+        fields['password'].fill.assert_awaited_once()
 
     async def test_username_password_totp_and_administration(self):
         result, fields, submit = await self.flow(['username', 'password', 'totp', 'success'])

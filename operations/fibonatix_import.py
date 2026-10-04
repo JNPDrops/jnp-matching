@@ -19,7 +19,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
-from urllib.parse import urlsplit, urlencode
+from urllib.parse import urlsplit, urlencode, parse_qs
 import xml.etree.ElementTree as ET
 
 from fastapi import APIRouter, HTTPException, Request
@@ -34,7 +34,7 @@ EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 LOCK = 397775226
 router = APIRouter(prefix='/ops/fibonatix-20261002')
 TASKS = set()
-ARTIFACTS = {'ledger_before', 'ledger_after', 'receivables_before', 'receivables_after', 'ui', 'xml_response', 'automatic_before', 'automatic_after', 'match_ui'}
+ARTIFACTS = {'ledger_before', 'ledger_after', 'receivables_before', 'receivables_after', 'ui', 'xml_response', 'automatic_before', 'automatic_after', 'match_ui', 'settlement_before', 'settlement_after'}
 
 
 def application():
@@ -355,7 +355,61 @@ def verify_statements(snapshot, rows):
     return {'verified_ids':found,'complete':len(found)==845}
 
 
-async def browser_snapshot(automatic=False,all_statements=False,inspect_match=False):
+async def settle_paid_invoice(frame):
+    # Jasper accepts cross-order allocation within 100100 provided net amounts
+    # remain correct and paid orders are closed (2026-10-04 21:13 CEST).
+    # One still-open paid invoice: TD48189 / 26722396 / EUR85.00. Allocate
+    # EUR85.00 from the existing unmatched EUR90.99 receipt; retain EUR5.99.
+    query=parse_qs(urlsplit(frame.url).query)
+    required={'_Division_':str(DIVISION),'Account':'{'+DEBTOR+'}',
+              'TransactionID':'{67de65bb-95f0-4431-ac3e-e1051a6e91eb}',
+              'MatchStatementLineID':'{63ddc7d4-0698-468e-80d0-2c19e4da10f5}'}
+    if any(str(query.get(k,[''])[0]).lower()!=v.lower() for k,v in required.items()):
+        raise HTTPException(409,'settlement_wrong_bank_line')
+    current=await receivables()
+    invoices=[r for r in current if r.get('YourRef')=='TD48189' and r['JournalCode']=='70' and r['InvoiceNumber']==26722396]
+    payments=[r for r in current if r.get('YourRef')=='TD48894' and r['JournalCode']=='26' and 'j8hJ8KLB' in r['Description']]
+    if len(invoices)!=1 or Decimal(str(invoices[0]['Amount']))!=Decimal('85') or len(payments)!=1 or Decimal(str(payments[0]['Amount']))!=Decimal('-90.99'):
+        raise HTTPException(409,'settlement_balances_changed')
+    snapshot=await ui_snapshot(frame)
+    artifact('settlement_before',{'receivables':current,'screen':snapshot})
+    controls={c['id']:c for c in snapshot['controls']}
+    if controls.get('Account_alt',{}).get('value')!='100100' or controls.get('EntryAmount',{}).get('value')!='90,99':
+        raise HTTPException(409,'settlement_wrong_account_or_amount')
+    if any(c.get('checked') for c in snapshot['controls']):
+        raise HTTPException(409,'settlement_payment_already_selected')
+    targets=[r for r in snapshot['rows'] if len(r['cells'])==10 and r['cells'][2]=='26722396' and r['cells'][4]=='TD48189' and r['cells'][6]=='85,00']
+    if len(targets)!=1 or not re.fullmatch(r'List_row_\d+',targets[0]['id']):
+        raise HTTPException(409,'settlement_invoice_not_unique')
+    row=frame.locator('#'+targets[0]['id'])
+    await row.locator('input[type="checkbox"]').check()
+    await row.locator('input[type="text"]').fill('85,00')
+    await row.locator('select').select_option('0')
+    await row.locator('input[type="text"]').press('Tab')
+    if await frame.locator('#SelectedAmount').input_value()!='85,00' or await frame.locator('#Balance').input_value()!='5,99':
+        raise HTTPException(409,'settlement_selection_not_85_keep_599')
+    if await frame.locator('input[type="checkbox"]:checked').count()!=1:
+        raise HTTPException(409,'settlement_extra_selection')
+    claim('settle_48189_85')
+    update(phase='paid_invoice_settlement_requested',settlement_attempted=True)
+    await frame.locator('#btnSave').click()
+    # Read only after the single save; never repeat it on an uncertain result.
+    result=[]
+    for _ in range(8):
+        await asyncio.sleep(5)
+        result=await receivables()
+        inv=[r for r in result if r.get('YourRef')=='TD48189' and r['JournalCode']=='70' and r['InvoiceNumber']==26722396]
+        bank=[r for r in result if r['JournalCode']=='26' and 'j8hJ8KLB' in (r.get('Description') or '')]
+        if not inv and len(bank)==1 and Decimal(str(bank[0]['Amount']))==Decimal('-5.99'):
+            artifact('settlement_after',result)
+            artifact('receivables_after',result)
+            update(phase='paid_invoice_settled_verified',settlement_verified=True,remaining_receipt_credit='5.99')
+            return
+    artifact('settlement_after',result)
+    update(phase='settlement_requires_readback',settlement_verified=False)
+
+
+async def browser_snapshot(automatic=False,all_statements=False,inspect_match=False,settle=False):
     if automatic and not state().get('reconciliation',{}).get('complete'):
         raise HTTPException(409,'ledger_not_verified')
     from operations.exact_browser import Credentials, authenticate, protect_requests, trusted, PASSWORD, USERNAME, visible
@@ -410,25 +464,33 @@ async def browser_snapshot(automatic=False,all_statements=False,inspect_match=Fa
             snapshot=await ui_snapshot(page)
             artifact('ui',snapshot)
             update(phase='statement_inspected')
-            if inspect_match:
+            if inspect_match or settle:
                 verify_statements(snapshot,parse_batch(payload()))
                 # Open the observed Match link for the first proven wrong
                 # same-amount match. Opening this screen is read-only.
                 stage='open_match'; update(browser_stage=stage)
-                link=page.locator('xpath=//tr[count(td)=6 and contains(td[1],"Y20Tnqtb")]/preceding-sibling::tr[1]//a[@id="LinkMatch"]')
+                trx='j8hJ8KLB' if settle else 'Y20Tnqtb'
+                link=page.locator('xpath=//tr[count(td)=6 and contains(td[1],"'+trx+'")]/preceding-sibling::tr[1]//a[@id="LinkMatch"]')
                 if await link.count()!=1:
                     raise HTTPException(409,'target_match_link_not_unique')
                 await link.click()
                 await asyncio.sleep(3)
-                screens=[]
+                screens=[]; match_frames=[]
                 for current in context.pages:
                     with suppress(Exception):
                         await current.wait_for_load_state('networkidle',timeout=10000)
                     for frame in current.frames:
                         if trusted(frame.url) and urlsplit(frame.url).path.startswith('/docs/'):
                             screens.append({'url':frame.url,'snapshot':await ui_snapshot(frame)})
+                            if urlsplit(frame.url).path.endswith('/FinEntryMatch.aspx'):
+                                match_frames.append(frame)
                 artifact('match_ui',screens)
                 update(phase='match_screen_inspected')
+                if settle:
+                    if len(match_frames)!=1:
+                        raise HTTPException(409,'settlement_frame_not_unique')
+                    stage='settle_paid_invoice';update(browser_stage=stage)
+                    await settle_paid_invoice(match_frames[0])
             if automatic:
                 verified=verify_statements(snapshot,parse_batch(payload()))
                 artifact('automatic_before',snapshot)
@@ -471,7 +533,8 @@ async def run(action):
         operations={'preflight':preflight,'import':import_xml,'reconcile':reconcile,'inspect':browser_snapshot,
                     'automatic':lambda:browser_snapshot(automatic=True),
                     'inspect_all':lambda:browser_snapshot(all_statements=True),
-                    'inspect_match':lambda:browser_snapshot(inspect_match=True)}
+                    'inspect_match':lambda:browser_snapshot(inspect_match=True),
+                    'settle_48189':lambda:browser_snapshot(settle=True)}
         await operations[action]()
     except asyncio.CancelledError:
         update(phase='interrupted_reconcile_before_write',last_error='worker_cancelled')
@@ -531,7 +594,7 @@ async def get_artifact(name:str,request:Request):
 @router.post('/{action}')
 async def start(action:str,request:Request):
     authorize(request)
-    if action not in {'preflight','import','reconcile','inspect','inspect_all','inspect_match','automatic'}:
+    if action not in {'preflight','import','reconcile','inspect','inspect_all','inspect_match','settle_48189','automatic'}:
         raise HTTPException(404,'Not found')
     state()
     if any(not task.done() for task in TASKS):

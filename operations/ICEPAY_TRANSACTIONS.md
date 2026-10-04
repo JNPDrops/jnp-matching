@@ -30,7 +30,7 @@ en kolomnamen. Fouten kunnen begrensde formuliermetadata tonen onder
 ## Eenmalig activeren
 
 - Gebruik de bestaande ICEPAY_WEB_USERNAME/PASSWORD en optionele TOTP-configuratie.
-- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v11`.
+- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v12`.
 - Render env-merge (`replace=false`) start zelf één deployment. Auto-deploy blijft uit.
 - De taak vervalt op 5 oktober 18:00 UTC en claimt vóór browserstart één poging.
 - Bestaande claims blijven intact; een herstart herhaalt geen export.
@@ -105,6 +105,15 @@ haalt uitsluitend bestaande exports uit Notifications op, inclusief de later
 beschikbare legacy-export. Er wordt niets opnieuw ingediend. Refunds worden ook
 gelezen als nog geen passende CSV bestaat. Begrensde zichtbare tabelregels blijven
 privé als aanvullend bronbewijs; logs tonen uitsluitend kolomnamen en aantallen.
+
+V11 heeft de legacy-CSV met exact 38 IDs opgehaald (SHA-256
+`d623e07ceba28cbe211053933f1bd91fb71d985a6c382441e5ec155d986973ef`) en nul
+refunds vastgesteld. V12 valideert uitsluitend deze opgeslagen bron opnieuw,
+zonder browser of nieuwe export. Checkout-kolommen zijn optioneel als een
+Description-kolom aanwezig is; alleen een expliciet Order #-nummer uit een
+beschikbaar referentie-/beschrijvingsveld wordt gebruikt. Alle aanwezige velden
+worden op onderlinge conflicten gecontroleerd. Financiële velden blijven verplicht.
+De schema-diagnose bevat alleen kolomnamen en aantallen ongeldige ID-/rijvormen.
 
 `downloaded` betekent dat de bronbestanden zijn opgehaald. Het betekent nog niet
 dat de Exact-import gereed is. De refunds moeten inhoudelijk worden gemapt;

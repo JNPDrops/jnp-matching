@@ -106,6 +106,8 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="JNP Matching", version="1.14.0", lifespan=lifespan)
+from app.dashboard.auth import create_dashboard_app
+app.mount("/dashboard", create_dashboard_app())
 from operations.source_order_policy import router as source_order_router, SourceOrderPolicyMiddleware
 app.include_router(source_order_router)
 app.add_middleware(SourceOrderPolicyMiddleware)

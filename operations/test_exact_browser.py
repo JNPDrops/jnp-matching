@@ -80,6 +80,24 @@ class ExactConfigurationTests(unittest.TestCase):
 
 
 class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_accounting_autocomplete_field_is_not_a_verification_form(self):
+        frame = SimpleNamespace(url=b.TARGET, locator=lambda selector:
+            element(text='Accounting dashboard Search') if selector == 'body' else collection([element()]))
+        self.assertEqual(await b.locate_otp(frame, after_password=True), [])
+
+    async def test_verified_administration_can_contain_autofill_suppression_field(self):
+        main = SimpleNamespace(name='MainWindow', url='https://start.exactonline.nl/docs/FinMenu.aspx',
+            title=AsyncMock(return_value='Accounting dashboard'))
+        main.locator = lambda selector: (element(text='Accounting dashboard Search') if selector == 'body'
+            else collection([element()]) if selector == b.OTP else collection([]))
+        page = SimpleNamespace(url=b.TARGET, frames=[main])
+        page.locator = lambda selector: element(text='10 James n Parson B.V.' if selector == '#Administration'
+            else 'Accounting dashboard')
+        self.assertTrue(await b.verify_administration(page))
+        main.locator = lambda selector: (element(text='Enter your authenticator verification code') if selector == 'body'
+            else collection([element()]) if selector == b.OTP else collection([]))
+        self.assertFalse(await b.verify_administration(page))
+
     async def test_failure_diagnostics_classify_without_disclosing_page_content(self):
         text = 'The verification code you entered is incorrect. Authenticator test@example.invalid fixture-password 123456'
         frame = SimpleNamespace(url='https://login.exact.com/signin', locator=lambda selector:

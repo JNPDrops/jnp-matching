@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from operations import exact_browser as b, exact_login_probe as p
 
-TEST_ENV = {'EXACT_USERNAME': 'test@example.invalid', 'EXACT_PASSWORD': 'fixture-password',
-            'EXACT_TOTP_SECRET': 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'}
+TEST_ENV = {'EXACT_WEB_USERNAME': 'test@example.invalid', 'EXACT_WEB_PASSWORD': 'fixture-password',
+            'EXACT_WEB_TOTP_SECRET': 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'}
 
 
 def element(*, text='', action=b.TARGET, visible=True, enabled=True):
@@ -41,7 +41,7 @@ class ExactConfigurationTests(unittest.TestCase):
 
     def test_invalid_totp_has_no_value_in_error(self):
         with self.assertRaises(b.LoginStopped) as error:
-            b.Credentials.from_env({**TEST_ENV, 'EXACT_TOTP_SECRET': 'private-invalid-value'})
+            b.Credentials.from_env({**TEST_ENV, 'EXACT_WEB_TOTP_SECRET': 'private-invalid-value'})
         self.assertEqual(str(error.exception), 'invalid_configuration')
 
     def test_exact_hosts_only_and_division_is_unambiguous(self):
@@ -56,7 +56,7 @@ class ExactConfigurationTests(unittest.TestCase):
 
     def test_status_cannot_contain_secrets_or_claim_financial_writes(self):
         result = b.safe_result('failed', 'password', password_submitted='fixture-password',
-                               missing=['EXACT_PASSWORD', 'fixture-password'])
+                               missing=['EXACT_WEB_PASSWORD', 'fixture-password'])
         self.assertFalse(result['password_submitted'])
         self.assertFalse(result['financial_writes'])
         self.assertNotIn('fixture-password', json.dumps(result))
@@ -107,8 +107,8 @@ class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['administration_verified'])
         self.assertTrue(result['totp_submitted'])
         self.assertEqual(submit.await_count, 3)
-        fields['username'].fill.assert_awaited_once_with(TEST_ENV['EXACT_USERNAME'])
-        fields['password'].fill.assert_awaited_once_with(TEST_ENV['EXACT_PASSWORD'])
+        fields['username'].fill.assert_awaited_once_with(TEST_ENV['EXACT_WEB_USERNAME'])
+        fields['password'].fill.assert_awaited_once_with(TEST_ENV['EXACT_WEB_PASSWORD'])
         self.assertEqual(len(fields['totp'].fill.await_args.args[0]), 6)
 
     async def test_auto_submitting_otp_does_not_click_authenticated_page(self):

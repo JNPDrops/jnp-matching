@@ -72,6 +72,21 @@ class BatchSafety(unittest.TestCase):
 
 
 class NetworkSafety(unittest.IsolatedAsyncioTestCase):
+    async def test_automatic_stops_before_browser_without_verified_import(self):
+        with patch.object(f,'state',return_value={'reconciliation':{'complete':False}}):
+            with self.assertRaises(HTTPException): await f.browser_snapshot(automatic=True)
+
+    async def test_receivables_use_verified_id_not_padded_code(self):
+        with patch.object(f,'read_all',AsyncMock(return_value=[])) as read:
+            await f.receivables()
+        self.assertEqual(read.await_args.args[1]['$filter'],"AccountId eq guid'"+f.DEBTOR+"'")
+
+    async def test_wrong_bank_and_missing_references_block_automatic(self):
+        rows=parse(fixture())
+        for controls in [[],[{'id':'BankAccount','value':'{'+f.BANK+'}'},{'id':'Notes','value':'icepay'}],
+                         [{'id':'BankAccount','value':'{'+f.BANK+'}'},{'id':'Notes','value':f.JOB}]]:
+            with self.assertRaises(HTTPException): f.verify_statements({'controls':controls,'rows':[]},rows)
+
     async def test_all_pages_are_read_without_total_top_limit(self):
         prefix='https://start.exactonline.nl/api/v1/3977752/'
         app=SimpleNamespace(API_V1=prefix.rsplit('/3977752/',1)[0],

@@ -358,8 +358,8 @@ def verify_statements(snapshot, rows):
 async def settle_paid_invoice(frame):
     # Jasper accepts cross-order allocation within 100100 provided net amounts
     # remain correct and paid orders are closed (2026-10-04 21:13 CEST).
-    # One still-open paid invoice: TD48189 / 26722396 / EUR85.00. Allocate
-    # EUR85.00 from the existing unmatched EUR90.99 receipt; retain EUR5.99.
+    # Jasper explicitly approved this EUR5.99 payment difference at 21:19 CEST.
+    # This is a single named case, not a general write-off threshold.
     query=parse_qs(urlsplit(frame.url).query)
     required={'_Division_':str(DIVISION),'Account':'{'+DEBTOR+'}',
               'TransactionID':'{67de65bb-95f0-4431-ac3e-e1051a6e91eb}',
@@ -371,8 +371,15 @@ async def settle_paid_invoice(frame):
     payments=[r for r in current if r.get('YourRef')=='TD48894' and r['JournalCode']=='26' and 'j8hJ8KLB' in r['Description']]
     if len(invoices)!=1 or Decimal(str(invoices[0]['Amount']))!=Decimal('85') or len(payments)!=1 or Decimal(str(payments[0]['Amount']))!=Decimal('-90.99'):
         raise HTTPException(409,'settlement_balances_changed')
+    async def entry_lines():
+        return await read_all('financialtransaction/TransactionLines', {
+            '$filter': "EntryID eq guid'cfb7591f-2b5a-48a6-b5e7-9920f7b39cce'",
+            '$select': 'ID,EntryID,EntryNumber,LineNumber,Description,AmountDC,AccountCode,GLAccountCode,JournalCode,YourRef'})
+    before_lines=await entry_lines()
     snapshot=await ui_snapshot(frame)
-    artifact('settlement_before',{'receivables':current,'screen':snapshot})
+    artifact('settlement_before',{'receivables':current,'screen':snapshot,'ledger':before_lines,
+        'decision':{'actor':'Jasper','approved_at':'2026-10-04T21:19:00+02:00',
+                    'invoice':26722396,'order':'TD48189','payment_difference':'5.99','scope':'this_case_only'}})
     controls={c['id']:c for c in snapshot['controls']}
     if controls.get('Account_alt',{}).get('value')!='100100' or controls.get('EntryAmount',{}).get('value')!='90,99':
         raise HTTPException(409,'settlement_wrong_account_or_amount')
@@ -383,15 +390,20 @@ async def settle_paid_invoice(frame):
         raise HTTPException(409,'settlement_invoice_not_unique')
     row=frame.locator('#'+targets[0]['id'])
     await row.locator('input[type="checkbox"]').check()
-    await row.locator('input[type="text"]').fill('85,00')
-    await row.locator('select').select_option('0')
+    await row.locator('input[type="text"]').fill('90,99')
     await row.locator('input[type="text"]').press('Tab')
-    if await frame.locator('#SelectedAmount').input_value()!='85,00' or await frame.locator('#Balance').input_value()!='5,99':
-        raise HTTPException(409,'settlement_selection_not_85_keep_599')
+    await row.locator('select').select_option('3')
+    artifact('settlement_after',{'prepared_screen':await ui_snapshot(frame),'save_attempted':False})
+    if (await frame.locator('#SelectedAmount').input_value()!='90,99'
+            or await frame.locator('#Balance').input_value()!='0,00'
+            or await row.locator('input[type="text"]').input_value()!='90,99'
+            or await row.locator('select').input_value()!='3'):
+        raise HTTPException(409,'settlement_selection_not_9099_difference_599')
     if await frame.locator('input[type="checkbox"]:checked').count()!=1:
         raise HTTPException(409,'settlement_extra_selection')
     claim('settle_48189_85')
-    update(phase='paid_invoice_settlement_requested',settlement_attempted=True)
+    update(phase='paid_invoice_settlement_requested',settlement_attempted=True,
+           approved_payment_difference='5.99')
     await frame.locator('#btnSave').click()
     # Read only after the single save; never repeat it on an uncertain result.
     result=[]
@@ -400,12 +412,22 @@ async def settle_paid_invoice(frame):
         result=await receivables()
         inv=[r for r in result if r.get('YourRef')=='TD48189' and r['JournalCode']=='70' and r['InvoiceNumber']==26722396]
         bank=[r for r in result if r['JournalCode']=='26' and 'j8hJ8KLB' in (r.get('Description') or '')]
-        if not inv and len(bank)==1 and Decimal(str(bank[0]['Amount']))==Decimal('-5.99'):
-            artifact('settlement_after',result)
+        if not inv and not bank:
+            after_lines=await entry_lines()
+            old_ids={r['ID'] for r in before_lines}
+            added=[r for r in after_lines if r['ID'] not in old_ids]
+            amounts=sorted((str(r.get('GLAccountCode') or '').strip(),Decimal(str(r['AmountDC']))) for r in added)
+            source=[r for r in after_lines if r['ID'].lower()=='63ddc7d4-0698-468e-80d0-2c19e4da10f5']
+            verified=(amounts==[('1100',Decimal('5.99')),('9920',Decimal('-5.99'))]
+                      and len(source)==1 and Decimal(str(source[0]['AmountDC']))==Decimal('90.99'))
+            artifact('settlement_after',{'receivables':result,'ledger':after_lines,'added_lines':added,
+                     'save_attempted':True,'payment_difference_verified':verified})
             artifact('receivables_after',result)
-            update(phase='paid_invoice_settled_verified',settlement_verified=True,remaining_receipt_credit='5.99')
+            update(phase='paid_invoice_settled_verified' if verified else 'settlement_requires_readback',
+                   settlement_verified=verified,remaining_receipt_credit='0.00',
+                   payment_difference_booked='5.99' if verified else None)
             return
-    artifact('settlement_after',result)
+    artifact('settlement_after',{'receivables':result,'save_attempted':True})
     update(phase='settlement_requires_readback',settlement_verified=False)
 
 

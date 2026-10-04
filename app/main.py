@@ -55,6 +55,8 @@ async def lifespan(_app):
     fibonetics_report_task = asyncio.create_task(read_fibonetics_report(app_module))
     from operations.paragon_login_probe import run as run_paragon_login_probe
     paragon_login_probe_task = asyncio.create_task(run_paragon_login_probe())
+    from operations.exact_login_probe import run as run_exact_login_probe
+    exact_login_probe_task = asyncio.create_task(run_exact_login_probe())
     try:
         yield
     finally:
@@ -64,6 +66,7 @@ async def lifespan(_app):
         maintenance_task.cancel()
         fibonetics_report_task.cancel()
         paragon_login_probe_task.cancel()
+        exact_login_probe_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
         with suppress(asyncio.CancelledError):
@@ -76,9 +79,11 @@ async def lifespan(_app):
             await fibonetics_report_task
         with suppress(asyncio.CancelledError):
             await paragon_login_probe_task
+        with suppress(asyncio.CancelledError):
+            await exact_login_probe_task
 
 
-app = FastAPI(title="JNP Matching", version="1.12.2", lifespan=lifespan)
+app = FastAPI(title="JNP Matching", version="1.13.0", lifespan=lifespan)
 from operations.allocation_maintenance import router as maintenance_router
 app.include_router(maintenance_router)
 from operations.woo_iban_rules import router as woo_iban_router
@@ -1229,10 +1234,11 @@ async def health():
     from operations.tax_agent import STATUS as TAX_STATUS
     from operations.tax_allocation import STATUS as TAX_RULE_STATUS
     from operations.allocation_maintenance import STATUS as MAINTENANCE_STATUS
+    from operations.exact_login_probe import STATUS as EXACT_LOGIN_STATUS
     return {"ok": True, "division": DIVISION, "version": app.version, "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
             "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES, "debtor_routing": dict(STATUS),
             "tax_recognition": dict(TAX_STATUS), "tax_allocation_rules": dict(TAX_RULE_STATUS),
-            "allocation_maintenance": dict(MAINTENANCE_STATUS)}
+            "allocation_maintenance": dict(MAINTENANCE_STATUS), "exact_login_probe": dict(EXACT_LOGIN_STATUS)}
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -15,7 +15,7 @@ import tempfile
 
 from operations.exact_browser import ENV_NAMES, Credentials, probe_worker, safe_result
 
-PROBE_ID = 'exact-login-20261004-v8'
+PROBE_ID = 'exact-login-20261004-v9'
 EXPIRES_AT = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 LOG = logging.getLogger('uvicorn.error')
 STATUS = safe_result('disabled', 'configuration')

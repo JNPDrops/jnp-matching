@@ -519,7 +519,10 @@ async def diagnose_closed(limit, *, pending=False):
     found = []
     for receipt in plan['receipts']:
         invoice = receipt.get('invoice')
-        if not invoice or (receipt['state'] not in {'pending', 'inspected'} if pending else receipt['state'] != 'unmatched_verified'):
+        eligible = receipt['state'] in {'pending', 'inspected'} if pending else (
+            receipt['state'] == 'unmatched_verified' or receipt['state'] in {'pending', 'inspected'}
+            and receipt['allocated_reference'] == receipt['source_order'] and not receipt['exception'])
+        if not invoice or not eligible:
             continue
         if pending and receipt.get('existing_invoice_history'):
             continue

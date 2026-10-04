@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v8'
+JOB = 'icepay-transactions-20261001-03-v9'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
@@ -466,6 +466,30 @@ async def resume_payment_export(page, downloads, expected_ids, artifacts):
     raise AcquisitionStopped('export_not_completed')
 
 
+async def legacy_payment_export(page, downloads, expected_ids, artifacts):
+    """Use the observed legacy export after ICEPAY reported all modern rows failed."""
+    artifacts['export_state'] = 'not_started'
+    await close_notifications(page)
+    await b.click_unique_read_control(page,re.compile(r'^Actions$'))
+    legacy = page.get_by_role('button',name='Export payments (legacy)',exact=True)
+    await legacy.wait_for(state='visible',timeout=15000)
+    artifacts['export_state'] = 'submit_attempted'
+    await legacy.click()
+    artifacts['export_state'] = 'submitted'
+    try:
+        download = await asyncio.wait_for(downloads.get(),timeout=35)
+    except asyncio.TimeoutError:
+        # A legacy configuration dialog, if any, is retained as form metadata.
+        raise AcquisitionStopped('export_not_completed') from None
+    content = await read_download(download)
+    artifacts['source_export_csv'] = base64.b64encode(content).decode()
+    artifacts['candidate_csvs'] = [artifacts['source_export_csv']]
+    scoped,_ = scope_csv(content,expected_ids)
+    if scoped is None:
+        raise AcquisitionStopped('export_not_completed')
+    return scoped
+
+
 async def read_download(download):
     if await download.failure():
         raise AcquisitionStopped('download_failed')
@@ -617,7 +641,7 @@ async def worker(resume):
                 artifacts['proof'] = {'period':RANGE,'ui_payment_count':len(identifiers),
                                       'ui_payment_ids':identifiers}
                 stage = 'payments_export'
-                content = await resume_payment_export(page,downloads,identifiers,artifacts)
+                content = await legacy_payment_export(page,downloads,identifiers,artifacts)
                 artifacts['payments_csv'] = base64.b64encode(content).decode()
                 stage = 'refunds'
                 artifacts['refunds'] = await read_refunds(page)

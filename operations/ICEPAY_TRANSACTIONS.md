@@ -30,11 +30,17 @@ en kolomnamen. Fouten kunnen begrensde formuliermetadata tonen onder
 ## Eenmalig activeren
 
 - Gebruik de bestaande ICEPAY_WEB_USERNAME/PASSWORD en optionele TOTP-configuratie.
-- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v1`.
+- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v2`.
 - Render env-merge (`replace=false`) start zelf één deployment. Auto-deploy blijft uit.
 - De taak vervalt op 5 oktober 18:00 UTC en claimt vóór browserstart één poging.
 - Bestaande claims blijven intact; een herstart herhaalt geen export.
 - Geen nieuwe infrastructuur, publieke route of Exact-schrijfopdracht.
+
+V1 stopte op 4 oktober 19:38 UTC met `date_control_missing` vóór de export.
+De aansluitende formulierdiagnose toont de verwachte datumvelden en ongewijzigde
+standaardperiode. V2 wacht expliciet op zichtbaarheid van het filterveld en de
+kalender, op het wissen van de orderdatum en op sluiting van het ingediende
+exportvenster. De v1-claim blijft intact; er is geen export/import herhaald.
 
 `downloaded` betekent dat de bronbestanden zijn opgehaald. Het betekent nog niet
 dat de Exact-import gereed is. De refunds moeten inhoudelijk worden gemapt;

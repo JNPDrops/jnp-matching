@@ -29,6 +29,7 @@ JOB = 'FIBO-20260922-20261002'
 SHA = '18574a6b7fd6cad2fc9144c1d8c0a1c279830d92739cd70f5410db89b9de94f2'
 DIVISION = 3977752
 BANK = '63305e6f-827d-4884-9df1-6ebbb5858a76'
+DEBTOR = 'ec2af99c-809c-40e3-9057-8a31962ae1cf'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 LOCK = 397775226
 router = APIRouter(prefix='/ops/fibonatix-20261002')
@@ -87,6 +88,13 @@ def artifact(name, value):
         conflict = 'DO NOTHING' if name.endswith('_before') else 'DO UPDATE SET data=EXCLUDED.data'
         conn.execute('''INSERT INTO fibonatix_import_artifacts(job,name,data) VALUES(%s,%s,%s::jsonb)
             ON CONFLICT(job,name) ''' + conflict, (JOB, name, json.dumps(value)))
+        # Repair only the known empty baseline caused by the old unpadded-code
+        # query, and only while there has never been a financial write attempt.
+        if name == 'receivables_before' and value:
+            conn.execute('''UPDATE fibonatix_import_artifacts SET data=%s::jsonb
+                WHERE job=%s AND name='receivables_before' AND data='[]'::jsonb
+                AND NOT EXISTS(SELECT 1 FROM fibonatix_import_attempts WHERE job=%s)''',
+                (json.dumps(value),JOB,JOB))
 
 
 def claim(action):
@@ -184,8 +192,8 @@ async def ledger():
 
 async def receivables():
     return await read_all('read/financial/ReceivablesList', {
-        '$filter': "AccountCode eq '100100'",
-        '$select':'AccountCode,Amount,AmountInTransit,CurrencyCode,Description,EntryNumber,InvoiceDate,InvoiceNumber,JournalCode,YourRef'})
+        '$filter': "AccountId eq guid'" + DEBTOR + "'",
+        '$select':'AccountId,AccountCode,Amount,AmountInTransit,CurrencyCode,Description,EntryNumber,InvoiceDate,InvoiceNumber,JournalCode,YourRef'})
 
 
 def compare(rows, actual):
@@ -267,13 +275,33 @@ async def import_xml():
             response = await client.post(app.BASE_URL + '/docs/XMLUpload.aspx',
                 params={'Topic':'GLTransactions','_Division_':str(DIVISION)}, content=payload(),
                 headers={'Authorization':'Bearer '+token,'Content-Type':'application/xml; charset=utf-8','Accept':'application/xml,text/xml'})
-        artifact('xml_response', {'status':response.status_code,'body':response.text[:30000]})
+        try:
+            result_xml=ET.fromstring(response.content)
+            result_body=ET.tostring(result_xml,encoding='unicode')[:30000] if result_xml.tag in {'eExact','Messages','Message'} else 'unexpected_document'
+        except ET.ParseError:
+            result_body='non_xml_response'
+        artifact('xml_response', {'status':response.status_code,'body':result_body})
         update(xml_http_status=response.status_code)
     except Exception:
         update(upload_outcome='unknown_reconcile_required')
     result = await reconcile()
     if not result['complete']:
         update(phase='import_requires_review_no_retry')
+
+
+async def ui_snapshot(page):
+    return await page.evaluate('''() => {
+        const visible=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
+        const business=e=>/^(BankAccount|EntryDate|Notes|Amount|Offset|Status|GLAccountType|List)/.test(e.id||'');
+        return {title:document.title,text:document.body.innerText.slice(0,500000),
+          controls:Array.from(document.querySelectorAll('input,select,button,a')).filter(e=>visible(e)||(e.tagName==='INPUT'&&business(e))).slice(0,300).map(e=>({
+            tag:e.tagName,id:e.id,name:e.name||'',type:e.type||'',text:(e.innerText||e.getAttribute('aria-label')||'').slice(0,180),
+            value:(e.tagName==='SELECT'||(e.tagName==='INPUT'&&business(e)))?e.value:undefined,
+            checked:e.type==='checkbox'?e.checked:undefined,
+            options:e.tagName==='SELECT'?Array.from(e.options).map(o=>({value:o.value,text:o.text})).slice(0,100):undefined})),
+          rows:Array.from(document.querySelectorAll('tr')).filter(visible).slice(0,10000).map(e=>({id:e.id,text:e.innerText,
+            cells:Array.from(e.children).filter(c=>['TD','TH'].includes(c.tagName)).map(c=>c.innerText),
+            titles:Array.from(e.querySelectorAll('[title]')).map(x=>x.title)}))}; }''')
 
 
 async def browser_snapshot():
@@ -304,16 +332,18 @@ async def browser_snapshot():
                 raise HTTPException(409,'unexpected_statement_page')
             if await visible(page.locator(PASSWORD + ', ' + USERNAME)):
                 raise HTTPException(409,'statement_session_expired')
-            snapshot = await page.evaluate('''() => {
-                const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-                return {title:document.title, text:document.body.innerText.slice(0,24000),
-                  controls:Array.from(document.querySelectorAll('input,select,button,a')).filter(visible).slice(0,250).map(e=>({
-                    tag:e.tagName,id:e.id,name:e.name||'',type:e.type||'',text:(e.innerText||e.getAttribute('aria-label')||'').slice(0,180),
-                    value:e.tagName==='SELECT'?e.value:undefined,
-                    options:e.tagName==='SELECT'?Array.from(e.options).map(o=>({value:o.value,text:o.text})).slice(0,100):undefined})),
-                  rows:Array.from(document.querySelectorAll('tr')).filter(visible).slice(0,25).map(e=>({text:e.innerText,
-                    titles:Array.from(e.querySelectorAll('[title]')).map(x=>x.title)}))}; }''')
-            artifact('ui',snapshot)
+            # Both statuses are deliberately included for a complete inspection.
+            # These controls were observed on this account's live statement page.
+            await page.locator('#Status1').check()
+            await page.locator('#Status2').check()
+            await page.locator('#EntryDate_Selection').select_option('1100')
+            await page.locator('#Filter_btnApply').click()
+            await page.wait_for_load_state('load',timeout=45000)
+            await page.locator('#List_ps-select').select_option('9999')
+            await page.wait_for_load_state('load',timeout=45000)
+            with suppress(Exception):
+                await page.wait_for_load_state('networkidle',timeout=10000)
+            artifact('ui',await ui_snapshot(page))
             update(phase='statement_inspected')
         finally:
             await browser.close()

@@ -1,0 +1,13 @@
+{
+  "division": 3977752,
+  "rsin": "867393051",
+  "tax_account_code": "1",
+  "year_policy": "nearest_to_bank_year_tie_earlier",
+  "gl_accounts": {
+    "vpb": null,
+    "btw": null,
+    "loonheffingen": null
+  },
+  "exact_writes": false,
+  "reason": "BankEntryLines has no documented update operation. Verify actual tax balance accounts before enabling an independently supported booking path."
+}

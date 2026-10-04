@@ -63,6 +63,8 @@ async def lifespan(_app):
     icepay_journal_task = asyncio.create_task(run_icepay_journal_task(app_module))
     from operations.icepay_fetch_probe import run as run_icepay_fetch_probe
     icepay_fetch_task = asyncio.create_task(run_icepay_fetch_probe())
+    from operations.icepay_transactions import run as run_icepay_transactions
+    icepay_transactions_task = asyncio.create_task(run_icepay_transactions())
     try:
         yield
     finally:
@@ -78,6 +80,7 @@ async def lifespan(_app):
         exact_login_probe_task.cancel()
         icepay_journal_task.cancel()
         icepay_fetch_task.cancel()
+        icepay_transactions_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
         with suppress(asyncio.CancelledError):
@@ -98,11 +101,16 @@ async def lifespan(_app):
             await icepay_journal_task
         with suppress(asyncio.CancelledError):
             await icepay_fetch_task
+        with suppress(asyncio.CancelledError):
+            await icepay_transactions_task
 
 
 app = FastAPI(title="JNP Matching", version="1.14.0", lifespan=lifespan)
 from app.dashboard.auth import create_dashboard_app
 app.mount("/dashboard", create_dashboard_app())
+from operations.source_order_policy import router as source_order_router, SourceOrderPolicyMiddleware
+app.include_router(source_order_router)
+app.add_middleware(SourceOrderPolicyMiddleware)
 from operations.fibonatix_import import router as fibonatix_import_router
 app.include_router(fibonatix_import_router)
 from operations.allocation_maintenance import router as maintenance_router

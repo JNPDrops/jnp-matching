@@ -19,17 +19,19 @@ from operations import allocation_connection as allocation, bacs_debtor_transfer
 from operations import tax_reference as tax, woo_iban_rules as woo
 from operations.tax_allocation import ROOT
 from operations import bank_resolution as resolution
+from operations.bank_review_dashboard import decorate
+from fastapi.responses import HTMLResponse, JSONResponse
 
 router = APIRouter()
 log = logging.getLogger('uvicorn.error')
 LOCK = 397775213600
-VERSION = 'maintenance-v4'
+VERSION = 'maintenance-v5'
 STATUS = {'state': 'starting', 'bank_writes': False, 'automatically_executed': False}
 FIELDS = ('Account', 'AccountBankAccount', 'GLAccount', 'Words', 'Costcenter', 'Costunit', 'VATCode')
 BANK_FIELDS = 'ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,GLAccountCode,Modified'
 READS = {'financialtransaction/BankEntryLines', 'financialtransaction/BankEntries', 'financialtransaction/TransactionLines',
          'cashflow/Receivables', 'cashflow/Payments', 'read/financial/ReceivablesList', 'read/financial/PayablesList',
-         'crm/Accounts', 'financial/GLAccounts', 'financial/Journals'}
+         'crm/Accounts', 'financial/GLAccounts', 'financial/Journals', 'salesentry/SalesEntries'}
 PSP = re.compile(r'icepay|paynetics|fibonat|stripe|paypal|plisio|ninja|suap|myco', re.I)
 BOSCI = re.compile(r'(?<![a-z0-9_])bosci_[a-f0-9]{29}(?:[a-f0-9]{3})?(?![a-z0-9_])', re.I)
 
@@ -364,7 +366,7 @@ async def cleanup(conn, api, recs, now, banks):
 
 async def run(app, conn, api, now):
     suspense = await api.rows('financialtransaction/BankEntryLines', params={
-        '$filter': "GLAccountCode eq '1360'", '$select': BANK_FIELDS, '$orderby': 'ID'})
+        '$filter': "GLAccountCode eq '1360' or GLAccountCode eq '2000'", '$select': BANK_FIELDS, '$orderby': 'ID'})
     recs = await api.rows('read/financial/ReceivablesList', params={'$select': resolution.OPEN_FIELDS})
     payables = await api.rows('read/financial/PayablesList', params={'$select': resolution.OPEN_FIELDS})
     journals = {str(j['Code']).strip(): j for j in await api.rows('financial/Journals', params={
@@ -406,12 +408,20 @@ async def run(app, conn, api, now):
                 refund_proposals[item['bank_line_id']] = payload
                 item.update(status='supplier_rule_proposed', reason='Unieke leveranciersnaam en minstens twee geboekte betalingen op die relatie')
     references = sorted({x['reference'] for x in items if x.get('reference') and x['status'] in
-        ('order_evidence_needed', 'invoice_missing', 'amount_review', 'account_review')})
+        ('order_evidence_needed', 'psp_order_evidence_needed', 'invoice_missing', 'amount_review', 'account_review')})
     orders = {}
+    order_lookup_failed = False
     from operations.metorik_bacs_evidence import lookup_orders
     for start in range(0, len(references), 100):
-        orders.update((await lookup_orders(references[start:start + 100]))['orders'])
+        try:
+            orders.update((await lookup_orders(references[start:start + 100]))['orders'])
+        except (m.Stop, httpx.HTTPError):
+            # A unavailable source must not hide the bank exceptions themselves.
+            order_lookup_failed = True
+            break
     items = [resolution.order_evidence(x, orders.get('#' + str(x.get('reference') or '')[2:])) for x in items]
+    items = await resolution.inspect_missing_invoices(api, items)
+    items = resolution.block_shared_invoice_candidates(items)
     reference_counts = Counter(x.get('reference') for x in items)
     created = Counter()
     for item in items:
@@ -425,16 +435,21 @@ async def run(app, conn, api, now):
             if state == 'confirmed':
                 item.update(next_action='Pas de bevestigde toewijzingsregel toe via Automatically; controleer daarna aflettering',
                     retry_when='na Automatically en nieuwe uitlezing', reason='Toewijzingsregel bevestigd; bankregel nog niet afgehandeld')
-        conn.execute('''INSERT INTO jnp_suspense_review(bank_line_id,details) VALUES(%s,%s::jsonb)
-            ON CONFLICT(bank_line_id) DO UPDATE SET details=EXCLUDED.details,observed_at=NOW()''',
-            (item['bank_line_id'], json.dumps(item)))
-    # Remove resolved observations only after a completely successful full read.
-    conn.execute('DELETE FROM jnp_suspense_review WHERE NOT (bank_line_id = ANY(%s::uuid[]))', ([b['ID'] for b in banks],))
-    for item in unresolved:
-        conn.execute('''INSERT INTO jnp_bank_identity_review(cashflow_id,details) VALUES(%s,%s::jsonb)
-            ON CONFLICT(cashflow_id) DO UPDATE SET details=EXCLUDED.details,observed_at=NOW()''',
-            (item['cashflow_id'], json.dumps(item)))
-    conn.execute('DELETE FROM jnp_bank_identity_review WHERE NOT (cashflow_id = ANY(%s::uuid[]))', ([x['cashflow_id'] for x in unresolved],))
+        item.update(decorate(item, now.isoformat()))
+    # Publish a full snapshot together: interrupted scans leave the last full
+    # worklist available, including the unresolved identities and instructions.
+    with conn.transaction():
+        for item in items:
+            conn.execute('''INSERT INTO jnp_suspense_review(bank_line_id,details) VALUES(%s,%s::jsonb)
+                ON CONFLICT(bank_line_id) DO UPDATE SET details=EXCLUDED.details,observed_at=NOW()''',
+                (item['bank_line_id'], json.dumps(item)))
+        conn.execute('DELETE FROM jnp_suspense_review WHERE NOT (bank_line_id = ANY(%s::uuid[]))', ([b['ID'] for b in banks],))
+        for item in unresolved:
+            item.update(decorate(item, now.isoformat()))
+            conn.execute('''INSERT INTO jnp_bank_identity_review(cashflow_id,details) VALUES(%s,%s::jsonb)
+                ON CONFLICT(cashflow_id) DO UPDATE SET details=EXCLUDED.details,observed_at=NOW()''',
+                (item['cashflow_id'], json.dumps(item)))
+        conn.execute('DELETE FROM jnp_bank_identity_review WHERE NOT (cashflow_id = ANY(%s::uuid[]))', ([x['cashflow_id'] for x in unresolved],))
     next_cleanup = conn.execute('SELECT next_cleanup FROM jnp_allocation_maintenance').fetchone()[0]
     cleaned = Counter()
     if not next_cleanup or now >= next_cleanup:
@@ -442,7 +457,11 @@ async def run(app, conn, api, now):
         cleaned = await cleanup(conn, api, recs, now, banks)
     counts = Counter(x['status'] for x in items)
     summary = {'state': 'ready', 'read_stage': 'complete', 'last_scan': now.isoformat(), 'interval_hours': 1, 'cleanup_interval_hours': 24,
-               'bank_lines_1360': len(suspense), 'assigned_open_bank_lines': len(assigned),
+               'bank_lines_1360': sum(b.get('GLAccountCode') == '1360' for b in suspense),
+               'bank_lines_2000': sum(b.get('GLAccountCode') == '2000' for b in suspense),
+               'assigned_open_bank_lines': len(assigned), 'includes_psp_journals': True,
+               'match_candidates': sum(x['status'].endswith('_match_candidate') for x in items),
+               'dashboard_items': len(items) + len(unresolved), 'order_lookup_incomplete': order_lookup_failed,
                'reviewed_bank_lines': len(banks), 'identity_review_count': len(unresolved),
                'review_version': resolution.VERSION, 'classifications': dict(counts), 'rules_checked': len(rules),
                'rule_writes': dict(created), 'cleanup': dict(cleaned), 'bank_writes': False,
@@ -513,7 +532,13 @@ async def status():
     return dict(STATUS)
 
 
-@router.get('/api/allocation-maintenance/report')
+class PrivateJSONResponse(JSONResponse):
+    def __init__(self, *args, **kwargs):
+        kwargs['headers'] = {**kwargs.get('headers', {}), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'}
+        super().__init__(*args, **kwargs)
+
+
+@router.get('/api/allocation-maintenance/report', response_class=PrivateJSONResponse)
 async def report(request: Request):
     config = allocation.configuration()
     if not allocation.configured(config) or request.session.get('allocation_operator') != allocation.store_key(config):
@@ -522,11 +547,22 @@ async def report(request: Request):
     with main._db_connect() as conn:
         rows = conn.execute('SELECT details FROM jnp_suspense_review ORDER BY observed_at DESC,bank_line_id').fetchall()
         identities = conn.execute('SELECT details FROM jnp_bank_identity_review ORDER BY observed_at DESC,cashflow_id').fetchall()
-    return {'status': dict(STATUS), 'items': [r[0] for r in rows], 'identity_items': [r[0] for r in identities]}
+    from operations.bank_review_dashboard import report_data
+    return report_data(dict(STATUS), [r[0] for r in rows], [r[0] for r in identities])
 
 
 @router.get('/allocation/review')
 async def review_page(request: Request):
-    data = await report(request)  # reuse the existing operator session
+    try:
+        data = await report(request)  # reuse the existing operator session
+    except HTTPException as exc:
+        if exc.status_code != 401:
+            raise
+        return HTMLResponse('<!doctype html><html lang="nl"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>Betalingen afhandelen · aanmelden</title><body style="font:17px system-ui;max-width:700px;margin:60px auto;padding:20px">'
+            '<h1>Betalingen afhandelen</h1><p>Meld je aan om de betaalgegevens en afhandelinstructies te bekijken.</p>'
+            '<p><a href="/allocation/login">Aanmelden via Exact Online</a></p></body></html>', status_code=401,
+            headers={'Cache-Control':'no-store', 'Referrer-Policy':'no-referrer'})
     from app import main
-    return main.templates.TemplateResponse(request=request, name='bank_review.html', context=data)
+    return main.templates.TemplateResponse(request=request, name='bank_review.html', context=data,
+        headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})

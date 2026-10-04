@@ -136,9 +136,8 @@ async def test_all_new_resources_are_read_only_and_html_requires_operator():
         with pytest.raises(a.m.Stop):
             await api.request('POST',a.m.BASE+'/api/v1/3977752/'+resource,payload={})
     from starlette.requests import Request
-    with pytest.raises(a.HTTPException) as exc:
-        await a.review_page(Request({'type':'http','session':{}}))
-    assert exc.value.status_code==401
+    response = await a.review_page(Request({'type':'http','session':{}}))
+    assert response.status_code==401 and b'/allocation/login' in response.body
 
 
 @pytest.mark.asyncio
@@ -212,7 +211,7 @@ async def test_open_item_lists_recover_bank_receipts_omitted_by_cashflow_api():
 
 
 @pytest.mark.asyncio
-async def test_payable_open_payment_uses_payable_sign_and_excludes_psp_journal():
+async def test_payable_open_payment_uses_payable_sign_and_includes_psp_journal():
     b={**bank(),'GLAccountCode':'1400','AmountDC':'-85','AmountFC':'-85'}
     payment=invoice(HID=88,Amount='-85',JournalCode='20',InvoiceDate=b['Date'],YourRef=None,EntryNumber=b['EntryNumber'])
     api=MagicMock();api.rows=AsyncMock(return_value=[b])
@@ -222,5 +221,65 @@ async def test_payable_open_payment_uses_payable_sign_and_excludes_psp_journal()
     psp={**J,'20':{**J['20'],'Description':'Plisio'}}
     api.rows.reset_mock()
     result,unresolved=await r.load_open_bank_items(api,[],[payment],psp,headers,a.BANK_FIELDS)
-    assert not result and not unresolved
-    api.rows.assert_not_awaited()
+    assert result and not unresolved
+    assert result[0]['JournalDescription']=='Plisio'
+    assert review(result[0],pays=[payment])['status']=='psp_deferred'
+
+
+def test_psp_candidate_requires_same_source_order_provider_account_and_order_evidence():
+    b={**bank(),'AccountCode':'100100','JournalCode':'26','JournalDescription':'Fibonatix EUR',
+        'Description':'Order TD48605 | Woo 123456 | Betaling ABCD1234'}
+    inv=invoice(AccountCode='100100')
+    item=review(b,[inv])
+    assert item['reference']=='TD48605' and item['payment_transaction_id']=='ABCD1234'
+    assert item['status']=='psp_order_evidence_needed'
+    assert r.order_evidence(item,order(payment_method='wc_fibonatix'))['status']=='psp_match_candidate'
+    assert review(b,[{**inv,'YourRef':'TD49999'}])['status']=='invoice_missing'
+    assert review(b,[{**inv,'AccountId':C}])['status']=='account_review'
+    assert review({**b,'JournalDescription':'Ninja Pay'},[inv])['status']=='account_review'
+    assert r.order_evidence(review(b,[inv]),order(payment_method='bacs'))['status']=='payment_method_review'
+    assert review({**b,'GLAccountCode':'2000'},[inv])['status']=='suspense_identity_needed'
+
+
+def test_two_payments_cannot_both_claim_one_invoice():
+    first=r.order_evidence(review(),order())
+    second={**first,'bank_line_id':T}
+    result=r.block_shared_invoice_candidates([first,second])
+    assert all(x['status']=='multiple_payments_review' for x in result)
+    assert all(x['match_executed'] is False for x in result)
+
+
+@pytest.mark.asyncio
+async def test_existing_closed_or_draft_invoice_is_not_reported_missing():
+    item=r.order_evidence(review(recs=[]),order(status='processing'))
+    api=MagicMock();api.rows=AsyncMock(return_value=[dict(YourRef='TD48605',EntryNumber=26722801)])
+    result=await r.inspect_missing_invoices(api,[item])
+    assert result[0]['status']=='invoice_not_open'
+    assert result[0]['existing_sales_entries'][0]['EntryNumber']==26722801
+    assert result[0]['match_executed'] is False
+
+
+@pytest.mark.asyncio
+async def test_open_item_reference_must_not_use_another_orders_same_amount():
+    b={**bank(),'Description':'Order TD48605 | Woo 123456 | Betaling ABCD1234'}
+    open_bank=invoice(HID=77,Amount='-324',JournalCode='20',InvoiceDate=b['Date'],YourRef='TD49999',EntryNumber=b['EntryNumber'])
+    api=MagicMock();api.rows=AsyncMock(return_value=[b])
+    headers={E:dict(EntryID=E,JournalCode='20',Currency='EUR')}
+    result,unresolved=await r.load_open_bank_items(api,[open_bank],[],J,headers,a.BANK_FIELDS)
+    assert not result and len(unresolved)==1
+    assert unresolved[0]['remaining_bank_amount_signed']=='324'
+    assert unresolved[0]['next_action'] and unresolved[0]['reference']=='TD49999'
+
+
+def test_dashboard_renders_all_rows_including_ambiguous_and_escapes_descriptions():
+    from operations.bank_review_dashboard import report_data
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+    data=report_data({'last_scan':datetime.now(timezone.utc).isoformat(),'state':'ready'},
+        [r.order_evidence(review(),order())],
+        [dict(cashflow_id=C,description='<script>alert(1)</script>',status='bank_identity_review',
+            remaining_bank_amount_signed='-2.00',journal_code='26',bank_date='2026-10-01')])
+    assert data['total']==2 and data['totals']=={'candidate':1,'review':1}
+    assert all(x['needed_information'] and x['next_action'] and x['retry_when'] for x in data['items'])
+    html=Environment(loader=FileSystemLoader('app/templates'),autoescape=select_autoescape()).get_template('bank_review.html').render(**data)
+    assert '<script>alert(1)</script>' not in html and '&lt;script&gt;' in html
+    assert '-2.00' in html and html.count('<tr data-status=')==2

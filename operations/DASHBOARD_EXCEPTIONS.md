@@ -43,16 +43,50 @@ wanneer, met de beperking tot die concrete uitzondering. De private artefacten
 `settlement_before` en `settlement_after` bewaren beslissing en Exact-bewijs.
 Een voorbereid script of deployment geldt niet als uitgevoerde boeking.
 
-De gebruiker accepteert aflettering tussen orders binnen een verzameldebiteur
-als het saldo klopt en betaalde orders niet meer openstaan. Een afwijkende
-YourRef is op zichzelf geen reden voor een massale herstelactie. Toon wel de
-bronorder en werkelijke Exact-toewijzing apart, zodat het dossier navolgbaar is.
+## Geldende afletterregel — besluit 4 oktober 2026, 21:45 CEST
 
-## Verbetering voor toekomstige aflettering
+Deze instructie vervangt uitdrukkelijk het eerdere akkoord om betalingen tussen
+orders te verschuiven zolang het verzameldebiteuren-saldo klopt. Iedere betaling
+moet bij de eigen order en de bijbehorende Exact-factuur terechtkomen. Anders is
+de debiteurenlijst niet bruikbaar om ontbrekende of fout verwerkte posten te vinden.
 
-Streef naar koppeling op bewezen factuuridentiteit plus bedrag vóór aflettering.
-Alleen een gelijk bedrag is onvoldoende om dezelfde order te bewijzen. Toon
-bronreferentie en werkelijke toewijzing apart en houd onduidelijke gevallen in
-de werklijst. Bestaande geaccepteerde toewijzingen hoeven hiervoor niet opnieuw.
-Volledig terugbetaalde orders zijn aparte refund-/creditfactuurgevallen en mogen
-niet als nog onbetaalde normale orders worden gepresenteerd.
+- Bewijs de koppeling tussen PSP-transactie, Woo-/TD-order en Exact-factuuridentiteit.
+- Controleer administratie, debiteur, valuta, bedrag en eventueel deelbetalingen.
+- Een gelijk bedrag of dezelfde verzameldebiteur is nooit genoeg voor een match.
+- Een reeds afgeletterde factuur vergt controle van de bestaande betaling. Match
+  de nieuwe ontvangst niet met een andere order om haar te sluiten.
+- Geen open post gevonden betekent niet automatisch dat de factuur ontbreekt:
+  zoek ook naar bestaande, reeds afgeletterde facturen en andere debiteuren.
+- Een onbekende of ontbrekende factuur laat de ontvangst zichtbaar open bij de
+  bronorder. De dashboardwerklijst vermeldt het bewijs en de benodigde vervolgstap.
+- Een goedgekeurd betalingsverschil blijft beperkt tot de eigen order en de
+  specifiek goedgekeurde omvang. Het is geen toestemming voor een andere betaling.
+- Refunds en creditfacturen blijven herleidbaar naar hun oorspronkelijke order.
+
+## Bestaande koppelingen herstellen
+
+Inventariseer afwijkingen tussen bronorder en werkelijke toewijzing over de hele
+geïmporteerde periode, inclusief eerder verwerkte weken. Bewaar het oorspronkelijke
+dossier. Een afwijkende YourRef is een onderzoekssignaal: bevestig de daadwerkelijk
+geselecteerde factuur in Exact voordat een aflettering wordt losgemaakt.
+
+Herstel uitsluitend bewezen verkeerde koppelingen, inclusief de samenhangende
+keten van betalingen en facturen. Koppel daarna iedere ontvangst aan de eigen
+factuur. Bewaar geïmporteerde betalingen, bronreferenties en totalen. Een eerder
+goedgekeurd verschil moet bij de eigen order blijven; voorkom dubbele afboeking.
+Bestaande correcte afletteringen blijven intact.
+
+## Controle op voltooiing
+
+Controleer beide kanten: iedere ontvangst heeft haar eigen factuur (of een
+zichtbare, verklaarde uitzondering), en iedere factuur toont het juiste openstaande
+saldo. Alleen 'alle betaalde facturen zijn gesloten' of een kloppend totaalsaldo
+is onvoldoende. Het dashboard moet bronorder, werkelijke toewijzing en uitvoering
+naast elkaar kunnen tonen, met 'verkeerde order gekoppeld' als expliciete reden.
+
+Het beleid verbiedt de oude Automatically-actie en afwikkeling met een ontvangst
+van een andere order. De technische blokkade in `source_order_policy.py` is via `app/main.py` aan de
+applicatie gekoppeld. Na een handmatige deployment bevestigt de beveiligde
+`order-policy`-route of de draaiende versie deze blokkade daadwerkelijk gebruikt.
+Een gerichte herstelfunctie is nog niet geïmplementeerd; het vastleggen van deze
+regel corrigeert bestaande Exact-koppelingen niet.

@@ -18,15 +18,18 @@ from fastapi import APIRouter, HTTPException, Request
 from operations import allocation_connection as allocation, bacs_debtor_transfer as m
 from operations import tax_reference as tax, woo_iban_rules as woo
 from operations.tax_allocation import ROOT
+from operations import bank_resolution as resolution
 
 router = APIRouter()
 log = logging.getLogger('uvicorn.error')
 LOCK = 397775213600
-VERSION = 'maintenance-v1'
+VERSION = 'maintenance-v2'
 STATUS = {'state': 'starting', 'bank_writes': False, 'automatically_executed': False}
 FIELDS = ('Account', 'AccountBankAccount', 'GLAccount', 'Words', 'Costcenter', 'Costunit', 'VATCode')
-BANK_FIELDS = 'ID,EntryID,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,GLAccountCode,Modified'
-READS = {'financialtransaction/BankEntryLines', 'financialtransaction/BankEntries', 'read/financial/ReceivablesList', 'crm/Accounts', 'financial/GLAccounts'}
+BANK_FIELDS = 'ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,AmountFC,Account,AccountCode,AccountName,GLAccountCode,Modified'
+READS = {'financialtransaction/BankEntryLines', 'financialtransaction/BankEntries', 'financialtransaction/TransactionLines',
+         'cashflow/Receivables', 'cashflow/Payments', 'read/financial/ReceivablesList', 'read/financial/PayablesList',
+         'crm/Accounts', 'financial/GLAccounts', 'financial/Journals'}
 PSP = re.compile(r'icepay|paynetics|fibonat|stripe|paypal|plisio|ninja|suap|myco', re.I)
 BOSCI = re.compile(r'(?<![a-z0-9_])bosci_[a-f0-9]{29}(?:[a-f0-9]{3})?(?![a-z0-9_])', re.I)
 
@@ -52,6 +55,8 @@ class MaintenanceAPI(woo.ExactAPI):
             allowed = bool(entity and entity[1] in self.allowed_deletes and payload is None and not p.query)
         if not allowed or p.scheme != 'https' or p.netloc != 'start.exactonline.nl' or p.username or p.fragment:
             raise m.Stop('Maintenance resource/method rejected')
+        if method == 'GET':
+            STATUS['read_stage'] = p.path.split(str(m.DIVISION) + '/', 1)[-1]
         if self.limits.get('remaining', 1000) <= 200:
             raise m.Stop('Maintenance API reserve')
         await asyncio.sleep(max(0, 1.2 - (time.monotonic() - self.last_request)))
@@ -88,7 +93,7 @@ def duplicates(rules, preferred=()):
 
 
 def order_reference(description):
-    if tax.tax_hint({'Description': description}) or PSP.search(description) or re.search(r'refund|double payment|terugbetaling', description, re.I):
+    if tax.tax_hint({'Description': description}) or PSP.search(description) or resolution.REFUND.search(description):
         return None
     explicit = re.findall(r'(?<![A-Za-z0-9])(?:TD|order(?:\s*(?:number|nummer|no\.?))?\s*[:#-]?\s*)([0-9]{4,7})(?![0-9])', description, re.I)
     numbers = explicit or re.findall(r'(?<![A-Za-z0-9])([0-9]{5,6})(?![A-Za-z0-9])', BOSCI.sub('', description))
@@ -122,7 +127,7 @@ def normal_name(text):
 
 def supplier_proposal(bank, suppliers, history_counts):
     desc = str(bank.get('Description') or '').strip()
-    if tax.tax_hint(bank) or m.amount(bank['AmountDC']) >= 0 or PSP.search(desc) or re.search(r'refund|double payment|terugbetaling|belastingdienst', desc, re.I):
+    if tax.tax_hint(bank) or m.amount(bank['AmountDC']) >= 0 or resolution.is_psp(bank) or resolution.REFUND.search(desc):
         return None
     text = ' ' + normal_name(desc) + ' '
     matches = []
@@ -149,11 +154,11 @@ def classify(bank, rules, receivables):
         result.update(status='tax_review' if decision['status'] != 'TAX_IDENTIFIED' else 'tax_rule_ready',
                       reason=decision['reason'], tax=decision)
         return result
-    if PSP.search(desc):
+    if resolution.is_psp(bank):
         result.update(status='psp_deferred', reason='PSP-bankdagboek en kruispostrekening worden later ingericht')
         return result
     if m.amount(bank['AmountDC']) < 0:
-        if re.search(r'refund|double payment|terugbetaling', desc, re.I):
+        if resolution.REFUND.search(desc):
             result.update(status='refund_review', reason='Terugbetaling apart beoordelen'); return result
         found = [r for r in rules if str(r.get('Words') or '').strip()
                  and str(r['Words']).lower() in desc.lower() and not r.get('AccountBankAccount')]
@@ -176,8 +181,8 @@ def classify(bank, rules, receivables):
         result.update(reason='Bedrag of valuta wijkt af; ook kleine verschillen blijven open', status='amount_review'); return result
     if result['account_code'] != '109372':
         result.update(reason='Factuur staat niet op de banktransferdebiteur', status='account_review'); return result
-    if tax.bank_date(bank['Date']) < tax.bank_date(rec['InvoiceDate']):
-        result.update(reason='Betaling dateert van voor de factuur', status='date_review'); return result
+    # Webshop invoices arrive after shipment. Validate order creation instead in
+    # resolution.order_evidence; an earlier payment is not an invoice-date error.
     result.update(status='order_evidence_needed', reason='Unieke factuur en exact bedrag; controleer betaalmethode', receivable=rec)
     return result
 
@@ -220,6 +225,8 @@ def initialize(conn):
     conn.execute('INSERT INTO jnp_allocation_maintenance(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING')
     conn.execute('''CREATE TABLE IF NOT EXISTS jnp_suspense_review (
         bank_line_id UUID PRIMARY KEY, details JSONB NOT NULL, observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS jnp_bank_identity_review (
+        cashflow_id UUID PRIMARY KEY, details JSONB NOT NULL, observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
     conn.execute('''CREATE TABLE IF NOT EXISTS jnp_rule_cleanup_audit (
         rule_id UUID PRIMARY KEY, payload JSONB NOT NULL, keeper_id UUID, reason TEXT NOT NULL,
         state TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
@@ -356,15 +363,23 @@ async def cleanup(conn, api, recs, now, banks):
 
 
 async def run(app, conn, api, now):
-    banks = await api.rows('financialtransaction/BankEntryLines', params={
+    suspense = await api.rows('financialtransaction/BankEntryLines', params={
         '$filter': "GLAccountCode eq '1360'", '$select': BANK_FIELDS, '$orderby': 'ID'})
-    recs = await api.rows('read/financial/ReceivablesList', params={'$select':
-        'AccountId,AccountCode,Amount,CurrencyCode,InvoiceDate,YourRef,EntryNumber'})
+    recs = await api.rows('read/financial/ReceivablesList', params={'$select': resolution.OPEN_FIELDS})
+    payables = await api.rows('read/financial/PayablesList', params={'$select': resolution.OPEN_FIELDS})
+    journals = {str(j['Code']).strip(): j for j in await api.rows('financial/Journals', params={
+        '$select': 'Code,Description,Type,BankAccountDescription'})}
+    headers = {str(h['EntryID']).lower(): h for h in await api.rows('financialtransaction/BankEntries', params={
+        '$select': 'EntryID,JournalCode,JournalDescription,Currency'})}
+    suspense = [resolution.enrich_bank(b, headers, journals) for b in suspense]
+    assigned, unresolved = await resolution.load_assigned(api, journals, headers, BANK_FIELDS)
+    banks = list({b['ID']: b for b in suspense + assigned}.values())
     rules = await api.rules()
     metadata = conn.execute('SELECT metadata FROM jnp_tax_control').fetchone()[0]
     if not metadata:
         raise m.Stop('Tax metadata not ready')
-    items = [classify(b, rules, recs) for b in banks]
+    peers = resolution.duplicate_candidates(banks)
+    items = [resolution.review(b, classify(b, rules, recs), recs, payables, journals, peers) for b in banks]
     cache, cache_at = conn.execute('SELECT cache,cache_at FROM jnp_allocation_maintenance').fetchone()
     if not cache or not cache_at or now - cache_at >= timedelta(days=1):
         suppliers = await api.rows('crm/Accounts', params={'$filter': 'IsSupplier eq true', '$select': 'ID,Code,Name,IsSupplier,EndDate'})
@@ -376,6 +391,8 @@ async def run(app, conn, api, now):
     suppliers, history_counts = cache['suppliers'], Counter(cache['history_counts'])
     refund_proposals = {}
     for bank, item in zip(banks, items):
+        if item['gl_account'] != '1360':
+            continue
         payload = vat_refund(bank, metadata)
         if payload:
             refund_proposals[item['bank_line_id']] = payload
@@ -385,37 +402,59 @@ async def run(app, conn, api, now):
             if payload:
                 refund_proposals[item['bank_line_id']] = payload
                 item.update(status='supplier_rule_proposed', reason='Unieke leveranciersnaam en minstens twee geboekte betalingen op die relatie')
-    references = sorted({x['reference'] for x in items if x['status'] == 'order_evidence_needed'})
+    references = sorted({x['reference'] for x in items if x.get('reference') and x['status'] in
+        ('order_evidence_needed', 'invoice_missing', 'amount_review', 'account_review')})
     orders = {}
     from operations.metorik_bacs_evidence import lookup_orders
     for start in range(0, len(references), 100):
         orders.update((await lookup_orders(references[start:start + 100]))['orders'])
+    items = [resolution.order_evidence(x, orders.get('#' + str(x.get('reference') or '')[2:])) for x in items]
     reference_counts = Counter(x.get('reference') for x in items)
     created = Counter()
     for item in items:
-        payload = refund_proposals.get(item['bank_line_id']) or proposal(item, orders.get('#' + str(item.get('reference') or '')[2:]), reference_counts)
+        payload = refund_proposals.get(item['bank_line_id'])
+        if item['gl_account'] == '1360' and item.get('order_check') == 'verified':
+            payload = payload or proposal(item, orders.get('#' + str(item.get('reference') or '')[2:]), reference_counts)
         if payload and api.post_count < 25:
             state = await create_rule(conn, api, item, payload)
             created[state] += 1
             item.update(status='new_rule_' + state, payload=payload)
+            if state == 'confirmed':
+                item.update(next_action='Pas de bevestigde toewijzingsregel toe via Automatically; controleer daarna aflettering',
+                    retry_when='na Automatically en nieuwe uitlezing', reason='Toewijzingsregel bevestigd; bankregel nog niet afgehandeld')
         conn.execute('''INSERT INTO jnp_suspense_review(bank_line_id,details) VALUES(%s,%s::jsonb)
             ON CONFLICT(bank_line_id) DO UPDATE SET details=EXCLUDED.details,observed_at=NOW()''',
             (item['bank_line_id'], json.dumps(item)))
     # Remove resolved observations only after a completely successful full read.
     conn.execute('DELETE FROM jnp_suspense_review WHERE NOT (bank_line_id = ANY(%s::uuid[]))', ([b['ID'] for b in banks],))
+    for item in unresolved:
+        conn.execute('''INSERT INTO jnp_bank_identity_review(cashflow_id,details) VALUES(%s,%s::jsonb)
+            ON CONFLICT(cashflow_id) DO UPDATE SET details=EXCLUDED.details,observed_at=NOW()''',
+            (item['cashflow_id'], json.dumps(item)))
+    conn.execute('DELETE FROM jnp_bank_identity_review WHERE NOT (cashflow_id = ANY(%s::uuid[]))', ([x['cashflow_id'] for x in unresolved],))
     next_cleanup = conn.execute('SELECT next_cleanup FROM jnp_allocation_maintenance').fetchone()[0]
     cleaned = Counter()
     if not next_cleanup or now >= next_cleanup:
         conn.execute('UPDATE jnp_allocation_maintenance SET next_cleanup=%s', (now + timedelta(days=1),))
         cleaned = await cleanup(conn, api, recs, now, banks)
     counts = Counter(x['status'] for x in items)
-    summary = {'state': 'ready', 'last_scan': now.isoformat(), 'interval_hours': 1, 'cleanup_interval_hours': 24,
-               'bank_lines_1360': len(banks), 'classifications': dict(counts), 'rules_checked': len(rules),
+    summary = {'state': 'ready', 'read_stage': 'complete', 'last_scan': now.isoformat(), 'interval_hours': 1, 'cleanup_interval_hours': 24,
+               'bank_lines_1360': len(suspense), 'assigned_open_bank_lines': len(assigned),
+               'reviewed_bank_lines': len(banks), 'identity_review_count': len(unresolved),
+               'review_version': resolution.VERSION, 'classifications': dict(counts), 'rules_checked': len(rules),
                'rule_writes': dict(created), 'cleanup': dict(cleaned), 'bank_writes': False,
                'automatically_executed': False, 'refresh_required': any(x['status'] in ('new_rule_confirmed','existing_rule_ready','tax_rule_ready') for x in items), 'vpb_instalments_preserved': True, 'tax_rules_auto_expiry': False}
-    # Private operational log: limited descriptions for requested financial review.
-    log.info('allocation_maintenance review %s', json.dumps({'summary': summary,
-        'items': [{k: x.get(k) for k in ('bank_line_id','description','amount','status','reference','account_code')} for x in items[:40]]}))
+    # Private operational logs contain concrete follow-up evidence; public status
+    # remains aggregate-only. Never claim that a match candidate was executed.
+    log.info('allocation_maintenance review %s', json.dumps({'summary': summary}))
+    fields = ('bank_line_id','entry_number','description','amount','status','reference','account_code',
+        'journal','next_action','reason','invoice_reference','invoice_entry','invoice_open_amount',
+        'remaining_bank_amount','difference','order_total','order_status','payment_method','possible_duplicate_ids')
+    for start in range(0, len(items), 20):
+        log.info('bank_resolution details %s', json.dumps({'scan': now.isoformat(), 'offset': start,
+            'items': [{k: x.get(k) for k in fields if x.get(k) is not None} for x in items[start:start + 20]]}))
+    if unresolved:
+        log.info('bank_resolution identity_review %s', json.dumps(unresolved))
     return summary
 
 
@@ -462,7 +501,7 @@ async def serve(app):
             raise
         except Exception as exc:
             STATUS['state'] = 'error'
-            log.warning('allocation_maintenance error type=%s status=%s', type(exc).__name__, exc.status_code if isinstance(exc, m.ExactRequestError) else None)
+            log.warning('allocation_maintenance error type=%s status=%s stage=%s', type(exc).__name__, exc.status_code if isinstance(exc, m.ExactRequestError) else None, STATUS.get('read_stage'))
         await asyncio.sleep(60)
 
 
@@ -479,4 +518,12 @@ async def report(request: Request):
     from app import main
     with main._db_connect() as conn:
         rows = conn.execute('SELECT details FROM jnp_suspense_review ORDER BY observed_at DESC,bank_line_id').fetchall()
-    return {'status': dict(STATUS), 'items': [r[0] for r in rows]}
+        identities = conn.execute('SELECT details FROM jnp_bank_identity_review ORDER BY observed_at DESC,cashflow_id').fetchall()
+    return {'status': dict(STATUS), 'items': [r[0] for r in rows], 'identity_items': [r[0] for r in identities]}
+
+
+@router.get('/allocation/review')
+async def review_page(request: Request):
+    data = await report(request)  # reuse the existing operator session
+    from app import main
+    return main.templates.TemplateResponse(request=request, name='bank_review.html', context=data)

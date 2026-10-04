@@ -7,15 +7,16 @@ bankdagboeken en kruispostrekeningen. De bestaande debiteurenroutering blijft st
 
 ## Uitgevoerde controle
 
-De bestaande Render-service leest ieder uur alle bankregels op 1360 en de actuele
-openstaande verkoopposten, inclusief alle paginapagina's. Leveranciers en geboekte
+De bestaande Render-service leest ieder uur alle bankregels op 1360, open
+debiteuren- en crediteurenbetalingen uit gewone bankboeken en de actuele
+openstaande verkoop- en inkoopposten, inclusief alle paginapagina's. Leveranciers en geboekte
 uitgaande betaalhistorie worden dagelijks ververst. Er is een API-reserve van 200,
 geen sleutelwissel en geen bank-, memoriaal- of MatchSets-write.
 
 Nieuwe regels zijn alleen toegestaan voor:
 
-- Een expliciete btw-teruggaaf van de Belastingdienst: relatie 1 en balansrekening
-  1770, met de volledige omschrijving of de unieke BOSCI-code als herkenning.
+- Een expliciete btw-teruggaaf van de Belastingdienst: uitsluitend balansrekening
+  1770, zonder relatie, met de volledige bewezen omschrijving als herkenning.
   Rente, boete, verrekening, tegenstrijdige belastingsoorten of ongeldige
   betalingskenmerken blijven ter beoordeling.
 - Een unieke bestaande leveranciersnaam, met minstens twee eerder geboekte
@@ -24,6 +25,41 @@ Nieuwe regels zijn alleen toegestaan voor:
 - Eén bankontvangst voor één unieke openstaande BACS-factuur op 109372, met exact
   hetzelfde bedrag en EUR-valuta, bevestigd in Metorik zonder terugbetaling. De
   bankregel en factuur worden direct voor het maken van de regel opnieuw gelezen.
+
+## Beoordeling van al toegewezen betalingen (v1.12)
+
+- Een open cashflowrecord in een gewoon bankdagboek is het bewijs dat een betaling
+  nog openstaat. Een 1100/1400-boeking op zichzelf bewijst dat niet. Koppel via de
+  TransactionID, EntryID en LineNumber aan de bankregel en controleer relatie,
+  grootboek, bedrag en valuta. Onzekere identiteiten blijven in de aparte
+  controlelijst; geen matching of boekingswijziging op een gegiste identiteit.
+- Gebruik het resterende bankbedrag en het resterende factuurbedrag. Noem een
+  openstaand saldo nooit het oorspronkelijke factuurbedrag.
+- Gebruik alleen verkoop-/inkoopdagboeken als factuurbron, zodat een andere
+  bankbetaling niet als ontbrekende factuur wordt voorgesteld.
+- Betaling vóór factuurdatum is mogelijk bij facturatie na verzending. Controleer
+  de besteldatum in Europe/Amsterdam; een betaling vóór de bestelling vraagt
+  onderzoek. Verifieer BACS-betaalmethode, bedrag, valuta, status en refunds.
+- Bij gelijke betaling en webshopordertotaal maar afwijkend factuursaldo: controleer
+  import, credits en eerdere afletteringen. Boek het verschil niet automatisch af.
+- Leveranciers: geef een matchkandidaat alleen bij dezelfde relatie, valuta,
+  tegengestelde richting, eenduidige factuurreferentie en exact openstaand bedrag.
+  Alleen hetzelfde bedrag is een zoekkandidaat, geen bewezen match.
+- Herken ook `cancelation`, `cancellation`, `overpayment` en dubbele-betalingsrefunds.
+  Die vragen de oorspronkelijke ontvangst of creditnota, geen kostenregel.
+- Herken PSP-bankboeken via dagboekmetadata, ook als er alleen `Order 43960` staat.
+  Een uitgaande `PAYPAL *merchant`-kaartbetaling is geen PSP-uitbetaling.
+- Signaleer mogelijke dubbele regels op eigen bankboek, datum, valuta, bedrag en
+  bronkenmerk/tegenpartij. Verwijder nooit op die gelijkenis. Herbeoordeling gebeurt
+  uit de actuele Exact-data; elders verwijderde imports verdwijnen uit de lijst.
+
+De bestaande regelschrijver blijft actief voor bewezen 1360-toewijzingen. De
+uitbreiding schrijft geen bankboekingen of MatchSets, activeert geen oude
+memoriaalroute en beweert niet dat een kandidaat al afgeletterd is. Rechtstreeks
+afletteren en Automatically vereisen nog de Exact-uitvoerstap en resultaatcontrole.
+Iedere regel krijgt `next_action`, `reason` en `retry_when` en wordt ieder uur
+herbeoordeeld. `/allocation/review` toont dit achter dezelfde operatorsessie als
+het JSON-verslag; de openbare status bevat alleen aantallen en processtatus.
 
 Per ronde worden maximaal 25 nieuwe regels gemaakt. Een duurzame aanmaakintentie
 wordt eerst vastgelegd, waarna de regel uit Exact wordt teruggelezen. Onzekere
@@ -72,4 +108,8 @@ Bronnen en verificatie:
 - https://start.exactonline.nl/docs/HlpRestAPIResources.aspx
 - https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=CashflowAllocationRule
 - https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=FinancialTransactionBankEntryLines
+- https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=CashflowReceivables
+- https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=CashflowPayments
+- https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=ReadFinancialPayablesList
+- https://start.exactonline.nl/docs/HlpRestAPIResourcesDetails.aspx?name=FinancialJournals
 - Knop en schermnaam bevestigd in de door de operator aangeleverde screenshot.

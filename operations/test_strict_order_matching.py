@@ -4,7 +4,7 @@ from unittest.mock import patch
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from operations import strict_order_matching as strict
-from operations.strict_order_matching import own_invoice, source_receipts, verify_wrong_selection, verify_source, approved_difference, difference_total
+from operations.strict_order_matching import own_invoice, source_receipts, verify_wrong_selection, verify_source, approved_difference, difference_total, verify_difference_change
 
 
 class StrictMatchingTests(unittest.TestCase):
@@ -90,6 +90,16 @@ class StrictMatchingTests(unittest.TestCase):
                     response = client.post('/strict/' + mode + '?limit=6')
                     self.assertEqual(response.status_code, 409)
             state.assert_not_called()
+
+    def test_clearing_reference_is_not_a_writeoff_reversal(self):
+        before = [dict(GLAccountCode='9920', YourRef='TD100', AmountDC=-3)]
+        cleared = [dict(GLAccountCode='9920', YourRef=None, AmountDC=-3)]
+        with self.assertRaises(HTTPException):
+            verify_difference_change(before, cleared, 'TD100', 3, reverse=True)
+        verify_difference_change(before, [], 'TD100', 3, reverse=True)
+        verify_difference_change([], before, 'TD100', 3)
+        with self.assertRaises(HTTPException):
+            verify_difference_change(before, before, 'TD100', 3)
 
 
 if __name__ == '__main__':

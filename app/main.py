@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 import json
 import os
 import re
@@ -42,72 +42,10 @@ MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
 @asynccontextmanager
 async def lifespan(_app):
-    from app.dashboard.worklist import readiness_probe
-    dashboard_probe_task = asyncio.create_task(readiness_probe())
-    from operations.automatic_debtor_routing import serve
     from app import main as app_module
-    task = asyncio.create_task(serve(app_module))
-    from operations.woo_iban_rules import serve as serve_iban
-    iban_task = asyncio.create_task(serve_iban(app_module))
-    from operations.tax_agent import serve as serve_tax
-    tax_task = asyncio.create_task(serve_tax(app_module))
-    from operations.allocation_maintenance import serve as serve_maintenance
-    maintenance_task = asyncio.create_task(serve_maintenance(app_module))
-    from operations.fibonetics_read_report import run as read_fibonetics_report
-    fibonetics_report_task = asyncio.create_task(read_fibonetics_report(app_module))
-    from operations.recent_import_read_report import run as read_recent_imports
-    recent_imports_task = asyncio.create_task(read_recent_imports(app_module))
-    from operations.paragon_login_probe import run as run_paragon_login_probe
-    paragon_login_probe_task = asyncio.create_task(run_paragon_login_probe())
-    from operations.exact_login_probe import run as run_exact_login_probe
-    exact_login_probe_task = asyncio.create_task(run_exact_login_probe())
-    from operations.icepay_journal_task import run as run_icepay_journal_task
-    icepay_journal_task = asyncio.create_task(run_icepay_journal_task(app_module))
-    from operations.icepay_fetch_probe import run as run_icepay_fetch_probe
-    icepay_fetch_task = asyncio.create_task(run_icepay_fetch_probe())
-    from operations.icepay_transactions import run as run_icepay_transactions
-    icepay_transactions_task = asyncio.create_task(run_icepay_transactions())
-    try:
+    from app.runtime import background_tasks
+    async with background_tasks(app_module):
         yield
-    finally:
-        dashboard_probe_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await dashboard_probe_task
-        from operations.fibonatix_import import shutdown as shutdown_fibonatix
-        await shutdown_fibonatix()
-        task.cancel()
-        iban_task.cancel()
-        tax_task.cancel()
-        maintenance_task.cancel()
-        fibonetics_report_task.cancel()
-        recent_imports_task.cancel()
-        paragon_login_probe_task.cancel()
-        exact_login_probe_task.cancel()
-        icepay_journal_task.cancel()
-        icepay_fetch_task.cancel()
-        icepay_transactions_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        with suppress(asyncio.CancelledError):
-            await iban_task
-        with suppress(asyncio.CancelledError):
-            await tax_task
-        with suppress(asyncio.CancelledError):
-            await maintenance_task
-        with suppress(asyncio.CancelledError):
-            await fibonetics_report_task
-        with suppress(asyncio.CancelledError):
-            await recent_imports_task
-        with suppress(asyncio.CancelledError):
-            await paragon_login_probe_task
-        with suppress(asyncio.CancelledError):
-            await exact_login_probe_task
-        with suppress(asyncio.CancelledError):
-            await icepay_journal_task
-        with suppress(asyncio.CancelledError):
-            await icepay_fetch_task
-        with suppress(asyncio.CancelledError):
-            await icepay_transactions_task
 
 
 app = FastAPI(title="JNP Matching", version="1.14.0", lifespan=lifespan)
@@ -205,7 +143,7 @@ def _save_tokens(tokens: dict[str, Any]) -> None:
         pass
 
 
-async def _refresh_tokens(tokens: dict[str, Any]) -> dict[str, Any]:
+async def _exchange_refresh_tokens(tokens: dict[str, Any]) -> dict[str, Any]:
     _require_config()
     refresh_token = tokens.get("refresh_token")
     if not refresh_token:
@@ -218,33 +156,36 @@ async def _refresh_tokens(tokens: dict[str, Any]) -> dict[str, Any]:
             "client_secret": CLIENT_SECRET,
         })
     if resp.status_code >= 400:
-        raise HTTPException(resp.status_code, f"Exact token refresh failed: {resp.text[:500]}")
+        raise HTTPException(resp.status_code, "Exact token refresh failed; details suppressed.")
     new_tokens = resp.json()
     if "refresh_token" not in new_tokens:
         new_tokens["refresh_token"] = refresh_token
-    _save_tokens(new_tokens)
     return new_tokens
 
 
 _token_access_lock = asyncio.Lock()
 
 
-async def _access_token() -> str:
-    # The routing worker and the new IBAN worker share a rotating OAuth token.
+@asynccontextmanager
+async def _main_token_session():
+    from operations.exact_token_store import token_session, TokenStoreUnavailable
     async with _token_access_lock:
-        return await _access_token_unlocked()
+        try:
+            async with token_session(DATABASE_URL, _load_tokens, _save_tokens) as store:
+                yield store
+        except HTTPException:
+            raise
+        except TokenStoreUnavailable as exc:
+            status = 401 if str(exc) == "exact_not_connected" else 503
+            raise HTTPException(status, "Exact token unavailable; reconnect or retry later.") from None
+        except Exception:
+            raise HTTPException(503, "Exact token storage unavailable; details suppressed.") from None
 
 
-async def _access_token_unlocked() -> str:
-    tokens = _load_tokens()
-    if not tokens:
-        raise HTTPException(401, "Exact Online is not connected yet. Visit /login.")
-    if int(tokens.get("expires_at", 0)) <= int(time.time()):
-        tokens = await _refresh_tokens(tokens)
-    access_token = tokens.get("access_token")
-    if not access_token:
-        raise HTTPException(401, "Stored Exact token is invalid.")
-    return access_token
+async def _access_token(*, rejected_token: str | None = None) -> str:
+    from operations.exact_token_store import access_token
+    async with _main_token_session() as store:
+        return await access_token(store, _exchange_refresh_tokens, rejected_token=rejected_token)
 
 
 def _extract_results(payload: Any) -> list[dict[str, Any]]:
@@ -265,7 +206,7 @@ def _extract_entity(payload: Any) -> dict[str, Any]:
     return {}
 
 
-async def _request_json(method: str, url: str, params=None, payload=None) -> Any:
+async def _request_json(method: str, url: str, params=None, payload=None, *, _auth_retry=True) -> Any:
     token = await _access_token()
     async with httpx.AsyncClient(timeout=45) as client:
         resp = await client.request(
@@ -279,9 +220,9 @@ async def _request_json(method: str, url: str, params=None, payload=None) -> Any
                 "Content-Type": "application/json",
             },
         )
-    if resp.status_code == 401:
-        await _refresh_tokens(_load_tokens() or {})
-        return await _request_json(method, url, params, payload)
+    if resp.status_code == 401 and _auth_retry:
+        await _access_token(rejected_token=token)
+        return await _request_json(method, url, params, payload, _auth_retry=False)
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, f"Exact API error: {resp.text[:1200]}")
     return resp.json() if resp.text.strip() else {}
@@ -1219,7 +1160,7 @@ def build_direct_match_xml(plan: dict[str, Any]) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-async def upload_matchset(xml_payload: bytes) -> str:
+async def upload_matchset(xml_payload: bytes, *, _auth_retry=True) -> str:
     token = await _access_token()
     async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
         resp = await client.post(
@@ -1228,9 +1169,9 @@ async def upload_matchset(xml_payload: bytes) -> str:
             content=xml_payload,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/xml; charset=utf-8", "Accept": "application/xml,text/xml,*/*"},
         )
-    if resp.status_code == 401:
-        await _refresh_tokens(_load_tokens() or {})
-        return await upload_matchset(xml_payload)
+    if resp.status_code == 401 and _auth_retry:
+        await _access_token(rejected_token=token)
+        return await upload_matchset(xml_payload, _auth_retry=False)
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, f"MatchSets upload failed: {resp.text[:1200]}")
     text = resp.text.strip()
@@ -1294,14 +1235,20 @@ async def login(request: Request):
 
 @app.get("/oauth/callback")
 async def oauth_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
+    # The one-use authorization code must not appear in the access-log URL.
+    request.scope["query_string"] = b""
     _require_config()
-    if error: raise HTTPException(400, f"Exact authorization failed: {error}")
+    if error: raise HTTPException(400, "Exact authorization failed; details suppressed.")
     expected_state = request.session.pop("oauth_state", None)
     if not code or not state or state != expected_state: raise HTTPException(400, "Invalid OAuth callback/state.")
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(TOKEN_URL, data={"grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT_URI, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET})
-    if resp.status_code >= 400: raise HTTPException(resp.status_code, f"Exact token exchange failed: {resp.text[:500]}")
-    _save_tokens(resp.json()); return RedirectResponse("/")
+    from operations.exact_token_store import prepared_tokens
+    async with _main_token_session() as store:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(TOKEN_URL, data={"grant_type": "authorization_code", "code": code, "redirect_uri": REDIRECT_URI, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET})
+        if resp.status_code >= 400:
+            raise HTTPException(resp.status_code, "Exact token exchange failed; details suppressed.")
+        await store.save(prepared_tokens(resp.json()))
+    return RedirectResponse("/")
 
 
 @app.get("/diagnose/{order_number}")

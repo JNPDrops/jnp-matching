@@ -1,6 +1,7 @@
 # Opsplitsing van JNP-agents — uitvoeringsdossier
 
-Status: voorbereiding; geen workers aangemaakt, geen runtimewijziging geactiveerd.
+Status: eerste runtime-/tokenfase gebouwd en lokaal getest in concept-PR #82;
+nog niet samengevoegd of uitgerold. Geen workers aangemaakt of geactiveerd.
 Opdracht: gebruiker heeft op 5 oktober 2026 rond 00:09 Europe/Amsterdam toestemming
 gegeven om de agents en modules afzonderlijk in te richten en hier vannacht aan te werken.
 Deze toestemming omvat benodigde infrastructuur voor de opsplitsing, maar verandert
@@ -151,7 +152,101 @@ claim niet dat aparte workers live zijn.
 | Moment | Resultaat |
 | --- | --- |
 | 2026-10-05 00:16 Europe/Amsterdam | Repository, huidige services, main en deployments geïnventariseerd. Proceslokale main-tokenlock en ontbrekende Render-workeractie vastgesteld. Dit dossier gereed; geen productieconfiguratie gewijzigd. |
+| 2026-10-05 01:10 Europe/Amsterdam | Gebouwd op actuele main 2fcf8c5dbd357ea80be8a41142b3daf2a81a1fb8 (PR #85): expliciete runtimecatalogus, beschermd headless startpunt en gedeelde main-tokenlock inclusief callback/401-paden. 95 tests geslaagd; één echte PostgreSQL-procesproef nog overgeslagen. Productie blijft dep-db1ddj8u01pc73duec3g, alle huidige rollen in de bestaande webservice. |
 
 Vul dit dossier bij elk werkblok aan met concrete commit/PR, tests, deployment-ID,
 daadwerkelijk actieve rollen en resterende beperkingen. Gebruik alleen technische
 metadata; geen klantregels of secrets. Een gepland vervolg is geen voltooide migratie.
+
+## Overdracht eerste codefase
+
+Implementatie staat in dezelfde PR/branch als dit dossier. De commit met bericht
+`refactor: extract guarded agent runtime and coordinate Exact token rotation`
+bevat deze fase en neemt main tot en met PR #85 als tweede parent mee. Controleer
+bij vervolg de daadwerkelijke branch-SHA en nieuwere main; niet terugzetten naar
+een oud uitgangspunt.
+
+### Gebouwd
+
+- `app/runtime.py`: declaratieve catalogus van de twaalf bestaande lifespan-taken
+  (inclusief dashboard-readiness), gegroepeerd per rol. De legacy-lifespan start
+  dezelfde taken met dezelfde argumenten. Alle imports worden eerst opgelost;
+  een importfout laat geen halve set verwerkers draaien. Bij afsluiten wordt elke
+  taak geannuleerd en opgehaald, ook wanneer een andere taak faalt.
+- `app/worker.py`: headless opdracht met SIGTERM/SIGINT-afhandeling en bewaking
+  van onverwacht eindigende continue taken. Afgeronde eenmalige opdrachten worden
+  niet opnieuw gestart. `python -m app.worker --role routing --check` toont alleen
+  de taakselectie en ontbrekende voorwaarden, zonder imports van financiële code,
+  databaseverbindingen of API-calls.
+- Aparte rollen zijn bewust nog **niet uitvoerbaar**. De code blokkeert ze vóór
+  imports/taakopstart; er is geen environment-override om dit te omzeilen.
+  De webservice blijft expliciet `legacy`; nog geen rol/configuratie omgezet.
+- `operations/exact_token_store.py`: async PostgreSQL advisory lock voor de
+  bestaande main-tokenrij, op dezelfde verbinding als lezen en opslaan. Binnen
+  die lock wordt de actuele token gelezen, eventueel vernieuwd en opgeslagen.
+  De eigen Allocation-lock blijft ongewijzigd.
+- Main OAuth-callback, normale tokenaanvraag en REST/XML-401-paden gebruiken nu
+  dezelfde tokenafhandeling. Een verouderde 401 gebruikt een inmiddels opgeslagen
+  nieuwere token; de oude onbeperkte 401-recursie is begrensd tot één herhaling.
+  Netwerkfouten/5xx krijgen hierdoor geen nieuwe automatische retry.
+- Tokenuitwisselingsfouten tonen geen provider-responsebody; de callback wist de
+  eenmalige code uit de access-log-query. Lokale bestandsopslag blijft uitsluitend
+  compatibiliteit voor één proces, geen alternatief voor gedeelde workers.
+
+Dit is een gereed codeonderdeel, **geen bewijs van een afgeronde opsplitsing**.
+Tokenvergrendeling alleen maakt financiële taakoverdracht nog niet veilig.
+
+### Gecontroleerde overige uitvoerpaden
+
+| Pad/onderdeel | Huidig eigenaarschap en vervolgstap |
+| --- | --- |
+| `/ops/fibonatix-20261002/{action}` | Start `asyncio.create_task(run(action))` in de webservice; bestaande `TASKS`, audit, vaste job-ID en advisory lock behouden. Vervangen door duurzame taakindiening vóór Fibonatix wordt gesplitst. |
+| `/ops/fibonatix-20261002/strict/{mode}` | Start eveneens een webtaak; gebruikt legacy taskset/lock. Opnemen in dezelfde duurzame queue zonder historische opdrachten opnieuw aan te maken. |
+| `/ops/fibonatix-20261002/audit_order_matches` | Alleen-lezen webtaak, maar deelt Fibonatix-eigenaarschap; meenemen bij drain. |
+| `/order-rules/{order_number}/create` en `/direct-match/{bank_line_id}/execute` | Voeren vanuit HTTP zelf werkzaamheden uit onder bestaande flags. Niet vergeten bij het scheiden van web en financiële uitvoering. Geen endpoints aangeroepen tijdens deze fase. |
+| Woo-regelontvangst | Bewaart al duurzame events; bestaande validatie/HMAC en entry-ID behouden. |
+| ICEPAY lifespan | `icepay_transactions.run()` kiest ook journal/import/reconcile/match op bestaande activatie-ID's. Een nieuw proces mag die ID's niet resetten of historische runs herhalen. |
+| Tax en maintenance | Lezen API-budget uit `automatic_debtor_routing.STATUS` in hetzelfde geheugen. Dit moet naar gedeelde opslag voordat deze rollen in aparte processen draaien. |
+
+### Validatie
+
+Uitgevoerd zonder productieverbindingen, financiële handelingen of secrets:
+
+```sh
+python -m unittest discover -s tests -q
+python -m unittest operations.test_automatic_debtor_routing operations.test_routing_transport operations.test_customer_only_routing operations.test_source_order_policy operations.test_allocation_connection -q
+git diff --check
+```
+
+- Dashboard/runtime/tokens: 60 ontdekt, 59 geslaagd en 1 expliciet overgeslagen.
+- Bestaande routing/transport/beleid/Allocation-tests: 36 geslaagd.
+- In totaal 95 geslaagd. Nieuwe tests bewijzen onder meer afzonderlijke testsessies
+  met één tokenrefresh, callback versus refresh, verouderde 401, locktimeout,
+  cancellation, niet teruggeven bij opslagfout, geen gedeeltelijke taakopstart,
+  volledige cleanup, procesexit bij taakuitval en SIGTERM-afhandeling.
+- Echte PostgreSQL-procesproef staat in `tests/test_exact_token_postgres.py`.
+  Deze is nog **niet uitgevoerd**: lokaal is geen server beschikbaar en installatie
+  liep vast op ontbrekende OS-rechten. De bestaande productie-DB is niet benaderd.
+  De proef gebruikt uitsluitend een expliciete lokale `jnp_test_*`-database,
+  een apart tijdelijk schema en synthetische tokens; nooit `DATABASE_URL`.
+
+### Eerstvolgende werk
+
+1. Voer de echte PostgreSQL-procesproef uit zodra een toegestane lokale testserver
+   beschikbaar is. Controleer vervolgens tokenrotatie bij echte procesoverlap;
+   geen productiecredentials nodig voor deze test.
+2. Bouw gedeelde API-reserveringen/observaties per verbinding en administratie.
+   Inventaris: `bacs_debtor_transfer.Exact`, `woo_iban_rules.ExactAPI`,
+   `tax_agent.TaxAPI`, `allocation_maintenance.MaintenanceAPI`, main REST/XML,
+   Fibonatix XML en ICEPAY import/matching/journal hebben deels eigen clients.
+   Eén wrapper aanpassen is dus niet voldoende. Behoud de bestaande no-retry
+   bescherming van financiële schrijfclients.
+3. Bouw duurzaam role-owner/heartbeat/drain en HTTP-taakindiening; lees deze status
+   vanuit het dashboard. Behoud bestaande gespecialiseerde locks/audits.
+4. Pas pas daarna de execution-gates per bewezen rol aan, maak de concrete nieuwe
+   worker-Blueprint met secretverwijzingen en kosten, en voer gefaseerde overdracht uit
+   wanneer de benodigde Render-aanmaakactie werkelijk beschikbaar is.
+
+Geen merge/deployment uitgevoerd in deze fase: echte gedeelde PostgreSQL-werking,
+API-budgetten en veilige drain zijn nog niet voldoende bewezen voor activering.
+Het bekende Render-aanmaakprobleem blijft staan; er zijn geen nieuwe kosten gemaakt.

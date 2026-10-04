@@ -106,6 +106,9 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="JNP Matching", version="1.14.0", lifespan=lifespan)
+from operations.source_order_policy import router as source_order_router, SourceOrderPolicyMiddleware
+app.include_router(source_order_router)
+app.add_middleware(SourceOrderPolicyMiddleware)
 from operations.fibonatix_import import router as fibonatix_import_router
 app.include_router(fibonatix_import_router)
 from operations.allocation_maintenance import router as maintenance_router

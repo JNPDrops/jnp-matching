@@ -85,7 +85,8 @@ is onvoldoende. Het dashboard moet bronorder, werkelijke toewijzing en uitvoerin
 naast elkaar kunnen tonen, met 'verkeerde order gekoppeld' als expliciete reden.
 
 Het beleid verbiedt de oude Automatically-actie en afwikkeling met een ontvangst
-van een andere order. De technische blokkade is voorbereid in
-`source_order_policy.py`, maar is nog niet aan de draaiende applicatie gekoppeld.
+van een andere order. De technische blokkade in `source_order_policy.py` is via `app/main.py` aan de
+applicatie gekoppeld. Na een handmatige deployment bevestigt de beveiligde
+`order-policy`-route of de draaiende versie deze blokkade daadwerkelijk gebruikt.
 Een gerichte herstelfunctie is nog niet geïmplementeerd; het vastleggen van deze
 regel corrigeert bestaande Exact-koppelingen niet.

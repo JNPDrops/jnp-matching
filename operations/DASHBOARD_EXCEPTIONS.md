@@ -84,7 +84,8 @@ saldo. Alleen 'alle betaalde facturen zijn gesloten' of een kloppend totaalsaldo
 is onvoldoende. Het dashboard moet bronorder, werkelijke toewijzing en uitvoering
 naast elkaar kunnen tonen, met 'verkeerde order gekoppeld' als expliciete reden.
 
-De oude Automatically-actie en de oude afwikkeling met een ontvangst van een andere
-order zijn geblokkeerd in de eenmalige controller. Een gerichte herstelfunctie is
-nog niet geïmplementeerd; het vastleggen van deze regel corrigeert bestaande
-Exact-koppelingen niet.
+Het beleid verbiedt de oude Automatically-actie en afwikkeling met een ontvangst
+van een andere order. De technische blokkade is voorbereid in
+`source_order_policy.py`, maar is nog niet aan de draaiende applicatie gekoppeld.
+Een gerichte herstelfunctie is nog niet geïmplementeerd; het vastleggen van deze
+regel corrigeert bestaande Exact-koppelingen niet.

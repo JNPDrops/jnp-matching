@@ -14,8 +14,8 @@ class ScopeTests(unittest.TestCase):
         start=datetime(2026,10,3,tzinfo=timezone.utc)
         params=a.scan_params('00000000-0000-0000-0000-000000000001',start,start+timedelta(minutes=20),start+timedelta(minutes=25))
         self.assertNotIn("Created ge",params['$filter'])
-        self.assertIn("Modified ge datetime'2026-10-03T00:18:00'",params['$filter'])
-        self.assertIn("Modified lt datetime'2026-10-03T00:25:00'",params['$filter'])
+        self.assertIn("Modified ge datetime'2026-10-03T02:18:00'",params['$filter'])
+        self.assertIn("Modified lt datetime'2026-10-03T02:25:00'",params['$filter'])
         with self.assertRaises(m.Stop): a.scan_params('bad',start,start,start)
 
     def test_old_dated_import_with_order_reference_is_queued(self):
@@ -82,7 +82,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             planner.assert_not_awaited();old_apply.assert_not_awaited();change.assert_awaited_once()
             self.assertEqual(change.await_args.args[1],{'entry_id':'entry','reference':'TD12345','order_id':7,'payment_method':'icepay-ideal',
                 'work_scope':'continuous','order_reference':'TD12345','entry_type':20,'debit_entry_id':None})
-            self.assertEqual(conn.execute.call_args.args[1],('skipped','No remaining open item','entry'))
+            self.assertEqual(conn.execute.call_args.args[1],('skipped','No remaining open item',600,'entry'))
 
     async def test_failure_after_intent_is_isolated_without_disabling_worker(self):
         conn=MagicMock();conn.transaction.return_value=nullcontext()
@@ -98,7 +98,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
     async def test_cycle_only_processes_pending_entries_and_preserves_existing_cursor(self):
         conn=MagicMock();conn.__enter__.return_value=conn
         start=datetime.now(timezone.utc)-timedelta(days=1)
-        conn.execute.return_value.fetchone.side_effect=[(True,),(True,start,start,None),({'done':True},),(False,)]
+        conn.execute.return_value.fetchone.side_effect=[(True,),(True,start,start,None),(1,),({'done':True},),(False,)]
         conn.execute.return_value.fetchall.return_value=[]
         app=Mock(DATABASE_URL='configured');app._db_connect.return_value=conn
         api=AsyncMock();api.limits={'remaining':500};api.rows.return_value=[]

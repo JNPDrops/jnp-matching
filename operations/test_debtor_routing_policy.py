@@ -63,12 +63,20 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
             api.change_customer.assert_awaited_once_with(ID,ACCOUNTS[target])
 
     async def test_historical_methods_are_never_applied_to_future_imports(self):
-        for method in ('np_payments','suap_wordpresspayplugin'):
+        for method in ('suap_wordpresspayplugin',):
             api=AsyncMock()
             with self.assertRaises(m.Stop):
                 await c.change_selected(api,{'entry_id':ID,'reference':'TD48874',
                     'order_id':137196,'payment_method':method},ACCOUNTS,Audit())
             self.assertEqual(api.mock_calls,[])
+
+    async def test_new_ninjapay_import_uses_existing_customer_only_route(self):
+        api=AsyncMock();api.limits={'remaining':500}
+        api.rows.side_effect=[[H],[{**O,'Amount':0.01}]]
+        result=await c.change_selected(api,{'entry_id':ID,'reference':'TD48874',
+            'order_id':137196,'payment_method':'np_payments'},ACCOUNTS,Audit())
+        self.assertEqual(result['state'],'applied')
+        api.change_customer.assert_awaited_once_with(ID,ACCOUNTS['109421'])
 
     async def test_write_guard_checks_schedule_policy_pause_and_existing_target(self):
         app=MagicMock(DIVISION=m.DIVISION,BASE_URL=m.BASE,COLLECTIVE_DEBTOR_CODE=m.SOURCE)

@@ -19,7 +19,9 @@ class ApprovedIcepayCodes(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(audit.events[0]['payload'],{'Customer':ACCOUNTS['109419']})
 
     def test_no_unapproved_expansion(self):
-        for method in ('icepay-card','np_payments','suap_wordpresspayplugin','unknown',None):
+        for method in ('icepay-card','suap_wordpresspayplugin','unknown',None):
             self.assertNotIn(method,p.CONTINUOUS_ROUTES)
+        self.assertEqual(p.CONTINUOUS_ROUTES['np_payments'],'109421')
+        self.assertNotIn('np_payments',p.ICEPAY_METHODS)
         for method in ('wc_fibonatix','wc_fibonatics'):
             self.assertEqual(p.RETAIN_ON_SOURCE[method],'100100')

@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import re
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from operations import bacs_debtor_transfer as m, metorik_bacs_evidence as e
 from operations import customer_only_routing as customer_only
@@ -21,13 +22,19 @@ from operations import reviewed_suap
 from operations import reviewed_routing_updates
 
 LOCK_ID = 3977752100100
-INTERVAL = 300
+INTERVAL = 60
+# Preserve the existing one-minute import grace so the receivable is available
+# before the customer-only executor decides whether the entry remains open.
+INGEST_GRACE_SECONDS = 60
+SCAN_ZONE = ZoneInfo('Europe/Amsterdam')
+SCAN_MIGRATION = 'continuous-amsterdam-clock-ninjapay-20261004-v1'
 # User authorized the fixed policy on 2026-10-03 at 20:55 Amsterdam.
 OPERATOR_PAUSED = False
 ACTIVE_METHODS = frozenset(policy.CONTINUOUS_ROUTES)
 STATUS = {"enabled": False, "state": "not_started", "last_scan": None,
           "mode": "customer_only", "balance_checks": False, "applied_since_start": 0,
           "interval_seconds": INTERVAL, "last_error": None, "next_attempt_at": None,
+          "scan_timezone": str(SCAN_ZONE), "ingest_grace_seconds": INGEST_GRACE_SECONDS,
           "retained_payment_methods": dict(policy.RETAIN_ON_SOURCE),
           "active_routes": dict(policy.CONTINUOUS_ROUTES),
           "cleanup_routes": dict(policy.CLEANUP_ROUTES), "cleanup": None,
@@ -133,12 +140,47 @@ def exact_time(value):
 
 
 def scan_params(source_id, started_at, cursor_at, end):
-    def stamp(dt):
-        m.require(dt.tzinfo is not None, 'Naive scan timestamp')
-        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+    m.require(all(dt.tzinfo is not None for dt in (started_at,cursor_at,end)),
+              'Naive scan timestamp')
     lower = max(started_at, cursor_at - timedelta(minutes=2))
-    return {'$filter': f"Customer eq guid'{m.guid(source_id)}' and Modified ge datetime'{stamp(lower)}' and Modified lt datetime'{stamp(end)}'",
+    m.require(lower <= end, 'Reversed scan interval')
+    # Exact returns/filter-compares this administration's Modified as Dutch
+    # wall time. Keep the durable cursor in UTC and convert both query bounds.
+    # Across a DST change use the envelope of both offsets so the repeated
+    # autumn hour is never skipped. Existing EntryID/Modified deduplication
+    # makes that extra overlap harmless.
+    offsets = [dt.astimezone(SCAN_ZONE).utcoffset() for dt in (lower,end)]
+    lo = (lower.astimezone(timezone.utc)+min(offsets)).strftime('%Y-%m-%dT%H:%M:%S')
+    hi = (end.astimezone(timezone.utc)+max(offsets)).strftime('%Y-%m-%dT%H:%M:%S')
+    return {'$filter': f"Customer eq guid'{m.guid(source_id)}' and Modified ge datetime'{lo}' and Modified lt datetime'{hi}'",
             '$select': 'EntryID,Customer,Created,Modified,YourRef,Description,Type,Reversal'}
+
+
+def scan_cursor(conn, cursor, now):
+    migrated = conn.execute('SELECT 1 FROM jnp_debtor_route_audit WHERE event=%s LIMIT 1',
+                            (SCAN_MIGRATION,)).fetchone() is not None
+    # Recover the former two-hour delay once, without rewinding stored progress
+    # or changing uncertain/completed work. Future scans use only two minutes
+    # of overlap, even after a process restart.
+    return (cursor if migrated else min(cursor,now-timedelta(hours=3))), not migrated
+
+
+def complete_scan_migration(conn):
+    # TD49117 was live-proven NinjaPay during the requested 19-order check.
+    # Recheck its current order and open entry through the normal executor;
+    # never reset unrelated skipped items or any unresolved write intent.
+    changed = conn.execute("""UPDATE jnp_debtor_route_queue q
+        SET state='pending',reason=NULL,next_check=NOW(),order_evidence=NULL
+        WHERE entry_id=%s AND reference='TD49117' AND work_scope='continuous'
+        AND state='skipped' AND reason='Payment method outside this work scope'
+        AND NOT EXISTS (SELECT 1 FROM jnp_debtor_route_backfill b
+                        WHERE b.entry_id=q.entry_id AND b.state='uncertain')""",
+        ('592a3355-c08e-4dae-9801-f8e62c18f31c',)).rowcount
+    conn.execute("INSERT INTO jnp_debtor_route_audit(run_id,entry_id,event,body) VALUES(%s,'00000000-0000-0000-0000-000000000000',%s,%s::jsonb)",
+        (str(uuid4()),SCAN_MIGRATION,json.dumps({'timezone':str(SCAN_ZONE),
+            'reviewed_ninjapay_requeued':changed,'interval_seconds':INTERVAL})))
+    runtime.event('continuous_clock_updated',timezone=str(SCAN_ZONE),
+                  interval_seconds=INTERVAL,reviewed_ninjapay_requeued=changed)
 
 
 def enqueue(conn, rows, source_id, started_at, end):
@@ -167,9 +209,9 @@ def enqueue(conn, rows, source_id, started_at, end):
         conn.execute("UPDATE jnp_debtor_route_control SET cursor_at=%s,last_scan=NOW()", (end,))
 
 
-def record_state(conn, entry_id, state, reason):
-    conn.execute("UPDATE jnp_debtor_route_queue SET state=%s,reason=%s,next_check=NOW()+INTERVAL '10 minutes' WHERE entry_id=%s",
-                 (state,reason,entry_id))
+def record_state(conn, entry_id, state, reason, retry_seconds=600):
+    conn.execute("UPDATE jnp_debtor_route_queue SET state=%s,reason=%s,next_check=NOW()+(%s * INTERVAL '1 second') WHERE entry_id=%s",
+                 (state,reason,retry_seconds,entry_id))
 
 
 async def process_entry(api, conn, entry_id, reference, order, *, work_scope='continuous',
@@ -262,11 +304,14 @@ async def cycle(app_module):
                     api.limits = dict(previous)
                 source=await validate_routes(api)
                 now=datetime.now(timezone.utc).replace(microsecond=0)
-                end=now-timedelta(seconds=60)
+                end=now-timedelta(seconds=INGEST_GRACE_SECONDS)
+                incremental_cursor, migrating = scan_cursor(conn,cursor,now)
                 # Fast cleanup cycles must not repeatedly rescan all new entries.
-                if end>cursor and (last_scan is None or (now-last_scan).total_seconds()>=INTERVAL or not api.limits):
-                    rows=await api.rows('salesentry/SalesEntries',scan_params(source,started,cursor,end))
-                    enqueue(conn,rows,source,started,end)
+                if end>cursor and (migrating or last_scan is None or (now-last_scan).total_seconds()>=INTERVAL or not api.limits):
+                    rows=await api.rows('salesentry/SalesEntries',scan_params(source,started,incremental_cursor,end))
+                    with conn.transaction():
+                        enqueue(conn,rows,source,started,end)
+                        if migrating: complete_scan_migration(conn)
                     STATUS['last_scan']=m.utcnow()
                 await cleanup.discover_batch(api,conn,source)
                 if 'suap_reassessment' not in STATUS:
@@ -292,7 +337,7 @@ async def cycle(app_module):
                     for entry_id,reference,stored_order,order_ref,entry_type,scope,debit_id in queued:
                         order=stored_order or proof['orders'].get('#'+order_ref[2:])
                         if order is None:
-                            record_state(conn,entry_id,'pending','Order not yet present in Metorik; no inference')
+                            record_state(conn,entry_id,'pending','Order not yet present in Metorik; no inference',retry_seconds=60)
                             continue
                         if not customer_only.budget_available(api):
                             runtime.defer_until_reset(STATUS,api.limits)

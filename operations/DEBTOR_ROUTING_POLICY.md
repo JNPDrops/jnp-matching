@@ -8,8 +8,8 @@ Policy revision: `2026-10-03-allocation-icepay-now-v2`.
 | `wc_fibonatix` / `wc_fibonatics` | 100100 | Retain; never transfer |
 | `bacs` | 109372 | Current open items and future imports |
 | `plisio` | 109377 | Current open items and future imports |
-| `icepay-ideal` | 109419 | Current open items and future imports |
-| `np_payments` | 109421 | One-time open-item cleanup |
+| `ic` / `icepay` / `icepay-ideal` | 109419 | Current open items and future imports |
+| `np_payments` | 109421 | Current open items and future imports |
 | `suap_wordpresspayplugin` | 109422 | One-time open-item cleanup |
 
 `icepay-ideal` is the observed order code. Do not infer unobserved aliases or
@@ -34,7 +34,7 @@ At start, read the complete current ReceivablesList for 100100 without an invoic
 age cutoff. Persist that cohort and discovery cursor. Read sale headers in groups
 of entry numbers and obtain order evidence from the existing Metorik reader.
 Incremental scans use Modified, so newly imported old-dated invoices are included.
-Normal polling is every 300 seconds; ready work drains in batches of 50 with a
+Normal polling is every 60 seconds, retaining the 60-second import grace; ready work drains in batches of 50 with a
 15-second interval. Do not repeat incremental scans on every drain cycle.
 
 Credit references are not order references. A credit must explicitly name its
@@ -99,3 +99,26 @@ agree with that review before writing; unknown payment methods remain excluded.
 Orders absent from the older snapshot continue to use their established live
 order evidence. No uncertain writes, completed transfers or unproven credits are
 requeued by this change. The review's amount differences are not corrected.
+
+## Prompt new imports — 4 October, 20:38 Amsterdam
+
+The operator requested prompt handling of the recent exceptions and future
+imports. Correct the observed two-hour scan delay by converting UTC cursor bounds
+to Exact's Europe/Amsterdam wall-clock Modified values. A DST boundary uses the
+envelope of both offsets. Recover three hours once; subsequent scans retain only
+the existing two-minute overlap. Preserve the current policy/cohort revision,
+manual pauses, completed work, and every uncertain write.
+
+NinjaPay now also routes continuously to the existing 109421 debtor. Requeue only
+the live-reviewed skipped entry TD49117 / 26722945 for normal current-order and
+open-entry validation. Other skipped entries are not globally retried. SUAP
+remains cleanup-only; the ICEPAY alias set is unchanged. Missing Metorik evidence
+is retried after 60 seconds without inferring a payment method.
+
+Expected normal latency is approximately one to two minutes plus provider/read
+processing time, not an immediate-delivery guarantee. A one-page scan per minute
+uses approximately 1,440 Exact reads per day plus pagination and actual routing;
+the existing budget reserve and reset handling remain enforced. No webhook
+subscription was added; support for the concrete imported SalesEntries event
+has not been verified.
+

@@ -5,9 +5,11 @@ REVISION = '2026-10-03-allocation-icepay-now-v2'
 START_AT = datetime(2026, 10, 4, 0, 0, 5, tzinfo=timezone.utc)
 # Operator authorization 2026-10-04: literal method aliases ic and icepay.
 ICEPAY_METHODS = frozenset({'ic', 'icepay', 'icepay-ideal'})
-CONTINUOUS_ROUTES = {'bacs': '109372', 'plisio': '109377',
+# 4 October: operator requests immediate handling of the three recent
+# exceptions, including NinjaPay TD49117 and future imports of that method.
+CONTINUOUS_ROUTES = {'bacs': '109372', 'plisio': '109377', 'np_payments': '109421',
                      **{method: '109419' for method in sorted(ICEPAY_METHODS)}}
-CLEANUP_ROUTES = {**CONTINUOUS_ROUTES, 'np_payments': '109421',
+CLEANUP_ROUTES = {**CONTINUOUS_ROUTES,
                   'suap_wordpresspayplugin': '109422'}
 RETAIN_ON_SOURCE = {'wc_fibonatix': '100100', 'wc_fibonatics': '100100'}
 # Keep the cohort revision: SUAP was already discovered under this policy.

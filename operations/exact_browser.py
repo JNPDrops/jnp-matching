@@ -44,11 +44,24 @@ REASONS = {"none", "missing_credentials", "invalid_configuration", "unexpected_o
 STAGES = {"configuration", "browser_install", "browser_launch", "login_form", "username",
           "password", "totp", "administration", "complete", "claim", "runtime"}
 STATUSES = {"disabled", "ready", "started", "passed", "blocked", "failed", "skipped"}
+SIGNAL_PATTERNS = {
+    'code_rejected': re.compile(r'(code|token).{0,70}(incorrect|invalid|expired|not valid|not correct|does not match|did not match|ongeldig|onjuist|verlopen)|(incorrect|invalid|expired|wrong|ongeldig|onjuist|verlopen).{0,40}(code|token)', re.I),
+    'credentials_rejected': re.compile(r'(password|wachtwoord).{0,40}(incorrect|invalid|wrong|ongeldig|onjuist)|(incorrect|invalid|wrong|ongeldig|onjuist).{0,40}(password|wachtwoord)', re.I),
+    'account_locked': re.compile(r'account.{0,35}(locked|blocked|geblokkeerd)|too many attempts|te veel pogingen', re.I),
+    'authenticator_prompt': TOTP_APP_TEXT,
+    'email_code_prompt': re.compile(r'(send|sent|email|e-mail|verzonden|gestuurd).{0,60}(code|email|e-mail)', re.I),
+    'code_prompt': OTP_TEXT,
+    'method_selection': re.compile(r'choose.{0,30}(method|option)|select.{0,30}(method|option)|kies.{0,30}(methode|optie)', re.I),
+    'terms_prompt': re.compile(r'accept.{0,30}(terms|conditions)|accepteer.{0,30}voorwaarden', re.I),
+    'stay_signed_in_prompt': re.compile(r'stay signed in|keep me signed in|aangemeld blijven|ingelogd blijven', re.I),
+}
+SIGNALS = set(SIGNAL_PATTERNS) | {'password_field', 'standard_otp_field', 'username_field',
+    'administration_header', 'expected_portal_url', 'exact_login_origin'}
 
 
 def safe_result(status, stage, *, reason="none", username_submitted=False,
                 password_submitted=False, totp_submitted=False,
-                administration_verified=False, missing=()):
+                administration_verified=False, missing=(), signals=()):
     if status not in STATUSES or stage not in STAGES or reason not in REASONS:
         raise ValueError("invalid_result")
     return {"status": status, "stage": stage, "reason": reason,
@@ -57,7 +70,30 @@ def safe_result(status, stage, *, reason="none", username_submitted=False,
             "password_submitted": password_submitted is True,
             "totp_submitted": totp_submitted is True,
             "administration_verified": administration_verified is True,
-            "missing": [name for name in missing if name in ENV_NAMES]}
+            "missing": [name for name in missing if name in ENV_NAMES],
+            "signals": sorted({signal for signal in signals if isinstance(signal, str) and signal in SIGNALS})}
+
+
+async def collect_signals(page):
+    """Classify the last visible page using fixed labels; never emit its text."""
+    signals = set()
+    try:
+        if target_page(page.url):
+            signals.add('expected_portal_url')
+        if urlsplit(page.url).hostname == 'login.exact.com':
+            signals.add('exact_login_origin')
+        for frame in page.frames[:6]:
+            if not trusted(frame.url):
+                continue
+            body = await frame.locator('body').inner_text(timeout=1000)
+            signals.update(key for key, pattern in SIGNAL_PATTERNS.items() if pattern.search(body))
+            for selector, key in [(PASSWORD, 'password_field'), (OTP, 'standard_otp_field'),
+                                  (USERNAME, 'username_field'), ('#Administration', 'administration_header')]:
+                if await visible(frame.locator(selector)):
+                    signals.add(key)
+    except Exception:
+        pass
+    return sorted(signals)
 
 
 def trusted(url):
@@ -275,12 +311,12 @@ async def authenticate(page, credentials, *, timeout=75, clock=time.monotonic, p
                 progressed = True
                 break
             await pause(0.25 if progressed else 0.5)
-        return safe_result('blocked', stage, reason='timeout', **flags)
+        return safe_result('blocked', stage, reason='timeout', signals=await collect_signals(page), **flags)
     except LoginStopped as exc:
-        return safe_result('blocked', stage, reason=exc.args[0], **flags)
+        return safe_result('blocked', stage, reason=exc.args[0], signals=await collect_signals(page), **flags)
     except Exception:
         # Playwright errors may contain fill values, URLs, or page contents.
-        return safe_result('failed', stage, reason='runtime_error', **flags)
+        return safe_result('failed', stage, reason='runtime_error', signals=await collect_signals(page), **flags)
 
 
 async def protect_requests(context):

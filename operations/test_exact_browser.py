@@ -80,6 +80,17 @@ class ExactConfigurationTests(unittest.TestCase):
 
 
 class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failure_diagnostics_classify_without_disclosing_page_content(self):
+        text = 'The verification code you entered is incorrect. Authenticator test@example.invalid fixture-password 123456'
+        frame = SimpleNamespace(url='https://login.exact.com/signin', locator=lambda selector:
+            element(text=text) if selector == 'body' else collection([]))
+        signals = await b.collect_signals(SimpleNamespace(url=frame.url, frames=[frame]))
+        self.assertIn('code_rejected', signals)
+        self.assertIn('authenticator_prompt', signals)
+        result = b.safe_result('blocked', 'totp', signals=signals + [text])
+        for value in ['fixture-password', '123456', 'test@example.invalid']:
+            self.assertNotIn(value, json.dumps(result))
+
     async def test_authenticator_prompt_identifies_uniquely_named_code_field(self):
         code = element()
         frame = SimpleNamespace(locator=lambda selector: collection([]) if selector == b.OTP

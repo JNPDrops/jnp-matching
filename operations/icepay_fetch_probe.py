@@ -14,9 +14,9 @@ import sys
 import tempfile
 
 from operations.icepay_browser import (
-    Credentials, ENV_NAMES, REQUIRED, safe_result, validate_result, worker)
+    Credentials, ENV_NAMES, REQUIRED, FORM_NAMES, safe_result, validate_result, worker)
 
-PROBE_ID = 'icepay-fetch-20261001-03-v3'
+PROBE_ID = 'icepay-fetch-20261001-03-v4'
 ACTIVATION = 'ICEPAY_FETCH_PROBE_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 PERIOD = {'from': '2026-10-01', 'through': '2026-10-03', 'timezone': 'Europe/Amsterdam'}
@@ -44,7 +44,7 @@ def publish(result):
 
 
 def validate_forms(forms):
-    if not isinstance(forms, dict) or set(forms) - {'payments', 'refunds', 'statements'}:
+    if not isinstance(forms, dict) or set(forms) - FORM_NAMES:
         raise ValueError('invalid_forms')
     for name, page in forms.items():
         if not isinstance(page, dict) or set(page) != {'path', 'controls'}:
@@ -54,7 +54,7 @@ def validate_forms(forms):
         if not isinstance(page['controls'], list) or len(page['controls']) > 120:
             raise ValueError('invalid_controls')
         for c in page['controls']:
-            if not isinstance(c, dict) or set(c) - {'tag','type','role','id','name','label','options'}:
+            if not isinstance(c, dict) or set(c) - {'tag','type','role','id','name','label','placeholder','options'}:
                 raise ValueError('invalid_control_fields')
             for k, v in c.items():
                 if k == 'options':

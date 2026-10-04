@@ -19,6 +19,8 @@ ORIGIN = 'https://portal.icepay.com'
 ACCOUNT = '88292'
 MERCHANT = '34950'
 TARGET = ORIGIN + '/merchant/' + ACCOUNT
+FORM_NAMES = {'payments','refunds','statements','payments_filters','refunds_filters',
+              'payments_actions','payments_export'}
 REQUIRED = ('ICEPAY_WEB_USERNAME', 'ICEPAY_WEB_PASSWORD')
 OPTIONAL = ('ICEPAY_WEB_TOTP_SECRET',)
 ENV_NAMES = REQUIRED + OPTIONAL
@@ -312,15 +314,65 @@ async def inspect_controls(page):
       const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
       const safe = x => String(x || '').replace(/\\s+/g,' ').trim().slice(0,160);
       const clean = x => { x=safe(x); return /@|password|wachtwoord|token|secret|csrf/i.test(x)?'':x; };
-      return Array.from(document.querySelectorAll('button,input,select,[role="combobox"]'))
+      return Array.from(document.querySelectorAll('button,input,select,[role="combobox"],[role="menuitem"]'))
         .filter(e=>visible(e)&&!['password','email','hidden'].includes(e.type||'')&&e.autocomplete!=='one-time-code')
         .slice(0,120).map(e=>({
           tag:e.tagName.toLowerCase(), type:clean(e.type), role:clean(e.getAttribute('role')),
           id:clean(e.id), name:clean(e.name),
+          placeholder:clean(e.getAttribute('placeholder')),
           label:clean(e.getAttribute('aria-label')||Array.from(e.labels||[]).map(x=>x.textContent).join(' ')||
-            (e.tagName==='BUTTON'?e.innerText:'')),
+            (e.tagName==='BUTTON'||e.getAttribute('role')==='menuitem'?e.innerText:'')),
           options:e.tagName==='SELECT'?Array.from(e.options).slice(0,80).map(o=>({text:clean(o.text)})):[]
         })); }''')
+
+
+async def settled_controls(page):
+    previous = None
+    for _ in range(8):
+        current = await inspect_controls(page)
+        if current == previous:
+            return current
+        previous = current
+        await asyncio.sleep(.5)
+    raise Stopped('export_controls_unverified')
+
+
+async def click_unique_read_control(page, pattern, *, optional=False):
+    """Only caller-specified navigation/filter/export controls, never row actions."""
+    matches = await visible(page.get_by_role('button',name=pattern))
+    if not matches and optional:
+        return False
+    if len(matches) != 1:
+        raise Stopped('unsupported_form')
+    await guard_page(page)
+    await matches[0].click()
+    return True
+
+
+async def inspect_filter_and_export_views(page, label, url, result):
+    name = label.lower()
+    await click_unique_read_control(page,re.compile(r'^Filter(?:\s+\d+)?$'))
+    result[name+'_filters'] = {'path':urlsplit(page.url).path,
+                              'controls':await settled_controls(page)}
+    # Return to the observed page URL; do not submit or alter a filter yet.
+    await page.goto(url,wait_until='domcontentloaded')
+    await wait_verified_account(page)
+    if label != 'Payments':
+        return
+    if not await click_unique_read_control(page,re.compile(r'^Actions$'),optional=True):
+        return
+    result['payments_actions'] = {'path':urlsplit(page.url).path,
+                                  'controls':await settled_controls(page)}
+    # Open only the payment export entry, if unambiguous. Never click a modal's
+    # final submit button in this discovery phase.
+    if await visible(page.get_by_role('dialog')):
+        return
+    export = re.compile(r'^(Export|Export payments|Payments export)$',re.I)
+    if await click_unique_read_control(page,export,optional=True):
+        result['payments_export'] = {'path':urlsplit(page.url).path,
+                                     'controls':await settled_controls(page)}
+    await page.goto(url,wait_until='domcontentloaded')
+    await wait_verified_account(page)
 
 
 async def inspect_export_pages(page, result=None, progress=None):
@@ -343,6 +395,8 @@ async def inspect_export_pages(page, result=None, progress=None):
         await page.wait_for_load_state('domcontentloaded')
         result[label.lower()] = {'path': urlsplit(page.url).path,
                                  'controls': await inspect_controls(page)}
+        if label in ('Payments','Refunds'):
+            await inspect_filter_and_export_views(page,label,url,result)
     return result
 
 

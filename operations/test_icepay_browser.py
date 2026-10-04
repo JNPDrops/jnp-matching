@@ -129,6 +129,18 @@ class Configuration(unittest.TestCase):
 
 
 class Login(unittest.IsolatedAsyncioTestCase):
+    async def test_ambiguous_export_control_is_never_clicked(self):
+        buttons = [element(),element()]
+        page = SimpleNamespace(get_by_role=lambda *_a,**_k:collection(buttons))
+        with self.assertRaises(b.Stopped):
+            await b.click_unique_read_control(page,'Export')
+        for button in buttons:
+            button.click.assert_not_awaited()
+
+    async def test_missing_optional_export_is_not_an_error(self):
+        page = SimpleNamespace(get_by_role=lambda *_a,**_k:collection([]))
+        self.assertFalse(await b.click_unique_read_control(page,'Export',optional=True))
+
     async def test_duplicate_navigation_and_breadcrumb_accept_same_target_only(self):
         first, second = element(), element()
         first.get_attribute.return_value = b.TARGET + '/payments'

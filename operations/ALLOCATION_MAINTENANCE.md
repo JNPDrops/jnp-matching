@@ -8,7 +8,8 @@ bankdagboeken en kruispostrekeningen. De bestaande debiteurenroutering blijft st
 ## Uitgevoerde controle
 
 De bestaande Render-service leest ieder uur alle bankregels op 1360, open
-debiteuren- en crediteurenbetalingen uit gewone bankboeken en de actuele
+debiteuren- en crediteurenbetalingen uit alle bankboeken (ook PSP-bankboeken),
+bankregels op vraagposten 2000 en de actuele
 openstaande verkoop- en inkoopposten, inclusief alle paginapagina's. Leveranciers en geboekte
 uitgaande betaalhistorie worden dagelijks ververst. Er is een API-reserve van 200,
 geen sleutelwissel en geen bank-, memoriaal- of MatchSets-write.
@@ -64,6 +65,33 @@ afletteren en Automatically vereisen nog de Exact-uitvoerstap en resultaatcontro
 Iedere regel krijgt `next_action`, `reason` en `retry_when` en wordt ieder uur
 herbeoordeeld. `/allocation/review` toont dit achter dezelfde operatorsessie als
 het JSON-verslag; de openbare status bevat alleen aantallen en processtatus.
+
+## Volledige betaalwerklijst (maintenance-v5)
+
+De opdracht van 4 oktober is om iedere niet-matchbare open betaling met een
+concrete afhandelinstructie zichtbaar te houden. Het dashboard heeft één lijst
+met zoekfunctie en filters voor afhandeling, reden en dagboek. Ook een niet
+eenduidig geïdentificeerde open bankpost blijft daarin staan, met bedrag,
+datum, bronreferentie, relatie en benodigde controle. De startpagina linkt naar
+deze beveiligde werklijst. De bestaande Allocation-operatorsessie blijft vereist.
+
+PSP-ontvangsten in hun eigen bankboek worden nu alleen-lezen onderzocht op
+dezelfde bronorder, factuur, afgesproken debiteur, betaalmethode, valuta en saldo.
+Een bedrag dat bij een andere order past is nooit een matchkandidaat. Meerdere
+betalingen die dezelfde factuur claimen vragen onderzoek. PSP-uitbetalingen
+blijven in de afzonderlijke bankboek-/tussenrekeningroute.
+
+Als een factuur niet openstaat, worden bestaande verkoopboekingen met dezelfde
+YourRef gecontroleerd. Een bestaande boeking wordt niet als ontbrekende factuur
+gepresenteerd: controleer dan de eerdere aflettering, credits en conceptstatus.
+Een processing-order zonder gevonden factuur krijgt een concrete wachtinstructie.
+
+De lijst vermeldt benodigd bewijs, vervolgstap, verantwoordelijke functie en
+hercontrolemoment. Oorspronkelijk en resterend bankbedrag worden met teken
+getoond. Een volledig gelezen snapshot wordt in één databasetransactie bewaard.
+Bij bronstoringen blijven posten zichtbaar en is ontbrekend orderbewijs geen
+matchkandidaat. Dit is een reviewwerklijst; het is nog geen Microsoft-login,
+beslisformulier of uitvoerder van financiële mutaties.
 
 Per ronde worden maximaal 25 nieuwe regels gemaakt. Een duurzame aanmaakintentie
 wordt eerst vastgelegd, waarna de regel uit Exact wordt teruggelezen. Onzekere

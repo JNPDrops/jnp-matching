@@ -172,19 +172,23 @@ async def run(app):
         return
     # Use the existing audit table only as a one-off execution marker. Do not
     # change queue states, routing switches, balances or source transactions.
-    with app._db_connect() as conn:
-        with conn.transaction():
-            conn.execute('SELECT pg_advisory_xact_lock(%s)',(LOCK,))
-            if conn.execute("SELECT 1 FROM jnp_debtor_route_audit WHERE event=%s LIMIT 1",(REPORT,)).fetchone():
-                return
-            conn.execute("INSERT INTO jnp_debtor_route_audit(run_id,entry_id,event,body) VALUES(%s,NULL,%s,%s::jsonb)",
-                         ('5bb37b58-e49e-4cf3-98e4-c5a688371194',REPORT,'{"read_only_report":true}'))
-    event('started')
     try:
-        await asyncio.wait_for(collect(app),timeout=1200)
+        await asyncio.wait_for(claim_and_collect(app),timeout=1200)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         event('failed',error_type=type(exc).__name__,
               http_status=exc.status_code if isinstance(exc,m.ExactRequestError) else None,
               reason=str(exc) if isinstance(exc,m.Stop) else 'Read failed; details suppressed')
+
+
+async def claim_and_collect(app):
+    with app._db_connect() as conn:
+        with conn.transaction():
+            conn.execute('SELECT pg_advisory_xact_lock(%s)',(LOCK,))
+            if conn.execute("SELECT 1 FROM jnp_debtor_route_audit WHERE event=%s LIMIT 1",(REPORT,)).fetchone():
+                return
+            conn.execute("INSERT INTO jnp_debtor_route_audit(run_id,entry_id,event,body) VALUES(%s,'00000000-0000-0000-0000-000000000000',%s,%s::jsonb)",
+                         ('5bb37b58-e49e-4cf3-98e4-c5a688371194',REPORT,'{"read_only_report":true}'))
+    event('started')
+    await collect(app)

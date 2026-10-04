@@ -329,6 +329,8 @@ def sleep_seconds(status, now=None):
 
 
 async def serve(app_module):
+    from operations.requested_route_diagnostic import run as diagnose_requested_order
+    await diagnose_requested_order(app_module)
     while True:
         try:
             if OPERATOR_PAUSED:

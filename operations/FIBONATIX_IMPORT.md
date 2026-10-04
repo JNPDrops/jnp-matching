@@ -18,7 +18,7 @@ Geen tokens, bronregels of browsercookies in Git, healthstatus of logs.
 4. `POST /import`: herhaal de controles, claim duurzaam precies één upload en
    verifieer iedere geïmporteerde regel. Herhaal nooit een onzekere upload.
 5. `POST /reconcile`: lees uitsluitend terug; verwijder nooit een write-claim.
-6. `POST /audit_order_matches`: inventariseer afwijkingen tussen bronorder en
+6. Voorbereid, nog niet actief: `POST /audit_order_matches`: inventariseer afwijkingen tussen bronorder en
    toegewezen referentie over de hele geïmporteerde periode. Bewaar de volledige
    private inventarisatie in `artifact/order_match_audit`.
 
@@ -30,8 +30,10 @@ controllerruns. Een deployment of herstart voert geen financiële actie uit.
 
 De instructie van 4 oktober 2026, 21:45 CEST vervangt het eerdere akkoord voor
 afletteren op verzameldebiteuren-saldo. Iedere betaling moet aan de eigen order
-en factuur worden gekoppeld. De controller blokkeert de oude Automatically-actie
-en de historische afwikkeling met een betaling van een andere order. De directe
+en factuur worden gekoppeld. De voorbereide policy-middleware blokkeert de oude
+Automatically-actie en de historische afwikkeling met een betaling van een andere
+order zodra deze aan de app is gekoppeld. Die activering is nog niet uitgevoerd.
+De directe
 MatchSets-schakelaar blijft uitgeschakeld.
 
 De bestaande import is vóór automatisch afletteren gecontroleerd. Exact kan bij

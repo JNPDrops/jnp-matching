@@ -88,5 +88,7 @@ Het beleid verbiedt de oude Automatically-actie en afwikkeling met een ontvangst
 van een andere order. De technische blokkade in `source_order_policy.py` is via `app/main.py` aan de
 applicatie gekoppeld. Na een handmatige deployment bevestigt de beveiligde
 `order-policy`-route of de draaiende versie deze blokkade daadwerkelijk gebruikt.
-Een gerichte herstelfunctie is nog niet geïmplementeerd; het vastleggen van deze
-regel corrigeert bestaande Exact-koppelingen niet.
+De gerichte herstelfunctie in `strict_order_matching.py` is geïmplementeerd.
+Het private `strict_order_plan` bewaart voortgang, daadwerkelijke factuurselectie,
+uitzonderingen en bewijs na iedere opslag. Een deployment betekent niet dat de
+historische koppelingen al volledig zijn hersteld. Zie STRICT_ORDER_MATCHING.md.

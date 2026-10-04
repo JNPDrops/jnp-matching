@@ -55,6 +55,16 @@ def prepared(app):
     if len(blob)>100000 or hashlib.sha256(blob).hexdigest()!=EXPECTED_SHA:
         raise ValueError('payload_hash_changed')
     source,template=read_source(app)
+    if hashlib.sha256(template).hexdigest()!='18574a6b7fd6cad2fc9144c1d8c0a1c279830d92739cd70f5410db89b9de94f2':
+        raise ValueError('template_changed')
+    source_lines=[line for line in ET.fromstring(template).findall('./GLTransactions/GLTransaction/GLTransactionLine')
+        if line.find('GLAccount').get('code')=='1100' and line.find('Account').get('code')=='100100'
+        and Decimal(line.findtext('Amount/Value'))>0]
+    patterns={json.dumps({k:v for k,v in line.attrib.items() if k!='line'},sort_keys=True) for line in source_lines}
+    current_patterns={json.dumps({k:v for k,v in line.attrib.items() if k!='line'},sort_keys=True)
+        for line in ET.fromstring(blob).findall('./GLTransactions/GLTransaction/GLTransactionLine')}
+    if len(patterns)!=1 or patterns!=current_patterns:
+        raise ValueError('line_attribute_pattern_not_proven')
     source_rows=[r for r in source[1]['normalized_payments'] if r['status']=='OK']
     expected,manifest,_=build_xml(source_rows,template)
     if blob!=expected or manifest!=data['manifest']:

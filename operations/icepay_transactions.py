@@ -879,6 +879,10 @@ def decode(stdout):
 
 
 async def run():
+    if os.environ.get('ICEPAY_MATCH_TASK_ID','').startswith('icepay-match-20261001-03-'):
+        from operations.icepay_matching import run as match_icepay_orders
+        await match_icepay_orders()
+        return
     if os.environ.get(ACTIVATION) in {'icepay-booking-20261001-03-import-v1','icepay-booking-20261001-03-reconcile-v1'}:
         from operations.icepay_apply import run as apply_booking
         await apply_booking()

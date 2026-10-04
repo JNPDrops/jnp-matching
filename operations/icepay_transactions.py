@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v5'
+JOB = 'icepay-transactions-20261001-03-v6'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
@@ -346,7 +346,42 @@ def csv_has_expected_ids(content, expected_ids):
         return False
 
 
-async def resume_payment_export(page, downloads, expected_ids):
+def scope_csv(content, expected_ids):
+    """Retain an original export and derive only the UI-proven ID selection."""
+    report = {'bytes':len(content),'sha256':hashlib.sha256(content).hexdigest(),
+              'parseable':False,'rows':0,'matched_ids':0,'missing_ids':len(expected_ids),
+              'extra_rows':0,'payment_id_header':False}
+    try:
+        text = content.decode('utf-16' if content[:2] in (b'\xff\xfe',b'\xfe\xff') else 'utf-8-sig')
+        first,_,remaining = text.partition('\n')
+        if re.fullmatch(r'sep=[,;\t]\r?',first,re.I):
+            delimiter,text = first[4],remaining
+        else:
+            delimiter = csv.Sniffer().sniff(text[:16000],delimiters=',;\t').delimiter
+        reader = csv.DictReader(io.StringIO(text),delimiter=delimiter)
+        fields = reader.fieldnames or []
+        keys = {re.sub(r'[^a-z0-9]','',k.lower()):k for k in fields}
+        rows = list(reader)
+        report.update(parseable=True,rows=len(rows),payment_id_header='paymentid' in keys)
+        if 'paymentid' not in keys or len(keys)!=len(fields):
+            return None,report
+        expected = set(expected_ids)
+        selected = [row for row in rows if (row.get(keys['paymentid']) or '').strip() in expected]
+        ids = [(row.get(keys['paymentid']) or '').strip() for row in selected]
+        report.update(matched_ids=len(set(ids)),missing_ids=len(expected-set(ids)),extra_rows=len(rows)-len(selected))
+        if (set(ids)!=expected or len(ids)!=len(expected_ids) or
+            any(None in row or any(v is None for v in row.values()) for row in selected)):
+            return None,report
+        output = io.StringIO()
+        writer = csv.DictWriter(output,fieldnames=fields,delimiter=';')
+        writer.writeheader()
+        writer.writerows(selected)
+        return output.getvalue().encode('utf-8-sig'),report
+    except Exception:
+        return None,report
+
+
+async def resume_payment_export(page, downloads, expected_ids, artifacts):
     """Download a matching existing notification; never create another export."""
     await b.click_unique_read_control(page,NOTIFICATIONS)
     await page.wait_for_load_state('networkidle',timeout=20000)
@@ -354,6 +389,8 @@ async def resume_payment_export(page, downloads, expected_ids):
     links = await csv_links(page)
     if not links or len(links)>5:
         raise AcquisitionStopped('export_ambiguous')
+    artifacts['candidate_csvs'] = []
+    total_bytes = 0
     for link in links.values():
         await b.guard_page(page)
         await link.click()
@@ -362,8 +399,14 @@ async def resume_payment_export(page, downloads, expected_ids):
         except asyncio.TimeoutError:
             raise AcquisitionStopped('download_failed') from None
         content = await read_download(download)
-        if csv_has_expected_ids(content,expected_ids):
-            return content
+        total_bytes += len(content)
+        if total_bytes>MAX_BYTES:
+            raise AcquisitionStopped('artifact_too_large')
+        artifacts['candidate_csvs'].append(base64.b64encode(content).decode())
+        scoped,_ = scope_csv(content,expected_ids)
+        if scoped is not None:
+            artifacts['source_export_csv'] = base64.b64encode(content).decode()
+            return scoped
     raise AcquisitionStopped('export_not_completed')
 
 
@@ -518,7 +561,7 @@ async def worker(resume):
                 artifacts['proof'] = {'period':RANGE,'ui_payment_count':len(identifiers),
                                       'ui_payment_ids':identifiers}
                 stage = 'payments_export'
-                content = await resume_payment_export(page,downloads,identifiers)
+                content = await resume_payment_export(page,downloads,identifiers,artifacts)
                 artifacts['payments_csv'] = base64.b64encode(content).decode()
                 stage = 'refunds'
                 artifacts['refunds'] = await read_refunds(page)
@@ -587,14 +630,15 @@ def save(database_url, result, artifacts, summary):
 
 
 def decode(stdout):
-    if len(stdout)>5_000_000:
+    if len(stdout)>8_000_000:
         raise AcquisitionStopped('artifact_too_large')
     raw = json.loads(stdout)
     if set(raw)!={'status','artifacts'}:
         raise AcquisitionStopped('invalid_worker_output')
     result = status(**{k:v for k,v in raw['status'].items() if k!='financial_writes'})
     artifacts = raw['artifacts']
-    if not isinstance(artifacts,dict) or set(artifacts)-{'login','proof','payments_csv','refunds','form_metadata','failure'}:
+    if not isinstance(artifacts,dict) or set(artifacts)-{'login','proof','payments_csv','refunds','form_metadata','failure',
+                                                      'candidate_csvs','source_export_csv'}:
         raise AcquisitionStopped('invalid_worker_output')
     if 'form_metadata' in artifacts:
         validate_forms(artifacts['form_metadata'])
@@ -648,6 +692,17 @@ async def run():
         result,artifacts = decode(stdout)
         if 'proof' in artifacts:
             summary['ui_payment_count'] = validate_proof(artifacts['proof'])['ui_payment_count']
+        if 'candidate_csvs' in artifacts:
+            candidates = artifacts['candidate_csvs']
+            if not isinstance(candidates,list) or len(candidates)>5:
+                raise AcquisitionStopped('invalid_worker_output')
+            summary['candidate_exports'] = []
+            for encoded in candidates:
+                candidate = base64.b64decode(encoded,validate=True)
+                if len(candidate)>MAX_BYTES:
+                    raise AcquisitionStopped('artifact_too_large')
+                _,report = scope_csv(candidate,resume['ui_payment_ids'])
+                summary['candidate_exports'].append(report)
         if 'failure' in artifacts:
             summary['failure'] = artifacts['failure']
         if 'payments_csv' in artifacts:
@@ -664,6 +719,9 @@ async def run():
             summary.update(payment_summary)
             artifacts['normalized_payments'] = rows
             summary['sha256'] = hashlib.sha256(content).hexdigest()
+            if 'source_export_csv' in artifacts:
+                summary['original_export_sha256'] = hashlib.sha256(base64.b64decode(
+                    artifacts['source_export_csv'],validate=True)).hexdigest()
             refunds = artifacts.get('refunds')
             if refunds is not None:
                 if refunds.get('period')!=RANGE or len(refunds.get('rows',[]))!=refunds.get('total'):

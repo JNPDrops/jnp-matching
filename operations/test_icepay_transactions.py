@@ -79,6 +79,23 @@ class CSV(unittest.TestCase):
         with self.assertRaises(t.AcquisitionStopped):
             t.validate_proof({**proof,'ui_payment_ids':['123','123'],'ui_payment_count':2})
 
+    def test_wider_export_is_scoped_by_proven_ids_without_losing_source(self):
+        other=ROW.copy(); other[0]='999'; other[2]='09/28/2026 1:00:00 AM'
+        original=fixture([ROW,other])
+        scoped,report=t.scope_csv(original,['123'])
+        self.assertEqual(report['rows'],2)
+        self.assertEqual(report['extra_rows'],1)
+        self.assertEqual(report['matched_ids'],1)
+        self.assertEqual(t.parse_payments(scoped,1,['123'])[1]['td_ok_count'],1)
+        self.assertIsNone(t.scope_csv(original,['124'])[0])
+        self.assertIsNone(t.scope_csv(fixture([ROW,ROW]),['123'])[0])
+
+    def test_excel_separator_and_utf16_are_read_without_guessing_amounts(self):
+        text='sep=;\n'+fixture([ROW]).decode('utf-8-sig')
+        scoped,report=t.scope_csv(text.encode('utf-16'),['123'])
+        self.assertTrue(report['parseable'])
+        self.assertEqual(t.parse_payments(scoped,1,['123'])[1]['td_ok_total'],'24.95')
+
     def test_notification_name_supports_observed_unread_badge(self):
         for label in ('Notifications','Notifications, 1 unread notification','Notifications, 2 unread notifications'):
             self.assertIsNotNone(t.NOTIFICATIONS.fullmatch(label))

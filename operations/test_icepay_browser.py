@@ -103,6 +103,30 @@ class Configuration(unittest.TestCase):
         self.assertTrue(b.validate_result(result)['account_verified'])
         self.assertTrue(b.validate_result(result)['password_submitted'])
 
+    def test_worker_roundtrip_accepts_empty_options_and_retains_login(self):
+        raw = {'result':b.safe_result('passed','complete',account_verified=True,
+                 password_submitted=True,pages=['payments']),
+               'forms':{'payments':{'path':'/merchant/88292/payments','controls':[
+                 {'tag':'button','label':'Export','options':[]}]}}}
+        result, forms = p.decode_worker_output(json.dumps(raw).encode())
+        self.assertEqual(result['status'],'passed')
+        self.assertEqual(forms,raw['forms'])
+        # JavaScript undefined becomes Python None, then JSON null. It must not
+        # silently turn a proven login into an unexplained runtime failure.
+        raw['forms']['payments']['controls'][0]['options'] = None
+        result, forms = p.decode_worker_output(json.dumps(raw).encode())
+        self.assertEqual(result['reason'],'invalid_form_metadata')
+        self.assertTrue(result['account_verified'])
+        self.assertTrue(result['password_submitted'])
+        self.assertEqual(forms,{})
+
+    def test_worker_bad_payload_never_echoes_output(self):
+        for payload in [b'private-worker-error',b'[]',b'{"password":"private"}',b'x'*300001]:
+            result, forms = p.decode_worker_output(payload)
+            self.assertEqual(result['reason'],'invalid_worker_output')
+            self.assertNotIn('private',json.dumps(result))
+            self.assertEqual(forms,{})
+
 
 class Login(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_navigation_and_breadcrumb_accept_same_target_only(self):

@@ -64,6 +64,14 @@ class ExactConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             b.safe_result('failed', 'password', reason='raw private error')
 
+    def test_accounting_workspace_is_not_limited_to_legacy_docs_routes(self):
+        self.assertTrue(b.application_frame_url('https://start.exactonline.nl/Web/Dashboard'))
+        self.assertTrue(b.application_frame_url('https://start.exactonline.nl/docs/FinMenu.aspx'))
+        for url in ['https://start.exactonline.nl/?ReturnUrl=x',
+                    'https://start.exactonline.nl/docs/Login.aspx',
+                    'https://login.exact.com/Web/Dashboard', 'https://evil.test/Web/Dashboard']:
+            self.assertFalse(b.application_frame_url(url))
+
     def test_only_noop_javascript_form_action_is_supported(self):
         for action in ['javascript:void(0)', 'JavaScript: void(0);']:
             self.assertTrue(b.form_action_allowed(action))
@@ -86,7 +94,7 @@ class ExactLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await b.locate_otp(frame, after_password=True), [])
 
     async def test_verified_administration_can_contain_autofill_suppression_field(self):
-        main = SimpleNamespace(name='MainWindow', url='https://start.exactonline.nl/docs/FinMenu.aspx',
+        main = SimpleNamespace(name='MainWindow', url='https://start.exactonline.nl/Web/Dashboard',
             title=AsyncMock(return_value='Accounting dashboard'))
         main.locator = lambda selector: (element(text='Accounting dashboard Search') if selector == 'body'
             else collection([element()]) if selector == b.OTP else collection([]))

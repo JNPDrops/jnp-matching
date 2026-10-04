@@ -18,7 +18,7 @@ Dit zijn andere gegevens dan `EXACT_CLIENT_ID` en `EXACT_CLIENT_SECRET` van de
 OAuth-koppeling, en andere dan de Paragon-gegevens. Bestaande variabelen en
 OAuth-tokens worden niet aangepast. Bewaar geen geheimen in GitHub of chat.
 
-Activeer de proef met `EXACT_LOGIN_PROBE_ID=exact-login-20261004-v6`.
+Activeer de proef met `EXACT_LOGIN_PROBE_ID=exact-login-20261004-v9`.
 De Render-tool voor het bijwerken van omgevingsvariabelen start zelf een
 deployment; start daarna geen tweede deployment. Controleer dat de deployment
 de bedoelde commit bevat. De activatie vervalt op 5 oktober 2026 om 18:00 UTC.
@@ -58,11 +58,16 @@ invullen te onderdrukken. Een uniek veld zonder standaard-OTP-naam wordt alleen
 na het wachtwoord en met expliciete authenticator-apptekst herkend. Ambigue
 velden of alleen een e-mailcode activeren deze fallback niet.
 
-De proeven v4 en v5 hebben gebruikersnaam, wachtwoord en TOTP ingediend. V5
-zag daarna de verwachte MenuPortal-URL en administratiekop met een zichtbaar
-OTP-attribuut, maar zonder OTP- of authenticatortekst. Dit wijst op een foutieve
-veldherkenning; v6 toetst de gecorrigeerde controle. Alleen een daadwerkelijk
-`passed`-resultaat met `administration_verified=true` bevestigt de live login.
+De eerdere proeven hebben gebruikersnaam, wachtwoord en TOTP ingediend. De
+diagnose heeft twee te strenge aannames aan het licht gebracht: de herkenning
+van gewone autocomplete-velden als OTP en de eis dat het werkvenster een oud
+`/docs/`-pad gebruikt. V8 bevestigde de juiste administratie, navigatie en
+inhoud van MainWindow, maar niet die padeceis. V9 vereist het boekhouddomein,
+een niet-lege route die geen inlogroute is, en alle overige inhoudscontroles.
+Tijdelijke fouten bij het lezen tijdens een paginawissel mogen opnieuw worden
+uitgelezen binnen dezelfde termijn; invullen en indienen worden niet herhaald.
+Alleen een daadwerkelijk `passed`-resultaat met `administration_verified=true`
+bevestigt de live login. Raadpleeg daarvoor de vastgelegde Render-proefstatus.
 Een onbekend scherm, SSO, CAPTCHA, foutmelding, gewijzigd domein of herhaalde
 inlogstap stopt de poging. De bot kiest geen andere inlogmethode, reset geen
 wachtwoord en wijzigt geen 2FA-instellingen.

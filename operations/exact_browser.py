@@ -60,7 +60,7 @@ SIGNALS = set(SIGNAL_PATTERNS) | {'password_field', 'standard_otp_field', 'usern
     'administration_matches', 'main_window_named', 'main_window_by_id',
     'main_window_documents_url', 'main_window_content', 'navigation_present',
     'navigation_visible', 'auth_title', 'logged_out_text', 'browser_navigation_race',
-    'browser_timeout', 'browser_other_error'}
+    'browser_timeout', 'browser_other_error', 'main_window_exact_online', 'main_window_login_origin'}
 
 
 def safe_result(status, stage, *, reason="none", username_submitted=False,
@@ -97,6 +97,7 @@ async def collect_signals(page):
                 signals.add('auth_title')
             if frame.name == 'MainWindow':
                 signals.add('main_window_named')
+                signals.add('main_window_exact_online' if urlsplit(frame.url).hostname == 'start.exactonline.nl' else 'main_window_login_origin')
                 if urlsplit(frame.url).hostname == 'start.exactonline.nl' and urlsplit(frame.url).path.lower().startswith('/docs/'):
                     signals.add('main_window_documents_url')
                 if body.strip():
@@ -133,6 +134,16 @@ def target_page(url):
     p = urlsplit(url)
     return (p.hostname == "start.exactonline.nl" and p.path.lower() == "/docs/menuportal.aspx"
             and parse_qs(p.query).get("_Division_") == [DIVISION])
+
+
+def application_frame_url(url):
+    # Exact's loaded workspace is not limited to legacy /docs/ pages. Require
+    # the accounting host and a non-login route; page contents are checked too.
+    if not trusted(url):
+        return False
+    p = urlsplit(url)
+    return (p.hostname == 'start.exactonline.nl' and p.path not in ('', '/')
+            and not re.search(r'login|signin|sign-in|oauth|authorize', p.path, re.I))
 
 
 def form_action_allowed(action):
@@ -233,8 +244,7 @@ async def verify_administration(page):
     if len(frames) != 1:
         return False
     main = frames[0]
-    p = urlsplit(main.url)
-    if not trusted(main.url) or p.hostname != "start.exactonline.nl" or not p.path.lower().startswith('/docs/'):
+    if not application_frame_url(main.url):
         return False
     if not (await main.locator('body').inner_text()).strip():
         return False

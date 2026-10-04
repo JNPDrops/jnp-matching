@@ -36,7 +36,22 @@ financiële actie op deployment of herstart. Bestaande MatchSets-schakelaars,
 toewijzingsregels, dagelijkse agents en de handmatige deployinstelling blijven
 ongewijzigd.
 
-Deze eerste controller bevat nog geen Automatically-actie. Die wordt pas na
-inspectie van de actuele Fibonatix-afschriftpagina aangesloten. De uiteindelijke
-aflettering mag geen verschillen afboeken en moet resterende open posten
-rapporteren. De dagelijkse Paragon-import is een afzonderlijke vervolgstap.
+`POST /automatic` is eenmaal uitgevoerd na verificatie van alle 845 regels.
+Exact heeft daarbij 77 orderreferenties vervangen bij aflettering op gelijke
+bedragen. De oorspronkelijke order, Woo-ID en transactiereferentie blijven in
+omschrijving/notitie staan. Jasper accepteert deze aflettering binnen 100100
+als het saldo klopt en betaalde orders gesloten zijn (4 oktober, 21:13 CEST).
+Daarom geen massale herstelactie uitsluitend vanwege een andere YourRef.
+De strikte importvergelijking blijft deze referentiewijzigingen rapporteren;
+dat is na Automatically geen bewijs van een verkeerd geïmporteerd bedrag.
+
+`POST /settle_48189` is begrensd tot factuur 26722396 / TD48189 (€85,00) en
+de bestaande ontvangst j8hJ8KLB (€90,99). Jasper heeft de €5,99 expliciet als
+betalingsverschil goedgekeurd op 4 oktober om 21:19 CEST. De controller controleert
+de actuele bedragen en identiteit vóór éénmalig opslaan, en leest daarna de
+gesloten posten en de €5,99 op 9920 terug. Een onzekere uitkomst leidt tot
+teruglezen, nooit tot nogmaals opslaan. Dit stelt geen algemene afboekgrens in.
+
+Beslisregels en vereisten voor de dashboardwerklijst staan in
+[DASHBOARD_EXCEPTIONS.md](DASHBOARD_EXCEPTIONS.md). De dagelijkse Paragon-import
+en de dashboardimplementatie zijn afzonderlijke vervolgstappen.

@@ -69,6 +69,21 @@ class CSV(unittest.TestCase):
             t.parse_payments(fixture([ROW]),1,['124'])
         self.assertEqual(str(caught.exception),'count_mismatch')
 
+    def test_existing_export_requires_exact_ids_and_fixed_scope(self):
+        self.assertTrue(t.csv_has_expected_ids(fixture([ROW]),['123']))
+        self.assertFalse(t.csv_has_expected_ids(fixture([ROW]),['124']))
+        proof={'period':t.RANGE,'ui_payment_ids':['123'],'ui_payment_count':1}
+        self.assertEqual(t.validate_proof(proof),proof)
+        with self.assertRaises(t.AcquisitionStopped):
+            t.validate_proof({**proof,'period':'other period'})
+        with self.assertRaises(t.AcquisitionStopped):
+            t.validate_proof({**proof,'ui_payment_ids':['123','123'],'ui_payment_count':2})
+
+    def test_notification_name_supports_observed_unread_badge(self):
+        for label in ('Notifications','Notifications, 1 unread notification','Notifications, 2 unread notifications'):
+            self.assertIsNotNone(t.NOTIFICATIONS.fullmatch(label))
+        self.assertIsNone(t.NOTIFICATIONS.fullmatch('Clear notifications'))
+
     def test_amounts_never_round_invalid_or_guess_grouping(self):
         for value in ('1,234.56','1.234,56','NaN','Infinity','1.234','EUR 4',''):
             with self.assertRaises(t.AcquisitionStopped):

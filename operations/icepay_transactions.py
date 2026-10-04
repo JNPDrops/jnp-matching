@@ -25,7 +25,8 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v4'
+JOB = 'icepay-transactions-20261001-03-v5'
+RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 RANGE = '01/10/2026 - 03/10/2026'
@@ -38,7 +39,9 @@ REASONS = {'none','configuration','claim_failed','already_attempted','browser_in
     'table_not_verified','export_ambiguous','export_not_completed','download_failed',
     'artifact_too_large','invalid_worker_output','invalid_csv','invalid_amount',
     'invalid_payment_date','out_of_period','duplicate_payment','count_mismatch',
-    'unexpected_origin','unexpected_currency','order_reference_conflict','save_failed'}
+    'unexpected_origin','unexpected_currency','order_reference_conflict','save_failed',
+    'unsupported_form','credentials_rejected','verification_required','wrong_account'}
+NOTIFICATIONS = re.compile(r'^Notifications(?:,\s*\d+\s+unread notifications?)?$')
 
 
 class AcquisitionStopped(Exception):
@@ -286,7 +289,7 @@ async def csv_links(page):
 
 
 async def payment_export(page, downloads):
-    await b.click_unique_read_control(page,re.compile(r'^Notifications$'))
+    await b.click_unique_read_control(page,NOTIFICATIONS)
     await page.wait_for_load_state('networkidle',timeout=20000)
     await asyncio.sleep(.6)
     before = set(await csv_links(page))
@@ -310,7 +313,7 @@ async def payment_export(page, downloads):
             return await read_download(await downloads.get())
         if time.monotonic()-last_open>10:
             await page.keyboard.press('Escape')
-            await b.click_unique_read_control(page,re.compile(r'^Notifications$'))
+            await b.click_unique_read_control(page,NOTIFICATIONS)
             last_open = time.monotonic()
             await asyncio.sleep(.6)
         links = await csv_links(page)
@@ -325,6 +328,42 @@ async def payment_export(page, downloads):
                 raise AcquisitionStopped('download_failed') from None
             return await read_download(download)
         await asyncio.sleep(2)
+    raise AcquisitionStopped('export_not_completed')
+
+
+def csv_has_expected_ids(content, expected_ids):
+    """Identify an existing export before full amount/date validation in parent."""
+    try:
+        text = content.decode('utf-8-sig')
+        dialect = csv.Sniffer().sniff(text[:16000],delimiters=',;\t')
+        reader = csv.DictReader(io.StringIO(text),dialect=dialect)
+        keys = {re.sub(r'[^a-z0-9]','',k.lower()):k for k in reader.fieldnames or []}
+        if 'paymentid' not in keys:
+            return False
+        ids = [r[keys['paymentid']].strip() for r in reader]
+        return len(ids)==len(expected_ids) and set(ids)==set(expected_ids)
+    except Exception:
+        return False
+
+
+async def resume_payment_export(page, downloads, expected_ids):
+    """Download a matching existing notification; never create another export."""
+    await b.click_unique_read_control(page,NOTIFICATIONS)
+    await page.wait_for_load_state('networkidle',timeout=20000)
+    await asyncio.sleep(1)
+    links = await csv_links(page)
+    if not links or len(links)>5:
+        raise AcquisitionStopped('export_ambiguous')
+    for link in links.values():
+        await b.guard_page(page)
+        await link.click()
+        try:
+            download = await asyncio.wait_for(downloads.get(),timeout=25)
+        except asyncio.TimeoutError:
+            raise AcquisitionStopped('download_failed') from None
+        content = await read_download(download)
+        if csv_has_expected_ids(content,expected_ids):
+            return content
     raise AcquisitionStopped('export_not_completed')
 
 
@@ -446,10 +485,11 @@ def parse_payments(content, expected_count, expected_ids=None):
             for d in ('2026-10-01','2026-10-02','2026-10-03')}}
 
 
-async def worker():
+async def worker(resume):
     stage, verified, artifacts = 'configuration', False, {}
     result = status('failed',stage,'runtime_error')
     try:
+        validate_proof(resume)
         credentials = b.Credentials.from_env(os.environ)
         from playwright.async_api import async_playwright
         async with async_playwright() as playwright:
@@ -473,10 +513,12 @@ async def worker():
                 await open_account_page(page,'Payments')
                 await apply_period(page)
                 identifiers = await payment_identifiers(page)
+                if identifiers!=resume['ui_payment_ids']:
+                    raise AcquisitionStopped('count_mismatch')
                 artifacts['proof'] = {'period':RANGE,'ui_payment_count':len(identifiers),
                                       'ui_payment_ids':identifiers}
                 stage = 'payments_export'
-                content = await payment_export(page,downloads)
+                content = await resume_payment_export(page,downloads,identifiers)
                 artifacts['payments_csv'] = base64.b64encode(content).decode()
                 stage = 'refunds'
                 artifacts['refunds'] = await read_refunds(page)
@@ -496,8 +538,8 @@ async def worker():
                 await browser.close()
     except AcquisitionStopped as exc:
         result = status('blocked',stage,str(exc),verified)
-    except b.Stopped:
-        result = status('blocked',stage,'login_failed',verified)
+    except b.Stopped as exc:
+        result = status('blocked',stage,str(exc) if str(exc) in REASONS else 'login_failed',verified)
     except Exception:
         result = status('failed',stage,'runtime_error',verified)
     return {'status':result,'artifacts':artifacts}
@@ -513,6 +555,27 @@ def claim(database_url):
         return conn.execute('''INSERT INTO icepay_transaction_tasks(job,status) VALUES(%s,%s::jsonb)
           ON CONFLICT DO NOTHING RETURNING job''',
           (JOB,json.dumps(status('started','claim')))).fetchone() is not None
+
+
+def validate_proof(proof):
+    if not isinstance(proof,dict) or proof.get('period')!=RANGE:
+        raise AcquisitionStopped('configuration')
+    ids = proof.get('ui_payment_ids')
+    if (not isinstance(ids,list) or len(ids)>5000 or
+        any(not isinstance(v,str) or not re.fullmatch(r'\d+',v) for v in ids) or
+        ids!=sorted(set(ids)) or proof.get('ui_payment_count')!=len(ids)):
+        raise AcquisitionStopped('configuration')
+    return proof
+
+
+def previous_proof(database_url):
+    import psycopg
+    with psycopg.connect(database_url,connect_timeout=10) as conn:
+        row = conn.execute("SELECT status,artifacts->'proof' FROM icepay_transaction_tasks WHERE job=%s",
+                           (RESUME_FROM,)).fetchone()
+    if not row or row[0].get('account_verified') is not True or row[0].get('stage')!='payments_export':
+        raise AcquisitionStopped('configuration')
+    return validate_proof(row[1])
 
 
 def save(database_url, result, artifacts, summary):
@@ -554,6 +617,7 @@ async def run():
         b.Credentials.from_env(os.environ)
         if not database_url:
             raise ValueError()
+        resume = await asyncio.to_thread(previous_proof,database_url)
     except Exception:
         LOG.warning('ICEPAY_TRANSACTIONS %s',json.dumps({'job':JOB,**result}))
         return
@@ -576,11 +640,14 @@ async def run():
         child = None
         result = status('failed','login','runtime_error')
         child = await asyncio.create_subprocess_exec(sys.executable,'-m','operations.icepay_transactions','--worker',
-            env=child_env,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
-        stdout,_ = await asyncio.wait_for(child.communicate(),timeout=330)
+            env=child_env,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
+        stdout,_ = await asyncio.wait_for(child.communicate(json.dumps(resume).encode()),timeout=330)
         if child.returncode!=0:
             raise AcquisitionStopped('invalid_worker_output')
         result,artifacts = decode(stdout)
+        if 'proof' in artifacts:
+            summary['ui_payment_count'] = validate_proof(artifacts['proof'])['ui_payment_count']
         if 'failure' in artifacts:
             summary['failure'] = artifacts['failure']
         if 'payments_csv' in artifacts:
@@ -593,7 +660,8 @@ async def run():
             ids = proof.get('ui_payment_ids')
             if not isinstance(ids,list) or any(not isinstance(v,str) or not re.fullmatch(r'\d+',v) for v in ids):
                 raise AcquisitionStopped('invalid_worker_output')
-            rows,summary = parse_payments(content,proof['ui_payment_count'],ids)
+            rows,payment_summary = parse_payments(content,proof['ui_payment_count'],ids)
+            summary.update(payment_summary)
             artifacts['normalized_payments'] = rows
             summary['sha256'] = hashlib.sha256(content).hexdigest()
             refunds = artifacts.get('refunds')
@@ -622,4 +690,4 @@ async def run():
 
 
 if __name__=='__main__' and sys.argv[1:]==['--worker']:
-    print(json.dumps(asyncio.run(worker()),sort_keys=True))
+    print(json.dumps(asyncio.run(worker(json.loads(sys.stdin.read(200000)))),sort_keys=True))

@@ -30,7 +30,7 @@ en kolomnamen. Fouten kunnen begrensde formuliermetadata tonen onder
 ## Eenmalig activeren
 
 - Gebruik de bestaande ICEPAY_WEB_USERNAME/PASSWORD en optionele TOTP-configuratie.
-- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v4`.
+- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v5`.
 - Render env-merge (`replace=false`) start zelf één deployment. Auto-deploy blijft uit.
 - De taak vervalt op 5 oktober 18:00 UTC en claimt vóór browserstart één poging.
 - Bestaande claims blijven intact; een herstart herhaalt geen export.
@@ -53,6 +53,15 @@ V4 leest PaymentID-checkboxes en de toestand van Next atomair uit de zichtbare
 DOM en wacht op een stabiele momentopname na wisselen van paginagrootte.
 Onverwachte fouten geven uitsluitend de foutklasse en publieke bronfunctie/-regel
 terug; nooit de fouttekst. Alle eerdere claims blijven intact.
+
+V4 kwam door de volledige selectie en PaymentID-controle en bereikte de exportfase.
+De notificatieknop heette daarna `Notifications, 1 unread notification`; de exacte
+oude naam werd niet meer gevonden. V5 ondersteunt deze waargenomen naam en maakt
+**geen nieuwe export**. De parent leest uitsluitend het vastgelegde periode-/ID-
+bewijs van v4 uit de eigen taaktabel en geeft dat zonder databasegeheim door aan
+het child. De actuele ID-selectie moet daarmee overeenkomen. Daarna worden
+maximaal vijf bestaande CSV-downloads bekeken; alleen een CSV met exact die IDs
+wordt bewaard en verder gevalideerd. Oude claims blijven intact.
 
 `downloaded` betekent dat de bronbestanden zijn opgehaald. Het betekent nog niet
 dat de Exact-import gereed is. De refunds moeten inhoudelijk worden gemapt;

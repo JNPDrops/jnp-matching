@@ -56,7 +56,10 @@ SIGNAL_PATTERNS = {
     'stay_signed_in_prompt': re.compile(r'stay signed in|keep me signed in|aangemeld blijven|ingelogd blijven', re.I),
 }
 SIGNALS = set(SIGNAL_PATTERNS) | {'password_field', 'standard_otp_field', 'username_field',
-    'administration_header', 'expected_portal_url', 'exact_login_origin'}
+    'administration_header', 'expected_portal_url', 'exact_login_origin',
+    'administration_matches', 'main_window_named', 'main_window_by_id',
+    'main_window_documents_url', 'main_window_content', 'navigation_present',
+    'navigation_visible', 'auth_title', 'logged_out_text'}
 
 
 def safe_result(status, stage, *, reason="none", username_submitted=False,
@@ -87,10 +90,29 @@ async def collect_signals(page):
                 continue
             body = await frame.locator('body').inner_text(timeout=1000)
             signals.update(key for key, pattern in SIGNAL_PATTERNS.items() if pattern.search(body))
+            if LOGGED_OUT.search(body):
+                signals.add('logged_out_text')
+            if AUTH_TEXT.search(await frame.title()):
+                signals.add('auth_title')
+            if frame.name == 'MainWindow':
+                signals.add('main_window_named')
+                if urlsplit(frame.url).hostname == 'start.exactonline.nl' and urlsplit(frame.url).path.lower().startswith('/docs/'):
+                    signals.add('main_window_documents_url')
+                if body.strip():
+                    signals.add('main_window_content')
             for selector, key in [(PASSWORD, 'password_field'), (OTP, 'standard_otp_field'),
                                   (USERNAME, 'username_field'), ('#Administration', 'administration_header')]:
                 if await visible(frame.locator(selector)):
                     signals.add(key)
+        company = page.locator('#Administration')
+        if await company.count() == 1 and 'James n Parson B.V.' in await company.inner_text():
+            signals.add('administration_matches')
+        if await page.locator('iframe#MainWindow').count() == 1:
+            signals.add('main_window_by_id')
+        if await page.locator('#EnhancedNavigation').count() == 1:
+            signals.add('navigation_present')
+            if await page.locator('#EnhancedNavigation').is_visible():
+                signals.add('navigation_visible')
     except Exception:
         pass
     return sorted(signals)

@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v13'
+JOB = 'icepay-transactions-20261001-03-v14'
 SAVED_SOURCE = 'icepay-transactions-20261001-03-v11'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
@@ -774,7 +774,11 @@ def csv_schema(content):
     fields = reader.fieldnames or []
     rows = list(reader)
     keys = {re.sub(r'[^a-z0-9]','',k.lower()):k for k in fields}
+    values = lambda key: sorted(set((r.get(keys.get(key,'')) or '').strip() for r in rows))
+    times = values('paymenttime')
     return {'headers':[re.sub(r'[^\w .()/\-]','',s)[:100] for s in fields],
+        'payment_time_values':[v if re.fullmatch(r'[\dT:./\-+ ZAPMapm]{0,80}',v) else '[unsupported characters]' for v in times[:40]],
+        'payment_status_values':[v if re.fullmatch(r'[A-Z_]{0,30}',v) else '[unsupported status]' for v in values('lastpaymentstatus')],
         'rows':len(rows),'malformed_rows':sum(None in row or any(v is None for v in row.values()) for row in rows),
         'nonnumeric_ids':{key:sum(not re.fullmatch(r'\d+',str(row.get(keys[key]) or '').strip()) for row in rows)
                           for key in ('paymentid','merchantid') if key in keys}}
@@ -919,6 +923,11 @@ async def run():
             if len(content)>MAX_BYTES:
                 raise AcquisitionStopped('artifact_too_large')
             summary['csv_schema'] = csv_schema(content)
+            from operations.icepay_import import inspect_exact
+            exact,exact_summary = await inspect_exact([])
+            exact_summary.update(source_validated=False,ready=False)
+            artifacts['exact_preflight'] = exact
+            summary['exact_preflight'] = exact_summary
             proof = artifacts.get('proof',{})
             if proof.get('period')!=RANGE or type(proof.get('ui_payment_count')) is not int:
                 raise AcquisitionStopped('invalid_worker_output')
@@ -932,11 +941,6 @@ async def run():
             if 'source_export_csv' in artifacts:
                 summary['original_export_sha256'] = hashlib.sha256(base64.b64decode(
                     artifacts['source_export_csv'],validate=True)).hexdigest()
-            if result['state']=='downloaded':
-                from operations.icepay_import import inspect_exact
-                exact,exact_summary = await inspect_exact(rows)
-                artifacts['exact_preflight'] = exact
-                summary['exact_preflight'] = exact_summary
             refunds = artifacts.get('refunds')
             if refunds is not None:
                 if refunds.get('period')!=RANGE or len(refunds.get('rows',[]))!=refunds.get('total'):

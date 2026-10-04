@@ -25,7 +25,8 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v11'
+JOB = 'icepay-transactions-20261001-03-v12'
+SAVED_SOURCE = 'icepay-transactions-20261001-03-v11'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
@@ -577,9 +578,10 @@ def parse_payments(content, expected_count, expected_ids=None):
         reader = csv.DictReader(io.StringIO(text),dialect=dialect)
         normalize = lambda key: re.sub(r'[^a-z0-9]','',key.lower())
         headers = {normalize(k):k for k in reader.fieldnames or []}
-        required = {'paymentid','merchantid','paymenttime','lastpaymentstatus','amount','currency',
-                    'checkoutreference','checkoutdescription'}
+        required = {'paymentid','merchantid','paymenttime','lastpaymentstatus','amount','currency'}
         if not required<=headers.keys() or len(headers)!=len(reader.fieldnames or []):
+            raise AcquisitionStopped('invalid_csv')
+        if not {'description','checkoutreference','checkoutdescription'}.intersection(headers):
             raise AcquisitionStopped('invalid_csv')
         source = list(reader)
     except AcquisitionStopped:
@@ -608,7 +610,7 @@ def parse_payments(content, expected_count, expected_ids=None):
             raise AcquisitionStopped('unexpected_currency')
         value = amount(row['amount'])
         order_values = set()
-        for field in ('checkoutreference','checkoutdescription','description'):
+        for field in ('checkoutreference','checkoutdescription','description','reference'):
             order_values.update(re.findall(r'\bOrder\s*#\s*(\d{4,10})\b',row.get(field,''),re.I))
         if len(order_values)>1:
             raise AcquisitionStopped('order_reference_conflict')
@@ -732,6 +734,32 @@ def previous_proof(database_url):
     return validate_proof(row[1])
 
 
+def saved_source(database_url):
+    import psycopg
+    with psycopg.connect(database_url,connect_timeout=10) as conn:
+        row = conn.execute('SELECT status,artifacts FROM icepay_transaction_tasks WHERE job=%s',
+                           (SAVED_SOURCE,)).fetchone()
+    if not row or row[0].get('account_verified') is not True:
+        raise AcquisitionStopped('configuration')
+    result,artifacts = decode(json.dumps({'status':row[0],'artifacts':row[1]}).encode())
+    validate_proof(artifacts.get('proof'))
+    content = base64.b64decode(artifacts.get('source_export_csv',''),validate=True)
+    if hashlib.sha256(content).hexdigest()!='d623e07ceba28cbe211053933f1bd91fb71d985a6c382441e5ec155d986973ef':
+        raise AcquisitionStopped('configuration')
+    return status('downloaded','complete',account_verified=True),artifacts
+
+
+def csv_schema(content):
+    reader = csv.DictReader(io.StringIO(content.decode('utf-8-sig')),delimiter=';')
+    fields = reader.fieldnames or []
+    rows = list(reader)
+    keys = {re.sub(r'[^a-z0-9]','',k.lower()):k for k in fields}
+    return {'headers':[re.sub(r'[^\w .()/\-]','',s)[:100] for s in fields],
+        'rows':len(rows),'malformed_rows':sum(None in row or any(v is None for v in row.values()) for row in rows),
+        'nonnumeric_ids':{key:sum(not re.fullmatch(r'\d+',str(row.get(keys[key]) or '').strip()) for row in rows)
+                          for key in ('paymentid','merchantid') if key in keys}}
+
+
 def save(database_url, result, artifacts, summary):
     import psycopg
     with psycopg.connect(database_url,connect_timeout=10) as conn:
@@ -819,19 +847,22 @@ async def run():
     result = status('failed','install','browser_install')
     LOG.warning('ICEPAY_TRANSACTIONS %s',json.dumps({'job':JOB,**status('started','install')}))
     try:
-        child = await asyncio.create_subprocess_exec(sys.executable,'-m','playwright','install','chromium','--only-shell',
-            env=base,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
-        if await asyncio.wait_for(child.wait(),150)!=0:
-            return
-        child = None
-        result = status('failed','login','runtime_error')
-        child = await asyncio.create_subprocess_exec(sys.executable,'-m','operations.icepay_transactions','--worker',
-            env=child_env,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
-        stdout,_ = await asyncio.wait_for(child.communicate(json.dumps(resume).encode()),timeout=330)
-        if child.returncode!=0:
-            raise AcquisitionStopped('invalid_worker_output')
-        result,artifacts = decode(stdout)
+        if SAVED_SOURCE:
+            result,artifacts = await asyncio.to_thread(saved_source,database_url)
+        else:
+            child = await asyncio.create_subprocess_exec(sys.executable,'-m','playwright','install','chromium','--only-shell',
+                env=base,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
+            if await asyncio.wait_for(child.wait(),150)!=0:
+                return
+            child = None
+            result = status('failed','login','runtime_error')
+            child = await asyncio.create_subprocess_exec(sys.executable,'-m','operations.icepay_transactions','--worker',
+                env=child_env,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,start_new_session=True)
+            stdout,_ = await asyncio.wait_for(child.communicate(json.dumps(resume).encode()),timeout=330)
+            if child.returncode!=0:
+                raise AcquisitionStopped('invalid_worker_output')
+            result,artifacts = decode(stdout)
         if 'export_state' in artifacts:
             summary['export_state'] = artifacts['export_state']
         if 'export_notices' in artifacts:
@@ -867,6 +898,7 @@ async def run():
             content = base64.b64decode(artifacts['payments_csv'],validate=True)
             if len(content)>MAX_BYTES:
                 raise AcquisitionStopped('artifact_too_large')
+            summary['csv_schema'] = csv_schema(content)
             proof = artifacts.get('proof',{})
             if proof.get('period')!=RANGE or type(proof.get('ui_payment_count')) is not int:
                 raise AcquisitionStopped('invalid_worker_output')

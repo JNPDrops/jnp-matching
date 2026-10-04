@@ -16,7 +16,7 @@ import tempfile
 from operations.icepay_browser import (
     Credentials, ENV_NAMES, REQUIRED, safe_result, validate_result, worker)
 
-PROBE_ID = 'icepay-fetch-20261001-03-v1'
+PROBE_ID = 'icepay-fetch-20261001-03-v2'
 ACTIVATION = 'ICEPAY_FETCH_PROBE_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 PERIOD = {'from': '2026-10-01', 'through': '2026-10-03', 'timezone': 'Europe/Amsterdam'}
@@ -65,6 +65,16 @@ def validate_forms(forms):
                 elif not isinstance(v, str) or len(v) > 160:
                     raise ValueError('invalid_metadata_text')
     return forms
+
+
+def publish_forms(forms):
+    # Render's DB has no external allowlist. Use the private log connector for
+    # the same bounded static metadata, without exposing a public HTTP route.
+    for name, page in validate_forms(forms).items():
+        for start in range(0, len(page['controls']), 10):
+            LOG.warning('ICEPAY_FORM_METADATA %s', json.dumps({
+                'probe':PROBE_ID, 'page':name, 'path':page['path'], 'offset':start,
+                'controls':page['controls'][start:start+10]}, sort_keys=True))
 
 
 def claim(database_url):
@@ -151,6 +161,7 @@ async def run():
     finally:
         await stop_child(child)
         publish(result)
+        publish_forms(forms)
         try:
             await asyncio.to_thread(save, database_url, result, forms)
         except Exception:

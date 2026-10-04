@@ -18,8 +18,10 @@ Dit zijn andere gegevens dan `EXACT_CLIENT_ID` en `EXACT_CLIENT_SECRET` van de
 OAuth-koppeling, en andere dan de Paragon-gegevens. Bestaande variabelen en
 OAuth-tokens worden niet aangepast. Bewaar geen geheimen in GitHub of chat.
 
-Activeer de proef met `EXACT_LOGIN_PROBE_ID=exact-login-20261004-v4` en voer één
-handmatige deployment uit. De activatie vervalt op 5 oktober 2026 om 18:00 UTC.
+Activeer de proef met `EXACT_LOGIN_PROBE_ID=exact-login-20261004-v6`.
+De Render-tool voor het bijwerken van omgevingsvariabelen start zelf een
+deployment; start daarna geen tweede deployment. Controleer dat de deployment
+de bedoelde commit bevat. De activatie vervalt op 5 oktober 2026 om 18:00 UTC.
 Zonder de exacte activatiewaarde doet deze module niets. Ontbrekende of ongeldige
 configuratie wordt gemeld voordat de poging wordt verbruikt.
 
@@ -28,8 +30,9 @@ bij een herstart of gelijktijdige deployment. Een mislukte echte login wordt
 niet automatisch herhaald. Verwijder geen claim om toch opnieuw te proberen;
 onderzoek eerst de melding en gebruik daarna een expliciet nieuwe proef.
 
-`/health` bevat `exact_login_probe` met alleen vaste statuscodes, de stap en
-booleans. De applicatielog bevat dezelfde informatie onder `EXACT_LOGIN_PROBE`.
+`/health` bevat `exact_login_probe` met alleen vaste statuscodes, de stap,
+booleans en vaste diagnostische labels. Er wordt geen paginainhoud opgenomen.
+De applicatielog bevat dezelfde informatie onder `EXACT_LOGIN_PROBE`.
 De tabel `exact_login_probes` bewaart het resultaat. Er is geen openbare
 uitvoeringsroute. Een configuratiemelding noemt alleen ontbrekende variabelen.
 
@@ -44,21 +47,22 @@ domeinen `start.exactonline.nl` en `login.exact.com`, en geen bewaarde cookies.
 Wachtwoorden, codes, screenshots, paginainhoud en ruwe fouten worden niet
 gelogd of teruggestuurd. Het browserproces erft de geheimen niet.
 
-De eerste gebruikersnaamselector is in de huidige Exact-pagina waargenomen.
-De eerste live poging bereikte de wachtwoordstap maar stopte bij de formulier-
-doelcontrole, voordat het wachtwoord was ingevoerd. Versie 2 accepteert naast
-Exact-HTTPS-formulieren uitsluitend de no-op `javascript:void(0)`-actie die
-AJAX-inlogformulieren gebruiken. Formuliernavigatie en POST-verzoeken naar
-andere hosts blijven geblokkeerd. Versie 2 bleef na gebruikersnaam steken;
-versie 3 herstelt het oorspronkelijke toestaan van GET-verzoeken voor externe
-resources, ook bij XHR. Alle eerdere claims blijven bewaard.
-Versie 3 heeft gebruikersnaam en wachtwoord ingediend, maar herkende de volgende
-stap niet binnen de tijdslimiet. Versie 4 kan na het wachtwoord ook een uniek
-codeveld herkennen in een formulier dat expliciet een authenticator-app noemt,
-zonder een vaste veldnaam. Twee ambigue velden of alleen een e-mailcode worden
-niet als een TOTP-formulier geïnterpreteerd.
-Wachtwoord en TOTP worden conservatief herkend via semantische invoervelden.
-De huidige live wachtwoord- en TOTP-stappen zijn nog niet met deze bot getest.
+Naast Exact-HTTPS-formulieren is uitsluitend de no-op `javascript:void(0)`-
+actie toegestaan voor AJAX-formulieren. Navigatie en POST-verzoeken naar
+andere hosts blijven geblokkeerd. Externe GET-resources mogen laden.
+
+Een OTP-veld vereist ook zichtbare tekst over een verificatiecode of
+authenticator. Het attribuut `autocomplete="one-time-code"` alleen is
+onvoldoende: gewone administratievelden kunnen dat gebruiken om automatisch
+invullen te onderdrukken. Een uniek veld zonder standaard-OTP-naam wordt alleen
+na het wachtwoord en met expliciete authenticator-apptekst herkend. Ambigue
+velden of alleen een e-mailcode activeren deze fallback niet.
+
+De proeven v4 en v5 hebben gebruikersnaam, wachtwoord en TOTP ingediend. V5
+zag daarna de verwachte MenuPortal-URL en administratiekop met een zichtbaar
+OTP-attribuut, maar zonder OTP- of authenticatortekst. Dit wijst op een foutieve
+veldherkenning; v6 toetst de gecorrigeerde controle. Alleen een daadwerkelijk
+`passed`-resultaat met `administration_verified=true` bevestigt de live login.
 Een onbekend scherm, SSO, CAPTCHA, foutmelding, gewijzigd domein of herhaalde
 inlogstap stopt de poging. De bot kiest geen andere inlogmethode, reset geen
 wachtwoord en wijzigt geen 2FA-instellingen.

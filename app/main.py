@@ -49,21 +49,28 @@ async def lifespan(_app):
     iban_task = asyncio.create_task(serve_iban(app_module))
     from operations.tax_agent import serve as serve_tax
     tax_task = asyncio.create_task(serve_tax(app_module))
+    from operations.allocation_maintenance import serve as serve_maintenance
+    maintenance_task = asyncio.create_task(serve_maintenance(app_module))
     try:
         yield
     finally:
         task.cancel()
         iban_task.cancel()
         tax_task.cancel()
+        maintenance_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
         with suppress(asyncio.CancelledError):
             await iban_task
         with suppress(asyncio.CancelledError):
             await tax_task
+        with suppress(asyncio.CancelledError):
+            await maintenance_task
 
 
-app = FastAPI(title="JNP Matching", version="1.9.0", lifespan=lifespan)
+app = FastAPI(title="JNP Matching", version="1.10.0", lifespan=lifespan)
+from operations.allocation_maintenance import router as maintenance_router
+app.include_router(maintenance_router)
 from operations.woo_iban_rules import router as woo_iban_router
 app.include_router(woo_iban_router)
 from operations.allocation_connection import router as allocation_router
@@ -707,6 +714,13 @@ async def bank_first_candidates(limit: int = 200) -> dict[str, Any]:
             items.append(item)
             continue
 
+        from operations.allocation_maintenance import PSP
+        if PSP.search(description):
+            item.update(status="DEFER_PSP", reason="PSP-bankdagboek en kruispostrekening worden later ingericht.",
+                        order_number=None, expected_ref=None)
+            items.append(item)
+            continue
+
         if bank_amount <= Decimal("0.00"):
             item.update(status="SKIP_NOT_RECEIPT", reason="Geen positieve bankontvangst; valt buiten deze eerste verkoopflow.")
             items.append(item)
@@ -1189,9 +1203,11 @@ async def health():
     from operations.automatic_debtor_routing import STATUS
     from operations.tax_agent import STATUS as TAX_STATUS
     from operations.tax_allocation import STATUS as TAX_RULE_STATUS
-    return {"ok": True, "division": DIVISION, "version": "1.9.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
+    from operations.allocation_maintenance import STATUS as MAINTENANCE_STATUS
+    return {"ok": True, "division": DIVISION, "version": "1.10.0", "order_rule_writes": ENABLE_ORDER_RULE_WRITES,
             "direct_match_writes": ENABLE_DIRECT_MATCH_WRITES, "debtor_routing": dict(STATUS),
-            "tax_recognition": dict(TAX_STATUS), "tax_allocation_rules": dict(TAX_RULE_STATUS)}
+            "tax_recognition": dict(TAX_STATUS), "tax_allocation_rules": dict(TAX_RULE_STATUS),
+            "allocation_maintenance": dict(MAINTENANCE_STATUS)}
 
 
 @app.get("/", response_class=HTMLResponse)

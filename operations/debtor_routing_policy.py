@@ -3,7 +3,10 @@ from datetime import datetime, timezone
 
 REVISION = '2026-10-03-allocation-icepay-now-v2'
 START_AT = datetime(2026, 10, 4, 0, 0, 5, tzinfo=timezone.utc)
-CONTINUOUS_ROUTES = {'bacs': '109372', 'plisio': '109377', 'icepay-ideal': '109419'}
+# Operator authorization 2026-10-04: literal method aliases ic and icepay.
+ICEPAY_METHODS = frozenset({'ic', 'icepay', 'icepay-ideal'})
+CONTINUOUS_ROUTES = {'bacs': '109372', 'plisio': '109377',
+                     **{method: '109419' for method in sorted(ICEPAY_METHODS)}}
 CLEANUP_ROUTES = {**CONTINUOUS_ROUTES, 'np_payments': '109421',
                   'suap_wordpresspayplugin': '109422'}
 RETAIN_ON_SOURCE = {'wc_fibonatix': '100100', 'wc_fibonatics': '100100'}

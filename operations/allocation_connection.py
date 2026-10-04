@@ -208,6 +208,7 @@ async def page(request:Request):
         '<h1>JNP Allocation</h1><p>Exact-koppeling voor debiteurenomzetting en controle van de beschikbare API-ruimte.</p>'
         '<p><a href="/allocation/login">Verbinden met Exact Online</a></p>'+button+
         '<p><a href="/allocation/status">Bekijk het laatste resultaat</a></p>'
+        '<p><a href="/allocation/review">Betalingen afhandelen: alle open regels en vervolgstappen</a></p>'
         '<p>De leesproef wijzigt geen boekingen. De debiteurenagent gebruikt deze aansluiting voor de afgesproken debiteurwijzigingen. De teller betreft deze app; de gedeelde administratielimiet kan daarnaast gelden.</p></body></html>',
         headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
 

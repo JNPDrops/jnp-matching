@@ -8,6 +8,9 @@ outcomes must be reconciled by reading Exact, never by repeating the upload.
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
+import io
 from contextlib import suppress
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -82,12 +85,44 @@ def update(**patch):
                      (json.dumps(patch), JOB))
 
 
+EVIDENCE_FORMAT = 'jnp-private-evidence-gzip-v1'
+MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
+
+
+def encode_evidence(value):
+    """Keep the full evidence while reducing PostgreSQL JSONB memory use."""
+    raw = json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    if len(raw) > MAX_EVIDENCE_BYTES:
+        raise ValueError('private_evidence_too_large')
+    return {'__private_evidence__': EVIDENCE_FORMAT, 'json_bytes': len(raw),
+            'sha256': hashlib.sha256(raw).hexdigest(),
+            'payload': base64.b64encode(gzip.compress(raw, mtime=0)).decode('ascii')}
+
+
+def decode_evidence(value):
+    """Read old plain artifacts and verify new lossless evidence envelopes."""
+    if not isinstance(value, dict) or '__private_evidence__' not in value:
+        return value
+    if value.get('__private_evidence__') != EVIDENCE_FORMAT:
+        raise ValueError('unsupported_private_evidence_format')
+    size = value.get('json_bytes')
+    if type(size) is not int or not 0 <= size <= MAX_EVIDENCE_BYTES:
+        raise ValueError('invalid_private_evidence_size')
+    compressed = base64.b64decode(value['payload'], validate=True)
+    with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+        raw = stream.read(MAX_EVIDENCE_BYTES + 1)
+    if len(raw) != size or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), value['sha256']):
+        raise ValueError('private_evidence_integrity_failed')
+    return json.loads(raw)
+
+
 def artifact(name, value):
     assert name in ARTIFACTS
+    stored = encode_evidence(value) if name == 'strict_order_plan' else value
     with database() as conn:
         conflict = 'DO NOTHING' if name.endswith('_before') else 'DO UPDATE SET data=EXCLUDED.data'
         conn.execute('''INSERT INTO fibonatix_import_artifacts(job,name,data) VALUES(%s,%s,%s::jsonb)
-            ON CONFLICT(job,name) ''' + conflict, (JOB, name, json.dumps(value)))
+            ON CONFLICT(job,name) ''' + conflict, (JOB, name, json.dumps(stored)))
         # Repair only the known empty baseline caused by the old unpadded-code
         # query, and only while there has never been a financial write attempt.
         if name == 'receivables_before' and value:
@@ -605,7 +640,7 @@ async def prepare(request:Request):
 @router.get('/status')
 async def status(request:Request):
     authorize(request)
-    return state()
+    return dict(state(), runtime_task_running=any(not task.done() for task in TASKS))
 
 
 @router.get('/artifact/{name}')
@@ -617,7 +652,7 @@ async def get_artifact(name:str,request:Request):
         row=conn.execute('SELECT data FROM fibonatix_import_artifacts WHERE job=%s AND name=%s',(JOB,name)).fetchone()
     if row is None:
         raise HTTPException(404,'artifact_not_ready')
-    return row[0]
+    return decode_evidence(row[0])
 
 
 @router.post('/{action}')

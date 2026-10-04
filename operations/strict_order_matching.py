@@ -35,7 +35,7 @@ def load(name):
     with legacy.database() as conn:
         row = conn.execute('SELECT data FROM fibonatix_import_artifacts WHERE job=%s AND name=%s',
                            (legacy.JOB, name)).fetchone()
-    return row[0] if row else None
+    return legacy.decode_evidence(row[0]) if row else None
 
 
 def money(value):

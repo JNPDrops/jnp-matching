@@ -21,6 +21,7 @@ router = APIRouter()
 log = logging.getLogger('uvicorn.error')
 LOCK_ID = 3977752867393
 INTERVAL = 1800
+SCAN_VERSION = 'supplier-metadata-v2'
 RESERVE = 150
 POLICY = json.loads(Path(__file__).with_name('tax_policy.json').read_text())
 STATUS = {'state': 'starting', 'read_only': True, 'booking_writes': False,
@@ -76,6 +77,7 @@ def initialize(conn):
         next_scan TIMESTAMPTZ, metadata JSONB, metadata_at TIMESTAMPTZ,
         summary JSONB NOT NULL DEFAULT '{}')''')
     conn.execute('INSERT INTO jnp_tax_control(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING')
+    conn.execute('ALTER TABLE jnp_tax_control ADD COLUMN IF NOT EXISTS scan_version TEXT')
     conn.execute('''CREATE TABLE IF NOT EXISTS jnp_tax_observations (
         bank_line_id UUID PRIMARY KEY, bank_entry_id UUID, bank_modified TEXT,
         bank_date TEXT, description TEXT, decision JSONB NOT NULL,
@@ -85,12 +87,14 @@ def initialize(conn):
 async def metadata(api):
     accounts = await api.rows('financial/GLAccounts', {'$select':
         'ID,Code,Description,BalanceType,Type,IsBlocked,VATCode', '$orderby': 'Code'})
-    counterparties = await api.rows('crm/Accounts', {'$select': 'ID,Code,Name,Status',
+    log.info('tax_agent account_candidates %s', json.dumps(tax.account_candidates(accounts)))
+    counterparties = await api.rows('crm/Accounts', {'$select': 'ID,Code,Name,IsSupplier,EndDate',
         '$filter': "Code eq '" + str(POLICY['tax_account_code']).rjust(18) + "'"})
     counterparties = [x for x in counterparties
                       if str(x.get('Code') or '').strip() == POLICY['tax_account_code']
                       and 'belastingdienst' in str(x.get('Name') or '').lower()
-                      and x.get('Status') == 'C']
+                      and x.get('IsSupplier') is True
+                      and (not x.get('EndDate') or tax.bank_date(x['EndDate']) >= datetime.now(timezone.utc).date())]
     if len(counterparties) != 1:
         raise transport.Stop('Belastingdienst relation missing or ambiguous')
     return {'accounts': accounts, 'tax_account_id': transport.guid(counterparties[0]['ID'])}
@@ -125,8 +129,8 @@ async def cycle(app):
         if not conn.execute('SELECT pg_try_advisory_lock(%s)', (LOCK_ID,)).fetchone()[0]:
             return
         try:
-            enabled, cursor, next_scan, saved, saved_at, summary = conn.execute(
-                'SELECT enabled,cursor_at,next_scan,metadata,metadata_at,summary FROM jnp_tax_control').fetchone()
+            enabled, cursor, next_scan, saved, saved_at, summary, scan_version = conn.execute(
+                'SELECT enabled,cursor_at,next_scan,metadata,metadata_at,summary,scan_version FROM jnp_tax_control').fetchone()
             if saved:
                 ACCOUNT_CACHE = saved['accounts']
             if summary:
@@ -135,7 +139,7 @@ async def cycle(app):
                 STATUS['state'] = 'paused'
                 return
             now = datetime.now(timezone.utc)
-            if next_scan and now < next_scan:
+            if next_scan and now < next_scan and scan_version == SCAN_VERSION:
                 return
             # Check shared observed routing quota before obtaining a fresh header.
             from operations.automatic_debtor_routing import STATUS as routing_status
@@ -146,7 +150,9 @@ async def cycle(app):
                 return
             api = TaxAPI(allocation.RoutingApp(app))
             # Persist cadence before calls, including failed reads/restarts.
-            conn.execute('UPDATE jnp_tax_control SET next_scan=%s', (now + timedelta(seconds=INTERVAL),))
+            conn.execute('UPDATE jnp_tax_control SET next_scan=%s,scan_version=%s',
+                         (now + timedelta(seconds=INTERVAL), SCAN_VERSION))
+            STATUS['read_stage'] = 'metadata'
             if not saved or not saved_at or now - saved_at >= timedelta(days=1):
                 saved = await metadata(api)
                 conn.execute('UPDATE jnp_tax_control SET metadata=%s::jsonb,metadata_at=%s', (json.dumps(saved), now))
@@ -156,10 +162,12 @@ async def cycle(app):
                     [{'code': a['code'], 'description': a['description']} for a in v]
                     for k, v in candidates.items()}))
             ACCOUNT_CACHE = saved['accounts']
+            STATUS['read_stage'] = 'bank_lines'
             banks = await api.rows('financialtransaction/BankEntryLines', selection(saved['tax_account_id'], cursor))
             counts = Counter()
             observations = []
             history = Counter()
+            templates = Counter()
             for bank in banks:
                 decision = candidate(bank)
                 if decision is None:
@@ -168,6 +176,8 @@ async def cycle(app):
                 counts[decision['status']] += 1
                 if decision.get('tax_bucket'):
                     history[(decision['tax_bucket'], decision['existing_gl_account_code'])] += 1
+                    templates[(decision['tax_letter'], decision['subnumber'], decision['tax_year'],
+                               decision['period_code'], decision['assessment_kind'], decision['direction'])] += 1
                 observations.append((transport.guid(bank['ID']), transport.guid(bank['EntryID']),
                     str(bank.get('Modified') or ''), str(bank.get('Date') or ''),
                     str(bank.get('Description') or ''), json.dumps(decision)))
@@ -186,12 +196,22 @@ async def cycle(app):
                 conn.execute('UPDATE jnp_tax_control SET cursor_at=%s,summary=%s::jsonb', (now, json.dumps(summary)))
             STATUS.update(summary)
             log.info('tax_agent scan_complete %s', json.dumps({'read_only': True, 'counts': dict(counts),
-                'historical_gl_counts': [{'tax': k[0], 'gl_code': k[1], 'count': v} for k, v in history.items()]}))
+                'historical_gl_counts': [{'tax': k[0], 'gl_code': k[1], 'count': v} for k, v in history.items()],
+                'templates': [{'letter': k[0], 'subnumber': k[1], 'year': k[2], 'period': k[3],
+                               'kind': k[4], 'direction': k[5], 'count': v} for k, v in templates.items()]}))
         except BudgetDeferred:
             STATUS['state'] = 'waiting_for_api_budget'
         except transport.ExactRequestError as exc:
             STATUS.update(state='read_error', last_http_status=exc.status_code)
             log.warning('tax_agent read_error status=%s', exc.status_code)
+        except transport.Stop as exc:
+            reasons = {'Belastingdienst relation missing or ambiguous': 'relation_not_unique',
+                       'Invalid tax pagination': 'pagination',
+                       'Invalid tax read response': 'response_shape',
+                       'Exact GET transport/auth failure; inspect audit before retrying': 'transport_or_auth'}
+            reason = reasons.get(str(exc), 'other_guard')
+            STATUS.update(state='read_error', read_error_reason=reason)
+            log.warning('tax_agent read_error stage=%s reason=%s', STATUS.get('read_stage'), reason)
         finally:
             conn.execute('SELECT pg_advisory_unlock(%s)', (LOCK_ID,))
 

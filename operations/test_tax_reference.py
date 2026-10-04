@@ -113,6 +113,16 @@ class TaxReferenceTests(unittest.TestCase):
 
 
 class TaxIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_supplier_relation_does_not_require_customer_status(self):
+        api = AsyncMock()
+        relation = dict(ID='00000000-0000-0000-0000-000000000001', Code='                 1',
+                        Name='Belastingdienst', IsSupplier=True, EndDate=None)
+        api.rows.side_effect = [[], [relation]]
+        self.assertEqual((await a.metadata(api))['tax_account_id'], relation['ID'])
+        api.rows.side_effect = [[], [{**relation, 'IsSupplier': False}]]
+        with self.assertRaises(a.transport.Stop):
+            await a.metadata(api)
+
     def api(self):
         return a.TaxAPI(MagicMock(DIVISION=3977752, BASE_URL='https://start.exactonline.nl', COLLECTIVE_DEBTOR_CODE='100100'))
 

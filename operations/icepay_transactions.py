@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v1'
+JOB = 'icepay-transactions-20261001-03-v2'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
 RANGE = '01/10/2026 - 03/10/2026'
@@ -67,7 +67,9 @@ async def open_account_page(page, label):
 
 
 async def date_field(page, field_id):
-    fields = await b.visible(page.locator('input[id="'+field_id+'"]'))
+    locator = page.locator('input[id="'+field_id+'"]')
+    await locator.wait_for(state='visible',timeout=15000)
+    fields = await b.visible(locator)
     if len(fields) != 1:
         raise AcquisitionStopped('date_control_missing')
     return fields[0]
@@ -84,9 +86,11 @@ async def clear_date(page, field_id):
         inputs = await b.visible(parent.locator('input[id^="tableFiltersForm."]'))
         if len(buttons)==1 and len(inputs)==1:
             await buttons[0].click()
-            if await field.input_value():
-                raise AcquisitionStopped('date_not_verified')
-            return
+            for _ in range(20):
+                if not await field.input_value():
+                    return
+                await asyncio.sleep(.1)
+            raise AcquisitionStopped('date_not_verified')
     raise AcquisitionStopped('clear_control_missing')
 
 
@@ -110,7 +114,9 @@ async def select_october_day(calendar, number):
 async def select_period(page, field_id):
     field = await date_field(page,field_id)
     await field.click()
-    calendars = await b.visible(page.locator('.daterangepicker'))
+    locator = page.locator('.daterangepicker:visible')
+    await locator.wait_for(state='visible',timeout=15000)
+    calendars = await b.visible(locator)
     if len(calendars)!=1:
         raise AcquisitionStopped('calendar_missing')
     calendar = calendars[0]
@@ -175,7 +181,8 @@ async def table_snapshot(page):
 
 async def csv_links(page):
     found = {}
-    for link in await b.visible(page.get_by_role('link')):
+    # Download anchors may have an explicit button role in a notification.
+    for link in await b.visible(page.locator('a[href]')):
         label = await link.inner_text()
         if not re.search(r'\bcsv\b',label,re.I):
             continue
@@ -188,6 +195,7 @@ async def csv_links(page):
 
 async def payment_export(page, downloads):
     await b.click_unique_read_control(page,re.compile(r'^Notifications$'))
+    await page.wait_for_load_state('networkidle',timeout=20000)
     await asyncio.sleep(.6)
     before = set(await csv_links(page))
     await page.keyboard.press('Escape')
@@ -202,6 +210,7 @@ async def payment_export(page, downloads):
         if not await checkbox.is_checked():
             raise AcquisitionStopped('export_ambiguous')
     await b.click_unique_read_control(page,re.compile(r'^Export$'))
+    await payment_column.wait_for(state='hidden',timeout=20000)
     deadline, last_open = time.monotonic()+110, 0
     while time.monotonic()<deadline:
         await b.guard_page(page)

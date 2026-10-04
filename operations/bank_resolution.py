@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 import re
 from zoneinfo import ZoneInfo
+from uuid import UUID, uuid5
 
 from operations import bacs_debtor_transfer as m, tax_reference as tax
 
@@ -267,3 +268,58 @@ async def load_assigned(api, journals, headers, bank_fields):
     blocked = {code(txs.get(code(f['TransactionID']).lower(), {}).get('EntryID')).lower()
         for f in flows if any(u['cashflow_id'] == f['ID'] for u in unresolved)}
     return [b for b in result if code(b['EntryID']).lower() not in blocked], unresolved
+
+
+async def load_open_bank_items(api, receivables, payables, journals, headers, bank_fields):
+    """Use Exact's current open-item lists, including imported bank receipts.
+
+    Cashflow resources can omit these receipts even while ReceivablesList and
+    PayablesList show them. Match candidates require one uniquely identified
+    bank line in the same journal/entry/account/date/currency. No writes use this
+    inference: executing a match still needs current transaction-line proof.
+    """
+    ordinary = {k for k, j in journals.items() if j.get('Type') == 12 and not is_psp({
+        'JournalDescription': j.get('Description'), 'BankAccountDescription': j.get('BankAccountDescription'), 'AmountDC': 0})}
+    items = [(source, r) for source, rows in (('receivable', receivables), ('payable', payables))
+        for r in rows if code(r.get('JournalCode')) in ordinary and m.amount(r['Amount']) != 0]
+    numbers = sorted({int(r['EntryNumber']) for _, r in items})
+    banks = []
+    for start in range(0, len(numbers), 15):
+        clause = ' or '.join('EntryNumber eq ' + str(n) for n in numbers[start:start + 15])
+        banks.extend(await api.rows('financialtransaction/BankEntryLines', params={'$filter': clause, '$select': bank_fields}))
+    headers = {**headers, **await load_headers(api, [b['EntryID'] for b in banks if code(b['EntryID']).lower() not in headers])}
+    banks = [enrich_bank(b, headers, journals) for b in banks]
+    matches, unresolved = defaultdict(list), []
+    for source, item in items:
+        # Local review identity only, never used as an Exact write target.
+        key = str(uuid5(UUID('849e248e-7d3f-447e-a5e1-ae277080499a'), source + ':' + str(item['HID'])))
+        context = {'cashflow_id': key, 'source': source + '_list', 'open_item_hid': str(item['HID']),
+            'entry_number': item.get('EntryNumber'), 'account_code': code(item.get('AccountCode'))}
+        wanted_gl = '1100' if source == 'receivable' else '1400'
+        remaining = m.amount(item['Amount']) * (-1 if source == 'receivable' else 1)
+        found = [b for b in banks if int(b.get('EntryNumber') or 0) == int(item['EntryNumber'])
+            and code(b.get('JournalCode')) == code(item['JournalCode'])
+            and code(b.get('Account')).lower() == code(item['AccountId']).lower()
+            and code(b.get('GLAccountCode')) == wanted_gl and b.get('Currency') == item['CurrencyCode']
+            and tax.bank_date(b['Date']) == tax.bank_date(item['InvoiceDate'])
+            and m.amount(b['AmountFC']) * remaining > 0]
+        exact = [b for b in found if m.amount(b['AmountFC']) == remaining]
+        eligible = exact or found
+        if len(eligible) != 1 or abs(remaining) > abs(m.amount(eligible[0]['AmountFC'])):
+            unresolved.append({**context, 'reason': 'Open bankpost niet uniek op boeking, dagboek, relatie, datum, valuta en bedrag gekoppeld'})
+            continue
+        b = eligible[0]
+        matches[code(b['ID']).lower()].append((b, item, remaining, context))
+    result = []
+    for rows in matches.values():
+        if len(rows) != 1:
+            unresolved.extend({**row[3], 'reason': 'Meerdere open posten horen mogelijk bij dezelfde bankregel'} for row in rows)
+            continue
+        b, item, remaining, _ = rows[0]
+        # Foreign currency remains review-only, including the open DC balance.
+        if b.get('Currency') != 'EUR' or m.amount(b['AmountDC']) != m.amount(b['AmountFC']):
+            unresolved.append({**rows[0][3], 'reason': 'Valuta vereist aparte controle van het resterende bankbedrag'})
+            continue
+        result.append({**b, 'OpenAmountDC': str(remaining), 'OpenAmountFC': str(remaining),
+            'OpenEvidence': 'open_items_list_hid_' + str(item['HID'])})
+    return result, unresolved

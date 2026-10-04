@@ -18,7 +18,7 @@ Dit zijn andere gegevens dan `EXACT_CLIENT_ID` en `EXACT_CLIENT_SECRET` van de
 OAuth-koppeling, en andere dan de Paragon-gegevens. Bestaande variabelen en
 OAuth-tokens worden niet aangepast. Bewaar geen geheimen in GitHub of chat.
 
-Activeer de proef met `EXACT_LOGIN_PROBE_ID=exact-login-20261004-v1` en voer één
+Activeer de proef met `EXACT_LOGIN_PROBE_ID=exact-login-20261004-v2` en voer één
 handmatige deployment uit. De activatie vervalt op 5 oktober 2026 om 18:00 UTC.
 Zonder de exacte activatiewaarde doet deze module niets. Ontbrekende of ongeldige
 configuratie wordt gemeld voordat de poging wordt verbruikt.
@@ -45,6 +45,11 @@ Wachtwoorden, codes, screenshots, paginainhoud en ruwe fouten worden niet
 gelogd of teruggestuurd. Het browserproces erft de geheimen niet.
 
 De eerste gebruikersnaamselector is in de huidige Exact-pagina waargenomen.
+De eerste live poging bereikte de wachtwoordstap maar stopte bij de formulier-
+doelcontrole, voordat het wachtwoord was ingevoerd. Versie 2 accepteert naast
+Exact-HTTPS-formulieren uitsluitend de no-op `javascript:void(0)`-actie die
+AJAX-inlogformulieren gebruiken. XHR/fetch en formuliernavigatie naar andere
+hosts blijven geblokkeerd. De eerste claim blijft bewaard.
 Wachtwoord en TOTP worden conservatief herkend via semantische invoervelden.
 De huidige live wachtwoord- en TOTP-stappen zijn nog niet met deze bot getest.
 Een onbekend scherm, SSO, CAPTCHA, foutmelding, gewijzigd domein of herhaalde

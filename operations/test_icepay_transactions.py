@@ -63,6 +63,15 @@ class CSV(unittest.TestCase):
         self.assertEqual(summary['non_ok_count'],1)
         self.assertEqual(summary['missing_order_count'],1)
 
+    def test_legacy_without_checkout_columns_uses_explicit_description_order(self):
+        source=fixture([ROW]).decode('utf-8-sig')
+        records=list(csv.reader(io.StringIO(source),delimiter=';'))
+        output=io.StringIO(); writer=csv.writer(output,delimiter=';')
+        writer.writerows([r[:6]+r[8:] for r in records])
+        rows,summary=t.parse_payments(output.getvalue().encode(),1,['123'])
+        self.assertEqual(rows[0]['order'],'49042')
+        self.assertEqual(summary['missing_order_count'],0)
+
     def test_csv_ids_must_match_every_observed_page(self):
         t.parse_payments(fixture([ROW]),1,['123'])
         with self.assertRaises(t.AcquisitionStopped) as caught:

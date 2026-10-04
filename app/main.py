@@ -42,6 +42,8 @@ MATCHSETS_URL = f"{BASE_URL}/docs/XMLUpload.aspx"
 
 @asynccontextmanager
 async def lifespan(_app):
+    from app.dashboard.worklist import readiness_probe
+    dashboard_probe_task = asyncio.create_task(readiness_probe())
     from operations.automatic_debtor_routing import serve
     from app import main as app_module
     task = asyncio.create_task(serve(app_module))
@@ -68,6 +70,9 @@ async def lifespan(_app):
     try:
         yield
     finally:
+        dashboard_probe_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await dashboard_probe_task
         from operations.fibonatix_import import shutdown as shutdown_fibonatix
         await shutdown_fibonatix()
         task.cancel()

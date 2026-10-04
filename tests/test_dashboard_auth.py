@@ -64,6 +64,14 @@ class FakeMicrosoft:
         return copy.deepcopy(self.result)
 
 
+class FakeWorklist:
+    def read(self, division):
+        return {"connected": True, "division": division, "items": []}
+
+    def change(self, *args):
+        return {"saved": True, "financial_execution_started": False}
+
+
 class DashboardAuthTest(unittest.TestCase):
     def setUp(self):
         self.settings = Settings(TENANT, CLIENT, ORIGIN, "test-only-db",
@@ -74,7 +82,8 @@ class DashboardAuthTest(unittest.TestCase):
         parent = FastAPI()
         parent.mount("/dashboard", create_dashboard_app(
             settings_provider=lambda: self.settings,
-            store_factory=lambda _: self.store, client_factory=lambda _: self.microsoft))
+            store_factory=lambda _: self.store, client_factory=lambda _: self.microsoft,
+            worklist_factory=lambda _: FakeWorklist()))
         @parent.get("/health")
         def health():
             return {"ok": True}
@@ -108,7 +117,7 @@ class DashboardAuthTest(unittest.TestCase):
         data = self.client.get("/dashboard/api/me").json()
         self.assertEqual(data["divisions"], {"3977752": "James n Parson B.V."})
         self.assertNotIn("access_token", data)
-        self.assertEqual(self.client.get("/dashboard/api/divisions/3977752/worklist").json()["connected"], False)
+        self.assertEqual(self.client.get("/dashboard/api/divisions/3977752/worklist").json()["connected"], True)
         self.assertEqual(self.client.get("/dashboard/api/divisions/999999/worklist").status_code, 403)
         page = self.client.get("/dashboard/")
         self.assertEqual(page.status_code, 200)

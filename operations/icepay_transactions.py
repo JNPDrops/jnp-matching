@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v7'
+JOB = 'icepay-transactions-20261001-03-v8'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
 EXPIRES = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
@@ -304,6 +304,25 @@ async def open_notifications(page):
     await marker.wait_for(state='visible',timeout=15000)
 
 
+async def export_notifications(page):
+    """Only export notices; omit URLs, emails and any credential-related text."""
+    return await page.evaluate(r'''() => {
+      const visible=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
+      const result=[];
+      for(const b of document.querySelectorAll('button[aria-label="Close notification"]')) {
+        if(!visible(b)) continue;
+        for(let p=b.parentElement,n=0;p&&n<8;p=p.parentElement,n++) {
+          if(p.querySelectorAll('button[aria-label="Close notification"]').length!==1) break;
+          let text=(p.innerText||'').replace(/\s+/g,' ').trim();
+          if(!/\bexport\b/i.test(text)) continue;
+          if(/password|wachtwoord|secret|token/i.test(text)) break;
+          text=text.replace(/https?:\/\/\S+/gi,'[link]').replace(/\S+@\S+/g,'[email]');
+          result.push(text.slice(0,1000)); break;
+        }
+      } return Array.from(new Set(result)).slice(0,5);
+    }''')
+
+
 async def payment_export(page, downloads, artifacts):
     artifacts['export_state'] = 'not_started'
     await open_notifications(page)
@@ -407,6 +426,7 @@ async def resume_payment_export(page, downloads, expected_ids, artifacts):
     await open_notifications(page)
     await page.wait_for_load_state('networkidle',timeout=20000)
     await asyncio.sleep(1)
+    artifacts['export_notices'] = await export_notifications(page)
     links = await csv_links(page)
     if not links or len(links)>5:
         raise AcquisitionStopped('export_ambiguous')
@@ -582,7 +602,7 @@ async def worker(resume):
                 artifacts['proof'] = {'period':RANGE,'ui_payment_count':len(identifiers),
                                       'ui_payment_ids':identifiers}
                 stage = 'payments_export'
-                content = await payment_export(page,downloads,artifacts)
+                content = await resume_payment_export(page,downloads,identifiers,artifacts)
                 artifacts['source_export_csv'] = base64.b64encode(content).decode()
                 artifacts['candidate_csvs'] = [artifacts['source_export_csv']]
                 scoped,_ = scope_csv(content,identifiers)
@@ -664,12 +684,16 @@ def decode(stdout):
     result = status(**{k:v for k,v in raw['status'].items() if k!='financial_writes'})
     artifacts = raw['artifacts']
     if not isinstance(artifacts,dict) or set(artifacts)-{'login','proof','payments_csv','refunds','form_metadata','failure',
-                                                      'candidate_csvs','source_export_csv','export_state'}:
+                                                      'candidate_csvs','source_export_csv','export_state','export_notices'}:
         raise AcquisitionStopped('invalid_worker_output')
     if 'form_metadata' in artifacts:
         validate_forms(artifacts['form_metadata'])
     if artifacts.get('export_state','not_started') not in {'not_started','submit_attempted','submitted'}:
         raise AcquisitionStopped('invalid_worker_output')
+    if 'export_notices' in artifacts:
+        notices = artifacts['export_notices']
+        if not isinstance(notices,list) or len(notices)>5 or any(not isinstance(s,str) or len(s)>1000 for s in notices):
+            raise AcquisitionStopped('invalid_worker_output')
     if 'failure' in artifacts:
         failure = artifacts['failure']
         if (set(failure)!={'kind','function','line'} or type(failure['line']) is not int or
@@ -720,6 +744,8 @@ async def run():
         result,artifacts = decode(stdout)
         if 'export_state' in artifacts:
             summary['export_state'] = artifacts['export_state']
+        if 'export_notices' in artifacts:
+            summary['export_notices'] = artifacts['export_notices']
         if 'proof' in artifacts:
             summary['ui_payment_count'] = validate_proof(artifacts['proof'])['ui_payment_count']
         if 'candidate_csvs' in artifacts:

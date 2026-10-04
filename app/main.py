@@ -51,6 +51,8 @@ async def lifespan(_app):
     tax_task = asyncio.create_task(serve_tax(app_module))
     from operations.allocation_maintenance import serve as serve_maintenance
     maintenance_task = asyncio.create_task(serve_maintenance(app_module))
+    from operations.fibonetics_read_report import run as read_fibonetics_report
+    fibonetics_report_task = asyncio.create_task(read_fibonetics_report(app_module))
     try:
         yield
     finally:
@@ -58,6 +60,7 @@ async def lifespan(_app):
         iban_task.cancel()
         tax_task.cancel()
         maintenance_task.cancel()
+        fibonetics_report_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
         with suppress(asyncio.CancelledError):
@@ -66,6 +69,8 @@ async def lifespan(_app):
             await tax_task
         with suppress(asyncio.CancelledError):
             await maintenance_task
+        with suppress(asyncio.CancelledError):
+            await fibonetics_report_task
 
 
 app = FastAPI(title="JNP Matching", version="1.10.0", lifespan=lifespan)

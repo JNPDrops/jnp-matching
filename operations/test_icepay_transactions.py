@@ -72,6 +72,20 @@ class CSV(unittest.TestCase):
         self.assertEqual(rows[0]['order'],'49042')
         self.assertEqual(summary['missing_order_count'],0)
 
+    def test_legacy_date_convention_requires_exact_independent_ids_and_period(self):
+        headers=HEADERS[:6]+['Description','PaymentCompleted']
+        row=ROW[:6]+['Order #49042','True']; row[2]='01/10/2026 2:30:00 PM'
+        output=io.StringIO(); writer=csv.writer(output,delimiter=';')
+        writer.writerow(headers); writer.writerow(row)
+        source=output.getvalue().encode()
+        rows,summary=t.parse_payments(source,1,['123'])
+        self.assertEqual(rows[0]['date'],'2026-10-01')
+        self.assertEqual(summary['timestamp_format'],'day_first')
+        with self.assertRaises(t.AcquisitionStopped):
+            t.parse_payments(source,1)
+        with self.assertRaises(t.AcquisitionStopped):
+            t.parse_payments(source,1,['124'])
+
     def test_csv_ids_must_match_every_observed_page(self):
         t.parse_payments(fixture([ROW]),1,['123'])
         with self.assertRaises(t.AcquisitionStopped) as caught:

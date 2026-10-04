@@ -30,7 +30,7 @@ en kolomnamen. Fouten kunnen begrensde formuliermetadata tonen onder
 ## Eenmalig activeren
 
 - Gebruik de bestaande ICEPAY_WEB_USERNAME/PASSWORD en optionele TOTP-configuratie.
-- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v12`.
+- Zet alleen `ICEPAY_TRANSACTION_TASK_ID=icepay-transactions-20261001-03-v13`.
 - Render env-merge (`replace=false`) start zelf één deployment. Auto-deploy blijft uit.
 - De taak vervalt op 5 oktober 18:00 UTC en claimt vóór browserstart één poging.
 - Bestaande claims blijven intact; een herstart herhaalt geen export.
@@ -114,6 +114,15 @@ Description-kolom aanwezig is; alleen een expliciet Order #-nummer uit een
 beschikbaar referentie-/beschrijvingsveld wordt gebruikt. Alle aanwezige velden
 worden op onderlinge conflicten gecontroleerd. Financiële velden blijven verplicht.
 De schema-diagnose bevat alleen kolomnamen en aantallen ongeldige ID-/rijvormen.
+
+V12 bevestigde het 45-koloms legacy-formaat zonder Checkout-kolommen, maar de
+moderne Amerikaanse datumparser wees de bron af als buiten de periode. V13
+accepteert een legacy-datumconventie alleen als de complete ID-set exact gelijk
+is aan het onafhankelijke UI-bewijs en alle datums onder precies één interpretatie
+binnen 1–3 oktober vallen. Bedragen en Order #-conflicten blijven strikt.
+Na succesvolle validatie volgt een uitsluitend lezende Exact-controle van dagboek
+27, debiteur 109419, grootboeken 1100/1317/1360 en bestaande 2026-boekingen op
+het ICEPAY-grootboek/debiteur. Er is nog steeds geen upload- of aflettercode.
 
 `downloaded` betekent dat de bronbestanden zijn opgehaald. Het betekent nog niet
 dat de Exact-import gereed is. De refunds moeten inhoudelijk worden gemapt;

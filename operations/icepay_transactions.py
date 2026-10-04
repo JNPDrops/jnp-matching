@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 from operations import icepay_browser as b
 from operations.icepay_fetch_probe import environments, stop_child, validate_forms
 
-JOB = 'icepay-transactions-20261001-03-v12'
+JOB = 'icepay-transactions-20261001-03-v13'
 SAVED_SOURCE = 'icepay-transactions-20261001-03-v11'
 RESUME_FROM = 'icepay-transactions-20261001-03-v4'
 ACTIVATION = 'ICEPAY_TRANSACTION_TASK_ID'
@@ -559,12 +559,14 @@ def amount(value):
     return result.quantize(Decimal('.01'))
 
 
-def payment_date(text):
+def payment_date(text, *, day_first=False):
     # ICEPAY CSV's US timestamps were verified in the existing sample export.
     # Portal date controls use a different (day/month) format.
     for fmt in ('%m/%d/%Y %I:%M:%S %p','%m/%d/%Y %I:%M %p','%m/%d/%Y %H:%M:%S',
                 '%Y-%m-%d %H:%M:%S','%Y-%m-%dT%H:%M:%S'):
         try:
+            if day_first:
+                fmt = fmt.replace('%m/%d/','%d/%m/')
             return datetime.strptime(text.strip(),fmt).date()
         except ValueError:
             pass
@@ -590,6 +592,23 @@ def parse_payments(content, expected_count, expected_ids=None):
         raise AcquisitionStopped('invalid_csv') from None
     if len(source)!=expected_count or len(source)>5000:
         raise AcquisitionStopped('count_mismatch')
+    day_first = False
+    if 'paymentcompleted' in headers and not {'checkoutreference','checkoutdescription'}.intersection(headers):
+        # Legacy has a separate date convention. Establish it from all rows and
+        # the independently observed exact ID/date-filter proof, never one cell.
+        if expected_ids is None or sorted(r.get(headers['paymentid'],'').strip() for r in source)!=sorted(expected_ids):
+            raise AcquisitionStopped('count_mismatch')
+        candidates = {}
+        for candidate in (False,True):
+            try:
+                dates = tuple(payment_date(r.get(headers['paymenttime'],'') or '',day_first=candidate) for r in source)
+                if all(START<=paid<=END for paid in dates):
+                    candidates.setdefault(dates,candidate)
+            except AcquisitionStopped:
+                pass
+        if len(candidates)!=1:
+            raise AcquisitionStopped('out_of_period')
+        day_first = next(iter(candidates.values()))
     seen, selected, statuses = set(), [], Counter()
     for raw in source:
         if None in raw or any(v is None for v in raw.values()):
@@ -601,7 +620,7 @@ def parse_payments(content, expected_count, expected_ids=None):
         if key in seen:
             raise AcquisitionStopped('duplicate_payment')
         seen.add(key)
-        paid = payment_date(row['paymenttime'])
+        paid = payment_date(row['paymenttime'],day_first=day_first)
         if not START<=paid<=END:
             raise AcquisitionStopped('out_of_period')
         if row['merchantid']!=b.MERCHANT:
@@ -623,6 +642,7 @@ def parse_payments(content, expected_count, expected_ids=None):
         raise AcquisitionStopped('count_mismatch')
     ok = [r for r in selected if r['status']=='OK']
     return selected, {'source_rows':len(source),'td_rows':len(selected),
+        'timestamp_format':'day_first' if day_first else 'month_first_or_iso',
         'td_ok_count':len(ok),'td_ok_total':str(sum((Decimal(r['amount']) for r in ok),Decimal('0.00'))),
         'other_merchant_rows':len(source)-len(selected),'non_ok_count':len(selected)-len(ok),
         'missing_order_count':sum(r['order'] is None for r in ok),
@@ -912,6 +932,11 @@ async def run():
             if 'source_export_csv' in artifacts:
                 summary['original_export_sha256'] = hashlib.sha256(base64.b64decode(
                     artifacts['source_export_csv'],validate=True)).hexdigest()
+            if result['state']=='downloaded':
+                from operations.icepay_import import inspect_exact
+                exact,exact_summary = await inspect_exact(rows)
+                artifacts['exact_preflight'] = exact
+                summary['exact_preflight'] = exact_summary
             refunds = artifacts.get('refunds')
             if refunds is not None:
                 if refunds.get('period')!=RANGE or len(refunds.get('rows',[]))!=refunds.get('total'):

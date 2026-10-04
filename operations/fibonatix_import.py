@@ -316,25 +316,46 @@ async def ui_snapshot(page):
             titles:Array.from(e.querySelectorAll('[title]')).map(x=>x.title)}))}; }''')
 
 
+def statement_rows(snapshot):
+    # Exact renders one 16-cell amount row followed by a six-cell note row.
+    result=[]
+    for index,row in enumerate(snapshot['rows'][:-1]):
+        cells=row['cells']; following=snapshot['rows'][index+1]['cells']
+        if len(cells)==16 and re.fullmatch(r'\d{2}-\d{2}-\d{4}',cells[1]) and len(following)==6:
+            result.append({'cells':cells,'note':following[0]})
+    return result
+
+
 def verify_statements(snapshot, rows):
     controls={c['id']:c for c in snapshot['controls'] if c.get('id')}
     if controls.get('BankAccount',{}).get('value','').strip('{}').lower() != BANK:
         raise HTTPException(409,'wrong_statement_bank')
     if controls.get('Notes',{}).get('value') != JOB:
         raise HTTPException(409,'statement_batch_filter_missing')
+    statements=statement_rows(snapshot)
+    if len(statements)!=len(rows):
+        raise HTTPException(409,'statement_count_mismatch')
     found=[]
     for source in rows:
-        hits=[r for r in snapshot['rows'] if len(r['cells'])>=15 and source['trx'] in (r.get('content','')+' '.join(r.get('titles',[])))]
+        hits=[r for r in statements if source['trx'] in r['note']]
         if len(hits)!=1:
             raise HTTPException(409,'statement_reference_not_unique_'+source['trx'])
-        hit=hits[0]; text=hit.get('content','')+' '.join(hit.get('titles',[]))
-        if source['description'] not in text or JOB not in text or not hit['cells'][7].startswith(source['gl']+' -'):
+        hit=hits[0]; cells=hit['cells']
+        def euro(value):
+            value=value.strip().replace('.','').replace(',','.')
+            return Decimal(value or '0')
+        amount=euro(cells[4])-euro(cells[5])
+        expected_date=datetime.strptime(source['date'],'%Y-%m-%d').strftime('%d-%m-%Y')
+        account_ok=cells[8].startswith('100100 -') if source['account'] else not cells[8].strip()
+        if (hit['note'].strip()!=source['note'].strip() or not cells[7].startswith(source['gl']+' -')
+                or cells[1]!=expected_date or amount!=Decimal(source['amount'])
+                or not account_ok or cells[3]!='EUR' or cells[10]!='EUR'):
             raise HTTPException(409,'statement_note_or_offset_mismatch_'+source['trx'])
         found.append(source['trx'])
     return {'verified_ids':found,'complete':len(found)==845}
 
 
-async def browser_snapshot(automatic=False):
+async def browser_snapshot(automatic=False,all_statements=False):
     if automatic and not state().get('reconciliation',{}).get('complete'):
         raise HTTPException(409,'ledger_not_verified')
     from operations.exact_browser import Credentials, authenticate, protect_requests, trusted, PASSWORD, USERNAME, visible
@@ -373,7 +394,7 @@ async def browser_snapshot(automatic=False):
             await page.locator('#Status1').check()
             await page.locator('#Status2').check()
             await page.locator('#EntryDate_Selection').select_option('1100')
-            await page.locator('#Notes').fill(JOB)
+            await page.locator('#Notes').fill('' if all_statements else JOB)
             for field in ['#GLAccountTypeCheckBoxList1','#GLAccountTypeCheckBoxList2','#GLAccountTypeCheckBoxList3']:
                 await page.locator(field).check()
             stage='apply_filter'; update(browser_stage=stage)
@@ -429,7 +450,8 @@ async def run(action):
             raise HTTPException(409,'job_already_running')
         update(running=True, action=action, last_error=None)
         operations={'preflight':preflight,'import':import_xml,'reconcile':reconcile,'inspect':browser_snapshot,
-                    'automatic':lambda:browser_snapshot(automatic=True)}
+                    'automatic':lambda:browser_snapshot(automatic=True),
+                    'inspect_all':lambda:browser_snapshot(all_statements=True)}
         await operations[action]()
     except asyncio.CancelledError:
         update(phase='interrupted_reconcile_before_write',last_error='worker_cancelled')
@@ -489,7 +511,7 @@ async def get_artifact(name:str,request:Request):
 @router.post('/{action}')
 async def start(action:str,request:Request):
     authorize(request)
-    if action not in {'preflight','import','reconcile','inspect','automatic'}:
+    if action not in {'preflight','import','reconcile','inspect','inspect_all','automatic'}:
         raise HTTPException(404,'Not found')
     state()
     if any(not task.done() for task in TASKS):

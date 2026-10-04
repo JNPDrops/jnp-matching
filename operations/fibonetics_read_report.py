@@ -20,7 +20,7 @@ import httpx
 from operations import allocation_connection as allocation
 from operations import bacs_debtor_transfer as m
 
-REPORT = 'fibonetics-20261004-1147-v3'
+REPORT = 'fibonetics-20261004-1150-v4'
 EXPIRES = datetime(2026,10,4,13,tzinfo=timezone.utc)
 LOCK = 3977752100401
 LOG = logging.getLogger('uvicorn.error')
@@ -78,19 +78,21 @@ class OrderReader:
         m.require(r.status_code==200,'Metorik read failed; response suppressed')
         return r.json()
 
-    async def pages(self,client,filters,wanted_ids,wanted_refs):
+    async def pages(self,client,filters,wanted_ids,wanted_refs,stop_before=None):
         seen=set()
+        previous_date=None
         for page in range(1,101):
             body=await self.get(client,'/orders',{'page':page,'per_page':100,
-                'order_by':'order_created_at','order_dir':'asc','filters':json.dumps(filters)})
+                'order_by':'order_created_at','order_dir':'desc' if stop_before else 'asc','filters':json.dumps(filters)})
             rows,pg=body.get('data'),body.get('pagination')
             m.require(isinstance(rows,list) and isinstance(pg,dict)
                 and pg.get('current_page')==page and pg.get('per_page')==100
                 and type(pg.get('has_more_pages')) is bool,'Invalid order pagination')
             for raw in rows:
-                for f in filters:
-                    if f['field']=='order_created_at' and f['operator']=='gte':
-                        m.require(str(raw.get('order_created_at') or '')[:10]>=f['value'], 'Order date filter not respected')
+                if stop_before:
+                    date=str(raw.get('order_created_at') or '')
+                    m.require(bool(date) and (previous_date is None or date<=previous_date), 'Order chronology not respected')
+                    previous_date=date
                 oid=raw.get('order_id');number=str(raw.get('order_number') or '').lstrip('#')
                 m.require(type(oid) is int and oid not in seen,'Ambiguous paginated order identity')
                 seen.add(oid)
@@ -98,7 +100,7 @@ class OrderReader:
                     self.orders[oid]={k:raw.get(k) for k in ORDER_FIELDS}
             if page%10==0 or not pg['has_more_pages']:
                 event('order_progress',calls=self.calls,read_in_query=len(seen),retained=len(self.orders),more=pg['has_more_pages'])
-            if not pg['has_more_pages']:
+            if not pg['has_more_pages'] or (stop_before and (previous_date[:10]<stop_before or wanted_ids<=set(self.orders))):
                 return
             m.require(bool(rows),'Empty intermediate order page')
         raise m.Stop('Incomplete Metorik read')
@@ -153,7 +155,7 @@ async def collect(app):
         m.require({k:store.get(k) for k in ('name','timezone','currency','platform')}==
                   {'name':'TheDrops.eu','timezone':'Europe/Amsterdam','currency':'EUR','platform':'woocommerce'},
                   'Unexpected Metorik store')
-        await reader.pages(client,[{'field':'order_created_at','operator':'gte','value':'2026-09-01'}],wanted,refs)
+        await reader.pages(client,[],wanted,refs,stop_before='2026-09-01')
         found={'TD'+str(o['order_number']).lstrip('#') for o in reader.orders.values()}
         missing=sorted(refs-found)
         for start in range(0,len(missing),25):

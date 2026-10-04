@@ -1,6 +1,9 @@
 import unittest
 from copy import deepcopy
-from fastapi import HTTPException
+from unittest.mock import patch
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from operations import strict_order_matching as strict
 from operations.strict_order_matching import own_invoice, source_receipts, verify_wrong_selection, verify_source, approved_difference, difference_total
 
 
@@ -77,6 +80,16 @@ class StrictMatchingTests(unittest.TestCase):
         self.assertEqual(difference_total(lines, 'TD100'), -3)
         lines.append(dict(GLAccountCode='9920', YourRef='TD100', AmountDC=3))
         self.assertEqual(difference_total(lines, 'TD100'), 0)
+
+    def test_financial_groups_cannot_exceed_five(self):
+        app = FastAPI()
+        app.include_router(strict.router)
+        with patch.object(strict.legacy, 'authorize'), patch.object(strict.legacy, 'state') as state:
+            with TestClient(app) as client:
+                for mode in ['undo', 'undo_orphans', 'match', 'correct']:
+                    response = client.post('/strict/' + mode + '?limit=6')
+                    self.assertEqual(response.status_code, 409)
+            state.assert_not_called()
 
 
 if __name__ == '__main__':

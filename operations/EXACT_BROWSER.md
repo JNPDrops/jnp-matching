@@ -89,3 +89,18 @@ De tests dekken logintransities, automatisch ingediende TOTP, herhaalde stappen,
 geheimafscherming, doelcontrole, een verlopen iframe, CAPTCHA-stop, minimale
 child-omgevingen en voorkomen van dubbele pogingen. Dit is geen bewijs van een
 geslaagde live Exact-login; dat vereist `passed` uit de Render-proef.
+
+## Bevestigd live resultaat
+
+Op 4 oktober 2026 om 15:41:40 UTC is proef `exact-login-20261004-v9`
+geslaagd op de bestaande Render-service, deployment `dep-db176prncjis73bgk18g`
+(commit `097e37dd019069af75c9d4149ad3c9028461e0f3`, appversie 1.13.9).
+De vastgelegde eindstatus was `passed`, met `fresh_session=true`,
+`username_submitted=true`, `password_submitted=true`, `totp_submitted=true`
+en `administration_verified=true`. Er was geen tussenkomst van de gebruiker.
+`financial_writes=false`: deze proef heeft geen import of aflettering uitgevoerd.
+De broncode is gecontroleerd met 35 offline tests en Python-compilatie.
+
+De nieuwe Fibonatix-batch van 845 transacties is nog niet geïmporteerd of
+geautomatiseerd afgeletterd. De huidige module biedt de geverifieerde loginfunctie;
+de financiële importjob en periodieke uitvoering zijn nog niet aangesloten.

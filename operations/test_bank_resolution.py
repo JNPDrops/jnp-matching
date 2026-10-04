@@ -142,6 +142,19 @@ async def test_all_new_resources_are_read_only_and_html_requires_operator():
 
 
 @pytest.mark.asyncio
+async def test_parent_header_reads_are_limited_to_current_candidate_ids():
+    api=MagicMock();api.rows=AsyncMock(return_value=[dict(EntryID=E,JournalCode='20',Currency='EUR')])
+    result=await r.load_headers(api,[E,E])
+    assert result[E]['Currency']=='EUR'
+    assert api.rows.await_args.kwargs['params']['$filter']=="EntryID eq guid'"+E+"'"
+    api.rows.reset_mock()
+    assert await r.load_headers(api,[])=={}
+    api.rows.assert_not_awaited()
+    api.rows.return_value=[dict(EntryID=C)]
+    with pytest.raises(a.m.Stop):await r.load_headers(api,[E])
+
+
+@pytest.mark.asyncio
 async def test_hourly_run_enriches_assigned_items_and_preserves_write_boundaries():
     from unittest.mock import patch
     from operations import metorik_bacs_evidence

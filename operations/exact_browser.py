@@ -154,13 +154,17 @@ async def one_input(frame, selector):
 
 
 async def locate_otp(frame, *, after_password):
+    text = await frame.locator('body').inner_text()
+    # Exact also uses one-time-code autocomplete to suppress autofill in its
+    # accounting UI. An input attribute alone is not a verification form.
+    if not (OTP_TEXT.search(text) or TOTP_APP_TEXT.search(text)):
+        return []
     fields = [field for field in await visible(frame.locator(OTP)) if await field.is_enabled()]
     if fields or not after_password:
         return fields
     # Exact can render an authenticator field without a standard OTP name or
     # autocomplete attribute. Use the visible form meaning, only after password
     # submission and only when it explicitly names an authenticator app.
-    text = await frame.locator('body').inner_text()
     if not TOTP_APP_TEXT.search(text):
         return []
     candidates = [field for field in await visible(frame.locator(
@@ -213,9 +217,11 @@ async def verify_administration(page):
         return False
     for frame in page.frames:
         if trusted(frame.url):
-            if await visible(frame.locator(USERNAME + ', ' + PASSWORD + ', ' + OTP)):
+            if await visible(frame.locator(USERNAME + ', ' + PASSWORD)):
                 return False
             text = await frame.locator('body').inner_text()
+            if (OTP_TEXT.search(text) or TOTP_APP_TEXT.search(text)) and await visible(frame.locator(OTP)):
+                return False
             if LOGGED_OUT.search(text) or AUTH_TEXT.search(await frame.title()):
                 return False
     return await page.locator('#EnhancedNavigation').is_visible()

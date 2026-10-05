@@ -1,6 +1,6 @@
 """Explicit background-task ownership; split execution is deliberately gated.
 
-The legacy web lifespan uses exactly the original task set. Describing a role
+The legacy web lifespan retains ownership of every role by default. Describing a role
 does not authorize starting a second owner of its queues or historical jobs.
 """
 import asyncio
@@ -29,10 +29,7 @@ TASKS = (
     TaskSpec("tax-rules", "tax", "operations.tax_agent", "serve", True, True),
     TaskSpec("fibonatix-jobs", "fibonatix", "operations.fibonatix_jobs", "serve", True, True),
     TaskSpec("bank-maintenance", "maintenance", "operations.allocation_maintenance", "serve", True, True),
-    TaskSpec("fibonetics-report", "reports", "operations.fibonetics_read_report", "run", True),
-    TaskSpec("recent-import-report", "reports", "operations.recent_import_read_report", "run", True),
-    TaskSpec("paragon-login-probe", "reports", "operations.paragon_login_probe", "run"),
-    TaskSpec("exact-login-probe", "reports", "operations.exact_login_probe", "run"),
+    TaskSpec("report-jobs", "reports", "operations.reports_jobs", "serve", True, True),
     TaskSpec("icepay-jobs", "icepay", "operations.icepay_jobs", "serve", True, True),
 )
 ROLES = ("web", "routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay", "reports")
@@ -56,6 +53,7 @@ ROLE_BLOCKERS["tax"] = ("tax_handover_postgres_pending",)
 ROLE_BLOCKERS["maintenance"] = ("maintenance_handover_postgres_pending",)
 ROLE_BLOCKERS["fibonatix"] = ("fibonatix_handover_postgres_pending",)
 ROLE_BLOCKERS["icepay"] = ("icepay_handover_postgres_pending",)
+ROLE_BLOCKERS["reports"] = ("reports_handover_postgres_pending",)
 
 
 class SeparationNotReady(RuntimeError):
@@ -95,7 +93,7 @@ class BackgroundTasks:
         self.specs = task_specs(role)
         self.resolver = resolver
         self.tasks = {}
-        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay")}
+        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay", "reports")}
         self.routing_stop = self.owned_stops["routing"]
         self.started = False
 
@@ -152,8 +150,8 @@ async def background_tasks(app_module):
     try:
         yield runtime
     finally:
-        # HTTP-triggered Fibonatix tasks still belong to the legacy web process.
-        # A real durable submission queue is required before removing this.
+        # Compatibility cleanup for a task started by older in-process code.
+        # Current HTTP submissions use the durable role queue.
         from operations.fibonatix_import import shutdown
         try:
             await shutdown()

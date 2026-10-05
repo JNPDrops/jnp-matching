@@ -1,7 +1,7 @@
 # Opsplitsing van JNP-agents — uitvoeringsdossier
 
-Status: gedeelde basis, routeringsworker, Woo-bankregels-worker en tax-worker gebouwd in
-concept-PR #82. Databasevalidatie en veilige eerste productieoverdracht staan nog
+Status: gedeelde basis en alle zeven achtergrondrollen gebouwd in concept-PR #82:
+routering, Woo-bankregels, tax, maintenance, Fibonatix, ICEPAY en leesrapporten. Databasevalidatie en veilige eerste productieoverdracht staan nog
 open; niet samengevoegd of uitgerold. Geen workers aangemaakt of geactiveerd.
 Opdracht: gebruiker heeft op 5 oktober 2026 rond 00:09 Europe/Amsterdam toestemming
 gegeven om de agents en modules afzonderlijk in te richten en hier vannacht aan te werken.
@@ -816,3 +816,18 @@ precies dezelfde vier zijn gereproduceerd op de voorafgaande Fibonatix-commit
 verwachting). De gerichte nieuwe worker- en adaptertests worden apart uitgevoerd.
 
 ICEPAY-validatie: `pytest tests operations/test_icepay_booking.py operations/test_icepay_matching.py operations/test_icepay_transactions.py -q`: **209 passed, 20 skipped** (alle skips vereisen geïsoleerde PostgreSQL). Geen echte financiële actie uitgevoerd.
+
+## Vervolg: leesrapporten en probes — 5 oktober 2026
+
+ICEPAY vastgelegd als `98f8a7a78d8040cdd8d303a624b633d7553eaee4`. De reports-rol
+heeft nu één toegewezen supervisor, een duurzame eenmalige opdracht per bestaande
+identiteit, expliciete probe-identiteiten en financiële schrijfweigering. De
+bestaande vier rapport-/probetaken en hun historische claims blijven behouden;
+verlopen opdrachten worden niet opnieuw gestart. Zie `docs/reports-worker-handover.md`.
+
+`pytest tests -q`: **187 passed, 21 skipped**. Zeven nieuwe rapporttests controleren
+onder meer verdwenen/ontbrekende resultaten, afloop van autorisatie, de exacte
+probe-identiteit en financiële schrijfweigering. Eén nieuwe PostgreSQL-test
+controleert dat voltooide rapporten niet opnieuw worden opgepakt na overdracht.
+Die 21 PostgreSQL-tests zijn lokaal niet uitgevoerd; dit is geen geslaagde
+productievalidatie. Dashboard-login, administratierechten en CSRF-tests slagen.

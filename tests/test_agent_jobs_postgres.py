@@ -57,3 +57,15 @@ class DurableJobTests(unittest.TestCase):
             own=jobs.submit(conn,3977752,'icepay','synthetic','run',{},'same-request')
             self.assertEqual(jobs.claim_next(conn,icepay)['job_id'],own['job_id'])
             self.assertEqual(jobs.claim_next(conn,fibo)['job_id'],other['job_id'])
+
+    def test_reports_complete_once_and_do_not_restart_on_new_lease(self):
+        with self.database() as (_,conn):
+            lease=self.setup_queue(conn,'reports')
+            original=jobs.submit(conn,3977752,'reports','synthetic-report','run',{},'once')
+            job=jobs.claim_next(conn,lease);jobs.finish(conn,job,lease,'completed')
+            roles.request_handover(conn,3977752,'reports','worker-reports')
+            c.release_role(conn,3977752,'reports','legacy-reports',lease.lease_id)
+            lease.owner='worker-reports'
+            lease.lease_id=c.claim_role(conn,3977752,'reports',lease.owner,require_assigned=True)
+            self.assertIsNone(jobs.claim_next(conn,lease))
+            self.assertEqual(jobs.submit(conn,3977752,'reports','synthetic-report','run',{},'once')['job_id'],original['job_id'])

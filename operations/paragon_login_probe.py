@@ -211,9 +211,9 @@ async def worker() -> dict:
                            totp_submitted=totp_submitted, dashboard_verified=dashboard_verified)
 
 
-async def run() -> None:
+async def run(task_id=None) -> None:
     """Optional background task; a durable claim limits this probe to one run."""
-    if not eligible(os.environ, datetime.now(timezone.utc)):
+    if not eligible(os.environ if task_id is None else {'PARAGON_LOGIN_PROBE_ID':task_id}, datetime.now(timezone.utc)):
         return
     missing = missing_credentials(os.environ)
     if missing:

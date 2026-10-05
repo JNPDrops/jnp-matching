@@ -18,7 +18,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             async def task(*args):
                 seen.append((spec.name, args))
                 try:
-                    if spec.role in {"routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay"}:
+                    if spec.role in {"routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay", "reports"}:
                         from operations.task_drain import wait
                         await wait(3600)
                     else:
@@ -62,7 +62,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 if spec.name == "debtor-routing":
                     raise ValueError("SENSITIVE_PROVIDER_BODY")
                 try:
-                    if spec.role in {"woo-rules", "tax", "maintenance", "fibonatix", "icepay"}:
+                    if spec.role in {"woo-rules", "tax", "maintenance", "fibonatix", "icepay", "reports"}:
                         from operations.task_drain import wait
                         await wait(3600)
                     else:
@@ -157,25 +157,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_headless_signal_stops_and_releases_handlers(self):
         import signal
-        from app.worker import run
+        from app.worker import run_supervisor
         loop = asyncio.get_running_loop()
         handlers = {}
-        runtime = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), tasks={}, specs=[])
-        lease = SimpleNamespace(start=AsyncMock(), mark_draining=AsyncMock(), close=AsyncMock(), lost=asyncio.Event())
-
-        async def started():
+        async def supervisor(app,stop,owner,function,**kwargs):
             handlers[signal.SIGTERM]()
-
-        runtime.start.side_effect = started
-        with patch("app.worker.require_ready"), patch("app.worker.BackgroundTasks", return_value=runtime), \
-             patch("operations.worker_coordination.DurableRoleLease", return_value=lease), \
-             patch.object(loop, "add_signal_handler", side_effect=lambda sig, cb: handlers.update({sig: cb})), \
-             patch.object(loop, "remove_signal_handler") as remove:
-            await run("reports")
-        runtime.stop.assert_awaited_once()
-        lease.start.assert_awaited_once()
-        lease.mark_draining.assert_awaited_once()
-        lease.close.assert_awaited_once_with("stopped")
+            await stop.wait()
+        with patch.object(loop,"add_signal_handler",side_effect=lambda sig,cb:handlers.update({sig:cb})), \
+             patch.object(loop,"remove_signal_handler") as remove:
+            await run_supervisor(None,supervisor,'worker-reports',None,role='reports')
         self.assertCountEqual([args.args[0] for args in remove.call_args_list], [signal.SIGTERM, signal.SIGINT])
 
 

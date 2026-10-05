@@ -147,6 +147,8 @@ before returning. Unadapted owned writers are denied by fenced_send.
 async def fenced_send(database_url, division, connection, method, send):
     lease = _owner.get()
     validate_context(database_url, division)
+    if lease is not None and lease.role == "reports" and method.upper() != "GET":
+        raise WriteFenced("read_only_role")
     if lease is None or method.upper() == 'GET':
         return await send()
     operation = _operation.get()

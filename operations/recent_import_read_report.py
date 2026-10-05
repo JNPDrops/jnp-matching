@@ -142,6 +142,7 @@ async def run(app):
                     ('5212110b-39b3-4824-bd9a-3c53d3c266d9',REPORT,'{"read_only_report":true}'))
         event('started')
         await asyncio.wait_for(collect(app),timeout=300)
+        return True
     except asyncio.CancelledError:
         raise
     except Exception as exc:

@@ -78,6 +78,22 @@ Bestaande correcte afletteringen blijven intact.
 
 ## Controle op voltooiing
 
+### Aanvulling 5 oktober 2026 — indeling en ontbrekende facturen
+
+- Toon vragen per administratie en bankboek, met aantallen per workflowstatus.
+  Hetzelfde bankboeknummer in verschillende administraties blijft gescheiden.
+  Een ontbrekend bankboek wordt als onbekend getoond, niet uit de PSP geraden.
+- Maak ontbrekende inkoopfacturen afzonderlijk filterbaar. Houd deze gescheiden
+  van een leveranciersbetaling waarbij nog moet worden vastgesteld welk
+  document nodig is.
+- Controleer bij ontbrekende verkoopfacturen de eigen webshoporder en status.
+  Processing plus een daadwerkelijk niet aangetroffen factuur mag als wachten
+  op order/factuurimport worden gepresenteerd. Het bewijst geen toekomstige import.
+  Pending/on-hold, annuleringen en completed zonder factuur vragen eigen controle.
+  Een bestaande gesloten factuur of meerdere kandidaten is geen ontbrekende factuur.
+- Deze indeling geeft geen toestemming voor extra financiële handelingen en
+  wijzigt vastgelegde menselijke besluiten niet.
+
 Controleer beide kanten: iedere ontvangst heeft haar eigen factuur (of een
 zichtbare, verklaarde uitzondering), en iedere factuur toont het juiste openstaande
 saldo. Alleen 'alle betaalde facturen zijn gesloten' of een kloppend totaalsaldo

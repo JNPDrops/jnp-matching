@@ -13,6 +13,7 @@ import os
 import re
 
 import psycopg
+from app.dashboard.invoice_questions import annotate
 
 DIVISION = "3977752"
 LIMIT = 10000
@@ -138,6 +139,7 @@ def bank_case(key, raw, observed, source="bank"):
         woo_order=string(raw.get("woo_order_id"), 100),
         entry_id=string(raw.get("bank_entry_id"), 80), entry_number=string(raw.get("entry_number"), 60),
         debtor=string(raw.get("account_code"), 60), journal=string(raw.get("journal_code"), 40),
+        journal_name=string(raw.get("journal"), 160),
         currency=string(raw.get("currency"), 10), amount=money(raw.get("original_bank_amount_signed", raw.get("amount"))),
         remaining_amount=money(raw.get("remaining_bank_amount_signed")),
         invoice_amount=money(raw.get("invoice_amount")), invoice_remaining=money(raw.get("invoice_open_amount_signed")),
@@ -157,7 +159,13 @@ def bank_case(key, raw, observed, source="bank"):
         item["evidence"].append({"label": "Bestaande verkoopboeking", "value": string(entry.get("EntryNumber"), 80)})
     if raw.get("possible_duplicate_ids"):
         item["evidence"].append({"label": "Mogelijke dubbele bankregels", "value": ", ".join(map(str, raw["possible_duplicate_ids"][:20]))})
-    return item
+    order = None
+    if raw.get('order_check') in {'observed', 'verified'}:
+        order = {'order_number': '#' + str(raw.get('reference') or '')[2:],
+                 'order_id': raw.get('woo_order_id'), 'status': raw.get('order_status')}
+    return annotate(item, order=order, checked_at=raw.get('observed_at') or timestamp(observed),
+                    lookup_state='not_found' if raw.get('order_check') == 'order_not_found' else None,
+                    invoice_absent=raw.get('invoice_presence') == 'not_found' and not raw.get('existing_sales_entries'))
 
 
 def strict_cases(job, plan, updated):
@@ -205,6 +213,10 @@ def strict_cases(job, plan, updated):
             item.update(title="Uitkomst van eerdere verwerking controleren", execution_status="uncertain", execution_label="Uitkomst onzeker; niet opnieuw uitvoeren")
         elif state == "exception_verified":
             item["execution_label"] = "Open ontvangst door agent bevestigd"
+        refresh = receipt.get('invoice_refresh') or {}
+        annotate(item, order=receipt.get('webshop_order'), checked_at=receipt.get('webshop_checked_at'),
+                 lookup_state=receipt.get('webshop_lookup_state'), expected_order_id=receipt.get('woo'),
+                 invoice_absent='rows' in refresh and not refresh['rows'])
         result.append(item)
     return result
 
@@ -242,7 +254,9 @@ def finalize(items):
         for alias in aliases:
             latest[alias] = item["id"]
         item["stale"] = not epoch(item.get("observed_at")) or datetime.now(timezone.utc).timestamp() - epoch(item["observed_at"]) > 7200
-        material = {k:v for k,v in item.items() if k not in {"observed_at", "stale", "aliases"}}
+        # Display grouping does not invalidate an existing human decision.
+        material = {k:v for k,v in item.items() if k not in {"observed_at", "stale", "aliases",
+                    "question_group", "question_group_label", "order_import", "journal_name"}}
         item["fingerprint"] = hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()
         item["revision"] = 0
         yield item

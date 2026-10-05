@@ -584,7 +584,21 @@ async def refresh_missing(limit):
         fail('prepare_required')
     queue = [r for r in plan['receipts'] if r['exception'] == 'invoice_missing_or_ambiguous'
              and r['state'] in {'pending', 'inspected', 'unmatched_verified', 'exception_verified'}
-             and not r.get('invoice_refresh')][:limit]
+             ]
+    # Oldest observation first: repeated bounded reads also cover orders that
+    # were still processing during a previous scan. Never reset write attempts.
+    queue.sort(key=lambda r: (r.get('invoice_refresh') or {}).get('at', ''))
+    queue = queue[:limit]
+    from operations.metorik_bacs_evidence import lookup_orders
+    webshop, lookup_available = {}, True
+    if queue:
+        try:
+            references = sorted({r['source_order'] for r in queue})
+            webshop = (await lookup_orders(references))['orders']
+        except Exception:
+            # Keep invoice/history checks available without exposing errors,
+            # credentials or treating a failed source as an absent order.
+            lookup_available = False
     for receipt in queue:
         legacy.update(phase='strict_refresh_missing', strict_current_order=receipt['source_order'])
         rows = await legacy.read_all('financialtransaction/TransactionLines', {
@@ -592,6 +606,12 @@ async def refresh_missing(limit):
             '$select': SELECT})
         invoice, reason = own_invoice(receipt, rows, legacy.application().COLLECTIVE_DEBTOR_CODE)
         receipt['invoice_refresh'] = dict(at=now(), rows=rows, result=reason or 'own_invoice_found')
+        order = webshop.get('#' + receipt['source_order'][2:])
+        receipt['webshop_checked_at'] = now()
+        receipt['webshop_lookup_state'] = ('unavailable' if not lookup_available else
+                                           'found' if order else 'not_found')
+        receipt['webshop_order'] = ({key: order.get(key) for key in
+            ('order_id', 'order_number', 'status', 'order_updated_at')} if order else None)
         receipt.update(invoice=invoice, exception=reason, workflow_status='open',
             suggested_action='match_own_invoice' if invoice else 'inspect_invoice_history')
         if invoice and receipt['state'] == 'exception_verified':

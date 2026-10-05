@@ -85,7 +85,31 @@ def available(state, pending, *, floor, now_ms, unknown_count=0):
     return True, None
 
 
+def conservative_headers(previous, incoming):
+    """Late responses cannot replenish an already consumed quota window."""
+    merged = {}
+    for prefix in ('daily', 'minute'):
+        reset, remaining, limit = (prefix + suffix for suffix in ('_reset_ms', '_remaining', '_limit'))
+        old_reset, new_reset = previous.get(reset), incoming.get(reset)
+        if old_reset is not None and new_reset is not None and new_reset < old_reset:
+            continue
+        newer = new_reset is not None and old_reset is not None and new_reset > old_reset
+        for key in (reset, remaining, limit):
+            if key in incoming:
+                merged[key] = incoming[key]
+        if remaining in merged and previous.get(remaining) is not None and not newer:
+            merged[remaining] = min(previous[remaining], merged[remaining])
+    return merged
+
+
 def initialize(conn):
+    # Concurrent first requests must not race PostgreSQL catalogue creation.
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || ':jnp-coordination-schema',0))")
+        _initialize(conn)
+
+
+def _initialize(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS jnp_worker_roles (
         division INTEGER NOT NULL, role TEXT NOT NULL,
         desired_owner TEXT, active_owner TEXT, lease_id UUID,
@@ -230,9 +254,9 @@ def reserve_request(conn, division, connection, role, method, *, priority="routi
         if now - window_start >= timedelta(minutes=1):
             window_start, unknown_count = now, 0
         pending = conn.execute("""SELECT COUNT(*) FROM jnp_exact_api_reservations
-            WHERE division=%s AND connection=%s AND state IN ('reserved','uncertain')
-              AND reserved_at>COALESCE(%s,'epoch'::timestamptz)""",
-            (division, connection, state["observed_at"])).fetchone()[0]
+            WHERE division=%s AND connection=%s AND
+              (state='reserved' OR (state='uncertain' AND reserved_at>%s))""",
+            (division, connection, now - timedelta(days=1))).fetchone()[0]
         allowed, reason = available(state, pending, floor=floor, now_ms=now_ms, unknown_count=unknown_count)
         if not allowed:
             raise BudgetDeferred(reason)
@@ -258,6 +282,14 @@ def complete_request(conn, reservation, headers, *, outcome="response", now=None
             raise CoordinationError("reservation_not_active")
         state = "released" if outcome == "not_sent" else ("observed" if values else "uncertain")
         conn.execute("UPDATE jnp_exact_api_reservations SET state=%s,completed_at=%s WHERE request_id=%s", (state, now, reservation.request_id))
+        if values:
+            row = conn.execute("""SELECT daily_limit,daily_remaining,daily_reset_ms,
+                minute_limit,minute_remaining,minute_reset_ms
+                FROM jnp_exact_api_budget WHERE division=%s AND connection=%s FOR UPDATE""",
+                (reservation.division, reservation.connection)).fetchone()
+            previous = dict(zip(('daily_limit','daily_remaining','daily_reset_ms',
+                                 'minute_limit','minute_remaining','minute_reset_ms'), row))
+            values = conservative_headers(previous, values)
         if values:
             assignments = ",".join(key + "=%s" for key in values)
             conn.execute(f"UPDATE jnp_exact_api_budget SET {assignments},observed_at=%s,updated_at=%s WHERE division=%s AND connection=%s",
@@ -362,3 +394,50 @@ class DurableRoleLease:
 
     async def __aexit__(self, exc_type, _exc, _tb):
         await self.close("error" if exc_type else "stopped")
+
+
+def application_budget_identity(app):
+    """Return non-secret coordination identity exposed by an Exact app facade."""
+    original = getattr(app, "original", app)
+    database_url = getattr(original, "DATABASE_URL", "")
+    division = getattr(app, "DIVISION", getattr(original, "DIVISION", None))
+    connection = getattr(app, "EXACT_CONNECTION_KEY", "main")
+    if not isinstance(database_url, str) or not isinstance(connection, str):
+        raise ValueError('invalid_budget_configuration')
+    return database_url, division, connection
+
+
+def _budget_database_call(database_url, function, *args, **kwargs):
+    import psycopg
+    with psycopg.connect(database_url, autocommit=True, connect_timeout=10) as conn:
+        initialize(conn)
+        return function(conn, *args, **kwargs)
+
+
+async def budgeted_http(app, role, method, send, *, priority="routine", floor=200):
+    """Reserve one Exact request and persist its observed or uncertain outcome.
+
+    ``send`` is deliberately invoked exactly once.  In-process development keeps
+    working without PostgreSQL; split worker roles remain fail-closed elsewhere
+    and therefore always use the shared budget in production.
+    """
+    database_url, division, connection = application_budget_identity(app)
+    if not database_url:
+        return await send()
+    reservation = await asyncio.to_thread(
+        _budget_database_call, database_url, reserve_request,
+        division, connection, role, method, priority=priority, floor=floor)
+    try:
+        response = await send()
+    except BaseException:
+        try:
+            await asyncio.to_thread(
+                _budget_database_call, database_url, complete_request,
+                reservation, {}, outcome="uncertain")
+        except Exception:
+            pass
+        raise
+    await asyncio.to_thread(
+        _budget_database_call, database_url, complete_request,
+        reservation, response.headers, outcome="response")
+    return response

@@ -18,7 +18,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             async def task(*args):
                 seen.append((spec.name, args))
                 try:
-                    await asyncio.Event().wait()
+                    if spec.role == "routing":
+                        from operations.task_drain import wait
+                        await wait(3600)
+                    else:
+                        await asyncio.Event().wait()
                 finally:
                     stopped.append(spec.name)
             return task

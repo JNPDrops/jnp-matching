@@ -36,6 +36,9 @@ class BudgetDeferred(transport.Stop):
 
 
 class TaxAPI(transport.Exact):
+    def __init__(self, app):
+        super().__init__(app, role="tax", priority="bulk", floor=RESERVE)
+
     async def request(self, method, url, params=None, payload=None):
         parsed = urlparse(url)
         root = f'/api/v1/{transport.DIVISION}/'

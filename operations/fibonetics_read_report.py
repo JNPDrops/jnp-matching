@@ -48,7 +48,7 @@ def emit(stage, data):
 
 class ReadAPI(m.Exact):
     def __init__(self,app):
-        super().__init__(allocation.RoutingApp(app))
+        super().__init__(allocation.RoutingApp(app), role='reports', priority='bulk', floor=500)
         self.calls=0
 
     async def request(self,method,url,params=None,payload=None):

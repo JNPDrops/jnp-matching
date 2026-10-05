@@ -126,7 +126,7 @@ def match_rule(rules, payload):
 
 class RuleAPI(CollectionAPI):
     def __init__(self, app, allowed, limits):
-        super().__init__(app)
+        super().__init__(app, role='tax', priority='routine', floor=150)
         self.allowed = allowed
         self.limits = dict(limits)
 
@@ -143,8 +143,11 @@ class RuleAPI(CollectionAPI):
         self.last_request = time.monotonic()
         token = await self.app._access_token()
         async with httpx.AsyncClient(timeout=45, follow_redirects=False, trust_env=False, verify=transport.TLS_CONTEXT) as client:
-            response = await client.request(method, url, params=params, json=payload,
-                headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'})
+            from operations.worker_coordination import budgeted_http
+            response = await budgeted_http(self.app, self.role, method,
+                lambda: client.request(method, url, params=params, json=payload,
+                    headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}),
+                priority=self.priority, floor=self.floor)
         self.limits = {name: int(response.headers[header]) for name, header in (
             ('remaining', 'x-ratelimit-remaining'), ('reset_ms', 'x-ratelimit-reset'))
             if response.headers.get(header, '').isdigit()}

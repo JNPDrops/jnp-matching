@@ -1,12 +1,13 @@
 import ssl
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+from types import SimpleNamespace
 from operations import bacs_debtor_transfer as m
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_rate_limit_retains_reset_without_reading_body_or_retrying(self):
-        app=Mock(DIVISION=m.DIVISION,BASE_URL=m.BASE,COLLECTIVE_DEBTOR_CODE=m.SOURCE)
+        app=SimpleNamespace(DIVISION=m.DIVISION,BASE_URL=m.BASE,COLLECTIVE_DEBTOR_CODE=m.SOURCE,DATABASE_URL='')
         app._access_token=AsyncMock(return_value='test-token')
         response=Mock(status_code=429)
         response.headers={'x-ratelimit-remaining':'0','x-ratelimit-reset':'1791064800000'}
@@ -19,7 +20,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         client.request.assert_awaited_once();response.json.assert_not_called()
 
     async def test_requests_share_verified_tls_without_redirect_or_retry(self):
-        app=Mock(DIVISION=m.DIVISION, BASE_URL=m.BASE, COLLECTIVE_DEBTOR_CODE=m.SOURCE)
+        app=SimpleNamespace(DIVISION=m.DIVISION, BASE_URL=m.BASE, COLLECTIVE_DEBTOR_CODE=m.SOURCE,DATABASE_URL='')
         app._access_token=AsyncMock(return_value='test-token')
         api=m.Exact(app)
         response=Mock(status_code=200,content=b'{}')

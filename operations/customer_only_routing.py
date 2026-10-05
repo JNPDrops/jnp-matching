@@ -7,6 +7,7 @@ import re
 
 from operations import bacs_debtor_transfer as m
 from operations import debtor_routing_policy as policy
+from operations.worker_coordination import BudgetDeferred as SharedBudgetDeferred
 
 DAILY_RESERVE = 100
 CALLS_PER_ENTRY = 3
@@ -24,7 +25,7 @@ def destination_code(method):
 
 def failure_result(exc, write_started):
     """Keep an unresolved write isolated; never repeat an ambiguous outcome."""
-    if isinstance(exc, BudgetDeferred):
+    if isinstance(exc, (BudgetDeferred, SharedBudgetDeferred)):
         return {'state': 'pending', 'reason': 'Waiting for API budget', 'stop_cycle': True}
     if isinstance(exc, m.WritePaused):
         return {'state': 'pending', 'reason': 'Operator paused before PUT', 'stop_cycle': True}

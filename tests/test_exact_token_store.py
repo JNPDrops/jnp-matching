@@ -201,10 +201,10 @@ class MainIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["access_token"] for row in store.saved], ["refreshed", "callback-new"])
         self.assertEqual(request.scope["query_string"], b"")
 
-    async def test_persistent_401_has_only_one_retry_for_rest_and_xml(self):
+    async def test_persistent_401_retries_get_once_but_never_retries_xml_write(self):
         response = type("Response", (), {"status_code": 401, "text": "unauthorized"})()
-        for call in (lambda: self.app._request_json("GET", "https://example.test"),
-                     lambda: self.app.upload_matchset(b"synthetic XML")):
+        for call, retries in ((lambda: self.app._request_json("GET", "https://example.test"), 1),
+                              (lambda: self.app.upload_matchset(b"synthetic XML"), 0)):
             client = AsyncMock()
             client.__aenter__.return_value.request.return_value = response
             client.__aenter__.return_value.post.return_value = response
@@ -212,8 +212,8 @@ class MainIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(HTTPException) as error:
                     await call()
                 self.assertEqual(error.exception.status_code, 401)
-                self.assertEqual(sum(1 for args in token.call_args_list if "rejected_token" in args.kwargs), 1)
-                self.assertEqual(client.__aenter__.await_count, 2)
+                self.assertEqual(sum(1 for args in token.call_args_list if "rejected_token" in args.kwargs), retries)
+                self.assertEqual(client.__aenter__.await_count, retries + 1)
 
 
 if __name__ == "__main__":

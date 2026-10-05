@@ -40,7 +40,7 @@ ROLES = ("web", "routing", "woo-rules", "tax", "maintenance", "fibonatix", "icep
 
 # Remove these gates only as the corresponding handover requirements are proven.
 # There is intentionally no environment-variable override for premature splitting.
-COMMON_BLOCKERS = ("shared_token_postgres_test_pending", "shared_api_budget_client_integration_pending",
+COMMON_BLOCKERS = ("shared_token_postgres_test_pending", "shared_api_budget_postgres_test_pending",
                    "coordination_postgres_test_pending", "verified_drain_pending")
 ROLE_BLOCKERS = {
     role: COMMON_BLOCKERS + (("http_job_queue_pending",) if role in {"web", "fibonatix"} else ())
@@ -85,6 +85,7 @@ class BackgroundTasks:
         self.specs = task_specs(role)
         self.resolver = resolver
         self.tasks = {}
+        self.routing_stop = asyncio.Event()
         self.started = False
 
     async def start(self):
@@ -96,7 +97,11 @@ class BackgroundTasks:
         self.started = True
         try:
             for spec, function in functions:
-                coroutine = function(self.app_module) if spec.with_app else function()
+                if spec.role == "routing":
+                    from operations.task_drain import run
+                    coroutine = run(self.routing_stop, function, self.app_module)
+                else:
+                    coroutine = function(self.app_module) if spec.with_app else function()
                 try:
                     self.tasks[spec.name] = asyncio.create_task(coroutine, name="jnp:" + spec.name)
                 except BaseException:
@@ -107,6 +112,14 @@ class BackgroundTasks:
             raise
 
     async def stop(self):
+        self.routing_stop.set()
+        routing = self.tasks.get("debtor-routing")
+        if routing is not None and not routing.done():
+            # Keep the routing cycle's existing advisory lock until the current
+            # entry has completed. No next entry/cycle is admitted after stop.
+            done, _ = await asyncio.wait({routing}, timeout=240)
+            if not done:
+                log.error("routing_drain_timeout_review_required")
         # Cancel all before awaiting any one. One failed task must not prevent
         # the remaining owners from releasing their existing locks/audits.
         for task in self.tasks.values():

@@ -1,6 +1,6 @@
 # Opsplitsing van JNP-agents — uitvoeringsdossier
 
-Status: eerste runtime-/tokenfase gebouwd en lokaal getest in concept-PR #82;
+Status: drie voorbereidende codefasen gebouwd en lokaal getest in concept-PR #82;
 nog niet samengevoegd of uitgerold. Geen workers aangemaakt of geactiveerd.
 Opdracht: gebruiker heeft op 5 oktober 2026 rond 00:09 Europe/Amsterdam toestemming
 gegeven om de agents en modules afzonderlijk in te richten en hier vannacht aan te werken.
@@ -154,6 +154,7 @@ claim niet dat aparte workers live zijn.
 | 2026-10-05 00:16 Europe/Amsterdam | Repository, huidige services, main en deployments geïnventariseerd. Proceslokale main-tokenlock en ontbrekende Render-workeractie vastgesteld. Dit dossier gereed; geen productieconfiguratie gewijzigd. |
 | 2026-10-05 01:10 Europe/Amsterdam | Gebouwd op actuele main 2fcf8c5dbd357ea80be8a41142b3daf2a81a1fb8 (PR #85): expliciete runtimecatalogus, beschermd headless startpunt en gedeelde main-tokenlock inclusief callback/401-paden. 95 tests geslaagd; één echte PostgreSQL-procesproef nog overgeslagen. Productie blijft dep-db1ddj8u01pc73duec3g, alle huidige rollen in de bestaande webservice. |
 | 2026-10-05 03:04 Europe/Amsterdam | Fase twee gebouwd op main cf75100f845d1296eaaa60f85225caf3c656e4f2 (PR #87): duurzame role-leases/heartbeats, fail-closed leaseverlies, gedeelde Exact-budgetreserveringen en read-only dashboardstatus. 113 tests geslaagd; twee lokale PostgreSQL-procesproeven overgeslagen. Productie blijft dep-db1ebv6gekts73dec350; nog geen worker of schema geactiveerd. |
+| 2026-10-05 05:27 Europe/Amsterdam | Fase drie voorbereid op dezelfde actuele main/live cf75100f845d1296eaaa60f85225caf3c656e4f2, deployment dep-db1ebv6gekts73dec350: alle geïnventariseerde Exact REST/XML-applicatiecalls gebruiken nu de gedeelde budgetwrapper; financiële POST/PUT-calls worden niet automatisch herhaald. Een afzonderlijke native worker-Blueprint met zes handmatige services is toegevoegd. 121 tests geslaagd; twee lokale PostgreSQL-procesproeven overgeslagen. Productie en rollen zijn ongewijzigd. |
 
 Vul dit dossier bij elk werkblok aan met concrete commit/PR, tests, deployment-ID,
 daadwerkelijk actieve rollen en resterende beperkingen. Gebruik alleen technische
@@ -290,11 +291,12 @@ PostgreSQL-procesproeven slagen en drain per rol is bewezen.
   per minuut per koppeling. Bekende dagreserves worden eveneens gerespecteerd.
   Deze fallback voorkomt dat meerdere processen elk hun eigen 1,2-secondenlimiet
   gebruiken en samen de minuutlimiet overschrijden.
-- De opslaglaag en beslisregels zijn gebouwd. De bestaande clients zijn nog niet
-  allemaal omgezet: main REST/XML, `bacs_debtor_transfer.Exact`, Woo-regels,
-  tax, maintenance, tax-allocation, Fibonatix XML en ICEPAY-paden moeten iedere
-  call via deze laag reserveren/afronden met behoud van hun no-retry-regels.
-  Daarom blijft `shared_api_budget_client_integration_pending` actief.
+- In fase drie zijn main REST/XML, `bacs_debtor_transfer.Exact`, Woo-regels,
+  tax, maintenance, tax-allocation, Allocation-probe, Fibonatix XML en de
+  afzonderlijke ICEPAY-lees-/schrijfpaden aangesloten. OAuth-tokenuitwisseling
+  en Metorik-requests vallen buiten het Exact-applicatiebudget. De resterende
+  gate heet nu `shared_api_budget_postgres_test_pending`: integratie is gebouwd,
+  maar procesoverlap tegen een echte test-PostgreSQL is nog niet bewezen.
 
 ### Dashboard en gegevensgrens
 
@@ -333,12 +335,120 @@ git diff --check
 ### Resterend vóór activering
 
 1. Draai beide opt-in procesproeven op een lokale/test-PostgreSQL.
-2. Integreer alle Exact-clients met reservering en veilige afronding. Schrijfcalls
-   krijgen nooit een automatische retry; een onzekere call blijft voor readback.
+2. Draai de geïntegreerde clients tegen een lokale/test-PostgreSQL en bewijs dat
+   reservering, response-observatie en onzekere uitkomst over processen werken.
 3. Implementeer per continue taak een drainpunt vóór een nieuwe claim/call; SIGTERM
    mag geen nieuwe taak starten en moet lopend werk afronden of onzeker vastleggen.
-4. Maak en valideer de afzonderlijke native-Python worker-Blueprint, inclusief
-   handmatige deploys, secretverwijzingen, kleinste passende plannen, browservereisten,
-   `maxShutdownDelaySeconds` en kosten.
+4. Laat de voorbereide Blueprint door Render valideren en pas hem pas toe nadat
+   per rol de drain en execution-gate zijn vrijgegeven.
 5. Activeer pas daarna één rol tegelijk volgens de overdrachtsprocedure. Tot die tijd
    blijft productie monolithisch en worden geen nieuwe Render-kosten gemaakt.
+
+## Overdracht derde codefase
+
+### Gedeelde verzending voor alle Exact-applicatiecalls
+
+- `operations.worker_coordination.budgeted_http` reserveert vóór de daadwerkelijke
+  HTTP-call in PostgreSQL en roept de aangeleverde zender exact één keer aan.
+  Daarna worden uitsluitend gevalideerde quotaheaders opgeslagen. Bij transportfout
+  of cancellation wordt de reservering `uncertain`; er volgt geen automatische
+  financiële retry. Als reservering faalt, wordt de HTTP-call niet gestart.
+- De Allocation-facade markeert zichzelf nu expliciet als koppeling `allocation`;
+  overige clients gebruiken `main`. Hierdoor delen rollen hun limiet per werkelijke
+  Exact-app, niet per proces. In de bestaande lokale éénprocesmodus zonder database
+  blijft de helper compatibel; de headless rollen eisen zelf wel `DATABASE_URL`.
+- De vroegere generieke 401-herhaling in `app.main` is beperkt tot GET. MatchSets
+  en andere POST/PUT-writes krijgen na 401 of een onzekere transportuitkomst geen
+  tweede poging. Bestaande taak-audits en readback blijven beslissend.
+- Een broninventarisatie na de wijziging vindt geen directe Exact REST/XML-call
+  buiten de wrapper. De overgebleven directe HTTP-calls zijn OAuth-tokenuitwisseling
+  of externe Metorik-reads en verbruiken dit Exact-applicatiebudget niet.
+
+### Voorbereide Render-configuratie
+
+`render/agent-workers.yaml` is een **afzonderlijke, nog niet toegepaste** Blueprint.
+Hij wijzigt de oude root-Blueprint niet en bevat uitsluitend echte `worker`-services,
+native Python, branch `main`, `autoDeployTrigger: off`, één instance en 300 seconden
+shutdownruimte. Bestaande waarden worden alleen met `fromService/envVarKey` vanaf
+`jnp-matching` verwezen; er staan geen secretwaarden in Git. De bestaande interne
+PostgreSQL wordt hergebruikt en niet publiek gemaakt.
+
+| Voorstel | Rol | Plan | Richtprijs per maand op 5 oktober 2026 |
+| --- | --- | --- | ---: |
+| jnp-routing-worker | debtor-routing | 0.5c-512mb | $7 |
+| jnp-woo-rules-worker | Woo-bankregels | 0.5c-512mb | $7 |
+| jnp-tax-worker | tax-agent | 0.5c-512mb | $7 |
+| jnp-maintenance-worker | bankuitzonderingen/maintenance | 0.5c-512mb | $7 |
+| jnp-icepay-worker | ICEPAY inclusief browser | 1c-2g | $25 |
+| jnp-reports-worker | leesrapporten/probes inclusief browser | 1c-2g | $25 |
+| **Totaal indien alle zes later actief worden** |  |  | **$78** |
+
+Fibonatix staat bewust niet als lege worker in de Blueprint: de bestaande opdrachten
+worden nog via HTTP in de webservice gestart en missen een duurzame indieningsqueue.
+Ook voor PSP's zonder adapter is niets geprovisioned. De kosten zijn de actuele
+Render-computeprijzen, exclusief bestaand web/databasegebruik, bandwidth en belastingen.
+
+### Validatie fase drie
+
+Uitgevoerd zonder productie-DB/API, financiële handelingen of secrets:
+
+```sh
+python -m unittest discover -s tests -q
+python -m unittest operations.test_automatic_debtor_routing operations.test_routing_transport operations.test_customer_only_routing operations.test_source_order_policy operations.test_allocation_connection -q
+python -c "import yaml; ..."  # syntactische parse van zes worker-services
+git diff --check
+```
+
+- Testmap: 87 ontdekt, 85 geslaagd en 2 expliciete PostgreSQL-procesproeven
+  overgeslagen. Bestaande routing/transport/beleid/Allocation: 36 geslaagd.
+  Totaal 121 geslaagd.
+- Nieuwe tests bewijzen reserve-before-send, niet verzenden bij budgetweigering,
+  onzeker markeren bij transportfout, geen verborgen retry na opslagfout, GET-only
+  401-herhaling en de belangrijkste Blueprint-invarianten. De YAML is daarnaast
+  met een onafhankelijke parser als zes services geladen.
+- De Render-plugin heeft geen worker-create- of Blueprint-apply-actie. Daarom is
+  niets aangemaakt, is geen $78/maand geactiveerd en is geen deploy gestart.
+- De execution-gates blijven dicht wegens echte PostgreSQL-proef, bewezen drain
+  en HTTP-taakqueue. Productie blijft alle huidige rollen uitvoeren in de bestaande
+  webservice; dit voorkomt twee gelijktijdige schrijvers.
+
+## Vervolg 5 oktober 2026, ochtend — routering en testomgeving
+
+De derde fase was lokaal vastgelegd als `03e6dad`, maar na de onderbroken
+GitHub-publicatie stond PR #82 nog op `f9dee1b3ebb91bdac017763ed5af24f1020e72ee`.
+De ochtendcontrole bevestigde main/live `cf75100f845d1296eaaa60f85225caf3c656e4f2`;
+er was geen deployment bezig. Deze vervolgcommit neemt de lokale fase drie mee.
+
+- Routering heeft nu een eigen coöperatief stopsignaal. Bij afsluiten wacht de
+  runtime maximaal 240 seconden op de lopende routering. De bestaande cycluslock
+  en financiële audit blijven daarbij in gebruik. Vóór de volgende entry/cyclus
+  wordt gestopt; een wachttijd van een minuut is direct onderbreekbaar. Bij
+  overschrijding wordt expliciet `routing_drain_timeout_review_required` gelogd.
+  Dit is nog geen bewezen productieoverdracht: gedeeld taakbezit in de legacy-webrol,
+  write-fencing bij leaseverlies en een beheerpad voor drain blijven nodig.
+- Quota-antwoorden uit hetzelfde of een ouder resetvenster kunnen de teller niet
+  meer verhogen. Nog lopende reserveringen blijven meetellen als ze ouder zijn
+  dan het laatst ontvangen antwoord. Onzekere requests tellen conservatief 24 uur
+  mee; dat kan eerder pauzeren maar verleent geen extra API-ruimte.
+- Een gedeelde budgetweigering wordt in routering als wachten afgehandeld, niet
+  als een verzonden/transportfout. Gelijktijdige eerste schema-initialisatie is
+  onder een PostgreSQL advisory lock gebracht.
+- Blueprint: `off` is expliciet een string, routering verwijst naar de bestaande
+  Metorik-key en de main-API-workers verwijzen ook naar EXACT_REDIRECT_URI.
+- `.github/workflows/agent-separation-tests.yml` is voorbereid: PostgreSQL 16 als
+  tijdelijke GitHub-service, uitsluitend een `jnp_test_agents`-database, synthetische
+  credentials en repository-read-rechten. Geen productiesecrets of Exact-acties.
+  De workflow draait de bestaande twee procesproeven plus een echte databaseproef
+  voor vertraagde quota-antwoorden en een nog lopende reservering.
+
+Lokale validatie: 92 tests ontdekt, 89 geslaagd, 3 PostgreSQL-proeven overgeslagen;
+daarnaast 36 bestaande routing/transport/beleid/Allocation-tests geslaagd. Totaal
+125 geslaagd. Blueprint syntactisch geladen; zes handmatige deployments bevestigd.
+Een lokale PostgreSQL-installatie is opnieuw geprobeerd en faalt op OS-rechten.
+Pas een geslaagde GitHub-run geldt als bewijs van de drie databaseproeven.
+
+Geen execution-gate vrijgegeven, geen merge, deployment of infrastructuur gemaakt.
+Eerst de CI-uitkomst controleren en daarna gedeelde legacy-role-claims en veilige
+drainbediening bouwen. Vervolgens één rol uitschakelen in web en dezelfde rol
+starten als worker. De plugin heeft nog geen worker-create/Blueprint-apply; een
+Render-UI- of CLI-stap blijft nodig wanneer de code voor overdracht gereed is.

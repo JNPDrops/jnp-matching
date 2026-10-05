@@ -161,9 +161,12 @@ async def run():
         from operations.bacs_debtor_transfer import TLS_CONTEXT
         try:
             async with httpx.AsyncClient(timeout=180,follow_redirects=False,trust_env=False,verify=TLS_CONTEXT) as client:
-                response=await client.post(BASE+'/docs/XMLUpload.aspx',
-                    params={'Topic':'GLTransactions','_Division_':str(DIVISION)},content=blob,
-                    headers={'Authorization':'Bearer '+token,'Content-Type':'application/xml; charset=utf-8','Accept':'application/xml,text/xml'})
+                from operations.worker_coordination import budgeted_http
+                response=await budgeted_http(main, 'icepay', 'POST',
+                    lambda: client.post(BASE+'/docs/XMLUpload.aspx',
+                        params={'Topic':'GLTransactions','_Division_':str(DIVISION)},content=blob,
+                        headers={'Authorization':'Bearer '+token,'Content-Type':'application/xml; charset=utf-8','Accept':'application/xml,text/xml'}),
+                    priority='critical', floor=200)
             summary['http_status']=response.status_code
             try:
                 root=ET.fromstring(response.content)

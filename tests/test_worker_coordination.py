@@ -22,6 +22,13 @@ class Cursor:
 
 
 class PolicyTests(unittest.TestCase):
+    def test_late_response_cannot_replenish_same_or_older_window(self):
+        previous = {'daily_remaining': 200, 'daily_reset_ms': 2000}
+        self.assertEqual(c.conservative_headers(previous, {'daily_remaining': 205, 'daily_reset_ms': 2000}), previous)
+        self.assertEqual(c.conservative_headers(previous, {'daily_remaining': 4999, 'daily_reset_ms': 1000}), {})
+        self.assertEqual(c.conservative_headers(previous, {'daily_remaining': 4999, 'daily_reset_ms': 3000}),
+                         {'daily_remaining': 4999, 'daily_reset_ms': 3000})
+
     def test_header_parser_accepts_only_non_negative_integers(self):
         headers = {"x-ratelimit-limit": "5000", "x-ratelimit-remaining": "4998",
                    "x-ratelimit-reset": "1791158400000", "x-ratelimit-minutely-limit": "60",
@@ -150,7 +157,7 @@ class ReservationTests(unittest.TestCase):
     def test_response_observation_overrides_budget_but_not_payload(self):
         conn = MagicMock()
         conn.transaction.return_value = nullcontext()
-        conn.execute.side_effect = [Cursor(), Cursor(("reserved",)), Cursor(), Cursor()]
+        conn.execute.side_effect = [Cursor(), Cursor(("reserved",)), Cursor(), Cursor((None,) * 6), Cursor()]
         reservation = c.Reservation("11111111-1111-1111-1111-111111111111", 3977752, "allocation", "routing", "GET")
         result = c.complete_request(conn, reservation, {"x-ratelimit-remaining": "4812", "body": "private"}, now=NOW)
         self.assertEqual(result, {"state": "observed", "observed": {"daily_remaining": 4812}})
@@ -167,6 +174,63 @@ class ReservationTests(unittest.TestCase):
 
 
 class DurableWrapperTests(unittest.IsolatedAsyncioTestCase):
+    async def test_budget_wrapper_is_compatible_without_database(self):
+        app = type("App", (), {"DATABASE_URL": "", "DIVISION": 3977752})()
+        response = type("Response", (), {"headers": {}})()
+        send = AsyncMock(return_value=response)
+        self.assertIs(await c.budgeted_http(app, "routing", "GET", send), response)
+        send.assert_awaited_once_with()
+
+    async def test_budget_wrapper_reserves_then_observes_headers(self):
+        app = type("App", (), {"DATABASE_URL": "postgres://shared", "DIVISION": 3977752,
+                                "EXACT_CONNECTION_KEY": "allocation"})()
+        response = type("Response", (), {"headers": {"x-ratelimit-remaining": "4998"}})()
+        reservation = c.Reservation("11111111-1111-1111-1111-111111111111",
+                                    3977752, "allocation", "routing", "PUT")
+        calls = []
+        def database_call(database_url, function, *args, **kwargs):
+            calls.append((database_url, function, args, kwargs))
+            return reservation if function is c.reserve_request else {"state": "observed"}
+        with patch.object(c, "_budget_database_call", side_effect=database_call):
+            self.assertIs(await c.budgeted_http(app, "routing", "PUT",
+                AsyncMock(return_value=response), priority="critical", floor=250), response)
+        self.assertEqual([item[1] for item in calls], [c.reserve_request, c.complete_request])
+        self.assertEqual(calls[0][2], (3977752, "allocation", "routing", "PUT"))
+        self.assertEqual(calls[0][3], {"priority": "critical", "floor": 250})
+        self.assertEqual(calls[1][2], (reservation, response.headers))
+        self.assertEqual(calls[1][3], {"outcome": "response"})
+
+    async def test_budget_failure_prevents_send_and_transport_is_uncertain(self):
+        app = type("App", (), {"DATABASE_URL": "postgres://shared", "DIVISION": 3977752})()
+        send = AsyncMock(side_effect=RuntimeError("ambiguous"))
+        reservation = c.Reservation("11111111-1111-1111-1111-111111111111",
+                                    3977752, "main", "icepay", "POST")
+        calls = []
+        def database_call(_database_url, function, *args, **kwargs):
+            calls.append((function, args, kwargs))
+            return reservation
+        with patch.object(c, "_budget_database_call", side_effect=c.BudgetDeferred("reserve")):
+            with self.assertRaises(c.BudgetDeferred):
+                await c.budgeted_http(app, "icepay", "POST", send)
+        send.assert_not_awaited()
+        with patch.object(c, "_budget_database_call", side_effect=database_call):
+            with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+                await c.budgeted_http(app, "icepay", "POST", send)
+        self.assertEqual(calls[-1][0], c.complete_request)
+        self.assertEqual(calls[-1][2], {"outcome": "uncertain"})
+
+    async def test_observation_storage_failure_is_not_hidden_or_retried(self):
+        app = type("App", (), {"DATABASE_URL": "postgres://shared", "DIVISION": 3977752})()
+        response = type("Response", (), {"headers": {"x-ratelimit-remaining": "4998"}})()
+        send = AsyncMock(return_value=response)
+        reservation = c.Reservation("11111111-1111-1111-1111-111111111111",
+                                    3977752, "main", "woo-rules", "POST")
+        with patch.object(c, "_budget_database_call",
+                          side_effect=[reservation, RuntimeError("storage unavailable")]):
+            with self.assertRaisesRegex(RuntimeError, "storage unavailable"):
+                await c.budgeted_http(app, "woo-rules", "POST", send)
+        send.assert_awaited_once_with()
+
     async def test_lost_heartbeat_sets_event(self):
         lease = c.DurableRoleLease("test-only", 3977752, "routing", owner="worker-a", lease_seconds=15)
         lease.lease_id = "11111111-1111-1111-1111-111111111111"

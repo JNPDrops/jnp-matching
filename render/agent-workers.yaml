@@ -1,0 +1,205 @@
+# Prepared worker Blueprint for the guarded agent-separation handover.
+# Do not apply until the PostgreSQL process tests and per-role drain are proven.
+# The existing root render.yaml is legacy Docker configuration and is unrelated.
+services:
+  - type: worker
+    name: jnp-routing-worker
+    runtime: python
+    repo: https://github.com/JNPDrops/jnp-matching
+    branch: main
+    plan: 0.5c-512mb
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.worker --role routing
+    autoDeployTrigger: 'off'
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: DATABASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: DATABASE_URL}
+      - key: EXACT_BASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
+      - key: EXACT_DIVISION
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: COLLECTIVE_DEBTOR_CODE
+        fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
+      - key: METORIK_API_KEY
+        fromService: {name: jnp-matching, type: web, envVarKey: METORIK_API_KEY}
+      - key: ORDER_REF_PREFIX
+        fromService: {name: jnp-matching, type: web, envVarKey: ORDER_REF_PREFIX}
+      - key: EXACT_ALLOCATION_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
+      - key: EXACT_ALLOCATION_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
+      - key: EXACT_ALLOCATION_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
+      - key: SESSION_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
+
+  - type: worker
+    name: jnp-woo-rules-worker
+    runtime: python
+    repo: https://github.com/JNPDrops/jnp-matching
+    branch: main
+    plan: 0.5c-512mb
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.worker --role woo-rules
+    autoDeployTrigger: 'off'
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: DATABASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: DATABASE_URL}
+      - key: EXACT_BASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
+      - key: EXACT_DIVISION
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: COLLECTIVE_DEBTOR_CODE
+        fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
+      - key: EXACT_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_ID}
+      - key: EXACT_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_SECRET}
+      - key: EXACT_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_REDIRECT_URI}
+      - key: ENABLE_WOO_IBAN_RULE_WRITES
+        fromService: {name: jnp-matching, type: web, envVarKey: ENABLE_WOO_IBAN_RULE_WRITES}
+
+  - type: worker
+    name: jnp-tax-worker
+    runtime: python
+    repo: https://github.com/JNPDrops/jnp-matching
+    branch: main
+    plan: 0.5c-512mb
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.worker --role tax
+    autoDeployTrigger: 'off'
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: DATABASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: DATABASE_URL}
+      - key: EXACT_BASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
+      - key: EXACT_DIVISION
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: COLLECTIVE_DEBTOR_CODE
+        fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
+      - key: EXACT_ALLOCATION_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
+      - key: EXACT_ALLOCATION_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
+      - key: EXACT_ALLOCATION_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
+      - key: SESSION_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
+
+  - type: worker
+    name: jnp-maintenance-worker
+    runtime: python
+    repo: https://github.com/JNPDrops/jnp-matching
+    branch: main
+    plan: 0.5c-512mb
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.worker --role maintenance
+    autoDeployTrigger: 'off'
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: DATABASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: DATABASE_URL}
+      - key: EXACT_BASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
+      - key: EXACT_DIVISION
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: COLLECTIVE_DEBTOR_CODE
+        fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
+      - key: EXACT_ALLOCATION_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
+      - key: EXACT_ALLOCATION_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
+      - key: EXACT_ALLOCATION_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
+      - key: SESSION_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
+
+  - type: worker
+    name: jnp-icepay-worker
+    runtime: python
+    repo: https://github.com/JNPDrops/jnp-matching
+    branch: main
+    plan: 1c-2g
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt && python -m playwright install chromium --only-shell
+    startCommand: python -m app.worker --role icepay
+    autoDeployTrigger: 'off'
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: DATABASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: DATABASE_URL}
+      - key: EXACT_BASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
+      - key: EXACT_DIVISION
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: EXACT_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_ID}
+      - key: EXACT_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_SECRET}
+      - key: EXACT_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_REDIRECT_URI}
+      - key: ICEPAY_WEB_USERNAME
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_USERNAME}
+      - key: ICEPAY_WEB_PASSWORD
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_PASSWORD}
+      - key: ICEPAY_WEB_TOTP_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_TOTP_SECRET}
+
+  - type: worker
+    name: jnp-reports-worker
+    runtime: python
+    repo: https://github.com/JNPDrops/jnp-matching
+    branch: main
+    plan: 1c-2g
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt && python -m playwright install chromium --only-shell
+    startCommand: python -m app.worker --role reports
+    autoDeployTrigger: 'off'
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: DATABASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: DATABASE_URL}
+      - key: EXACT_BASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
+      - key: EXACT_DIVISION
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: COLLECTIVE_DEBTOR_CODE
+        fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
+      - key: EXACT_ALLOCATION_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
+      - key: EXACT_ALLOCATION_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
+      - key: EXACT_ALLOCATION_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
+      - key: SESSION_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
+      - key: METORIK_API_KEY
+        fromService: {name: jnp-matching, type: web, envVarKey: METORIK_API_KEY}
+      - key: EXACT_WEB_USERNAME
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_USERNAME}
+      - key: EXACT_WEB_PASSWORD
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_PASSWORD}
+      - key: EXACT_WEB_TOTP_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_TOTP_SECRET}
+      - key: PARAGON_EMAIL
+        fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_EMAIL}
+      - key: PARAGON_USERNAME
+        fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_USERNAME}
+      - key: PARAGON_PASSWORD
+        fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_PASSWORD}
+      - key: PARAGON_TOTP_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_TOTP_SECRET}

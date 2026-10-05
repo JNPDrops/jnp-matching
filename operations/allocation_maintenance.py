@@ -38,7 +38,7 @@ BOSCI = re.compile(r'(?<![a-z0-9_])bosci_[a-f0-9]{29}(?:[a-f0-9]{3})?(?![a-z0-9_
 
 class MaintenanceAPI(woo.ExactAPI):
     def __init__(self, app, limits):
-        super().__init__(app)
+        super().__init__(app, role='maintenance', priority='routine', floor=200)
         self.limits = dict(limits)
         self.allowed_posts = {}
         self.allowed_deletes = set()
@@ -67,8 +67,11 @@ class MaintenanceAPI(woo.ExactAPI):
         if method == 'POST':
             self.post_count += 1
         async with httpx.AsyncClient(timeout=45, follow_redirects=False, trust_env=False, verify=m.TLS_CONTEXT) as client:
-            r = await client.request(method, url, params=params, json=payload,
-                headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'})
+            from operations.worker_coordination import budgeted_http
+            r = await budgeted_http(self.app, self.role, method,
+                lambda: client.request(method, url, params=params, json=payload,
+                    headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}),
+                priority=self.priority, floor=self.floor)
         self.limits = {name: int(r.headers[h]) for name, h in (
             ('remaining', 'x-ratelimit-remaining'), ('reset_ms', 'x-ratelimit-reset')) if r.headers.get(h, '').isdigit()}
         expected = (200,) if method == 'GET' else ((200, 201, 204) if method == 'POST' else (200, 204))

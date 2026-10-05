@@ -20,6 +20,8 @@ from operations import debtor_routing_policy as policy, open_item_cleanup as cle
 from operations import allocation_connection as allocation
 from operations import reviewed_suap
 from operations import reviewed_routing_updates
+from operations import task_drain
+from operations.worker_coordination import BudgetDeferred as SharedBudgetDeferred
 
 LOCK_ID = 3977752100100
 INTERVAL = 60
@@ -246,7 +248,7 @@ async def process_entry(api, conn, entry_id, reference, order, *, work_scope='co
         audit.persist_event({'event':'entry_failure','entry_id':entry_id,**result})
         runtime.event('entry_isolated',queue=work_scope,entry_id=entry_id,**result)
         STATUS['last_error'] = result['reason']
-        if isinstance(exc,customer_only.BudgetDeferred) or (isinstance(exc,m.ExactRequestError) and exc.status_code == 429):
+        if isinstance(exc,(customer_only.BudgetDeferred, SharedBudgetDeferred)) or (isinstance(exc,m.ExactRequestError) and exc.status_code == 429):
             runtime.defer_until_reset(STATUS,api.limits)
         return not result['stop_cycle']
     record_state(conn,entry_id,result['state'],result['reason'])
@@ -265,6 +267,8 @@ async def validate_routes(api):
 
 
 async def cycle(app_module):
+    if task_drain.requested():
+        return
     m.require(bool(app_module.DATABASE_URL), 'Persistent database required for automatic routing')
     api = None
     with app_module._db_connect() as conn:
@@ -321,6 +325,9 @@ async def cycle(app_module):
                     STATUS['routing_reassessment']=reviewed_routing_updates.reconcile(conn)
                     runtime.event('routing_reassessment',**STATUS['routing_reassessment'])
                 STATUS['state']='routing_immediate_cleanup' if early else 'processing_queue'
+                if task_drain.requested():
+                    STATUS['state']='drained'
+                    return
                 if not customer_only.budget_available(api):
                     runtime.defer_until_reset(STATUS,api.limits)
                     return
@@ -335,6 +342,9 @@ async def cycle(app_module):
                     references=sorted({r[3] for r in queued if r[2] is None})
                     proof=await e.lookup_orders(references) if references else {'orders':{}}
                     for entry_id,reference,stored_order,order_ref,entry_type,scope,debit_id in queued:
+                        if task_drain.requested():
+                            STATUS['state']='drained'
+                            return
                         order=stored_order or proof['orders'].get('#'+order_ref[2:])
                         if order is None:
                             record_state(conn,entry_id,'pending','Order not yet present in Metorik; no inference',retry_seconds=60)
@@ -348,6 +358,9 @@ async def cycle(app_module):
                             return
                 # Retire legacy Fibonatix work locally. This path makes no Exact
                 # request because Fibonatix remains on the source debtor.
+                if task_drain.requested():
+                    STATUS['state']='drained'
+                    return
                 await backfill.process_pending(api,conn)
                 saved=conn.execute('SELECT open_item_cleanup FROM jnp_debtor_route_control').fetchone()[0]
                 STATUS['cleanup']=cleanup.status(conn,saved)
@@ -357,7 +370,7 @@ async def cycle(app_module):
                     STATUS.update(state='immediate_cleanup_complete',next_attempt_at=policy.START_AT.isoformat())
                 runtime.event('cycle_complete',applied_since_start=STATUS['applied_since_start'],
                               last_scan=STATUS['last_scan'],cleanup=STATUS['cleanup'],queues=runtime.queue_counts(conn))
-        except customer_only.BudgetDeferred:
+        except (customer_only.BudgetDeferred, SharedBudgetDeferred):
             runtime.defer_until_reset(STATUS,api.limits if api else {})
             raise
         finally:
@@ -375,8 +388,9 @@ def sleep_seconds(status, now=None):
 
 async def serve(app_module):
     from operations.requested_route_diagnostic import run as diagnose_requested_order
-    await diagnose_requested_order(app_module)
-    while True:
+    if not task_drain.requested():
+        await diagnose_requested_order(app_module)
+    while not task_drain.requested():
         try:
             if OPERATOR_PAUSED:
                 # A retired paused instance must not overwrite newer policy
@@ -386,7 +400,7 @@ async def serve(app_module):
                 await cycle(app_module)
         except asyncio.CancelledError:
             raise
-        except customer_only.BudgetDeferred:
+        except (customer_only.BudgetDeferred, SharedBudgetDeferred):
             runtime.event('cycle_deferred',reason='Waiting for API budget')
         except Exception as exc:
             STATUS['state']='retry_next_cycle'
@@ -398,7 +412,8 @@ async def serve(app_module):
             if isinstance(exc,m.ExactRequestError) and exc.status_code == 429:
                 runtime.defer_until_reset(STATUS,exc.limits)
             runtime.event('cycle_deferred',reason=STATUS['last_error'])
-        await asyncio.sleep(sleep_seconds(STATUS))
+        await task_drain.wait(sleep_seconds(STATUS))
+    STATUS['state']='drained'
 
 
 async def enable(app_module, since):

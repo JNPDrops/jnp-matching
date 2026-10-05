@@ -146,7 +146,9 @@ async def receive(request: Request):
 
 
 class ExactAPI:
-    def __init__(self, app): self.app=app; self.last_request=0
+    def __init__(self, app, *, role='woo-rules', priority='routine', floor=200):
+        self.app=app; self.last_request=0
+        self.role, self.priority, self.floor = role, priority, floor
 
     async def request(self, method, url, params=None, payload=None):
         # Never automatically repeat a POST. Ambiguous outcomes require reconciliation.
@@ -154,8 +156,11 @@ class ExactAPI:
         self.last_request=time.monotonic()
         token = await self.app._access_token()
         async with httpx.AsyncClient(timeout=40,follow_redirects=False,trust_env=False,verify=TLS_CONTEXT) as client:
-            r=await client.request(method,url,params=params,json=payload,
-                headers={'Authorization':'Bearer '+token,'Accept':'application/json'})
+            from operations.worker_coordination import budgeted_http
+            r=await budgeted_http(self.app, self.role, method,
+                lambda: client.request(method,url,params=params,json=payload,
+                    headers={'Authorization':'Bearer '+token,'Accept':'application/json'}),
+                priority=self.priority, floor=self.floor)
         if r.status_code not in (200,201,204): raise RuntimeError('Exact HTTP '+str(r.status_code))
         return r.json() if r.content else {}
 

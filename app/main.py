@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import json
 import os
 import re
+import sys
 import time
 import xml.etree.ElementTree as ET
 from decimal import Decimal, InvalidOperation
@@ -209,18 +210,22 @@ def _extract_entity(payload: Any) -> dict[str, Any]:
 async def _request_json(method: str, url: str, params=None, payload=None, *, _auth_retry=True) -> Any:
     token = await _access_token()
     async with httpx.AsyncClient(timeout=45) as client:
-        resp = await client.request(
-            method,
-            url,
-            params=params,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-        )
-    if resp.status_code == 401 and _auth_retry:
+        from operations.worker_coordination import budgeted_http
+        resp = await budgeted_http(
+            sys.modules[__name__], "maintenance", method,
+            lambda: client.request(
+                method,
+                url,
+                params=params,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+            ),
+            priority="critical" if method != "GET" else "routine", floor=200)
+    if resp.status_code == 401 and _auth_retry and method == "GET":
         await _access_token(rejected_token=token)
         return await _request_json(method, url, params, payload, _auth_retry=False)
     if resp.status_code >= 400:
@@ -1163,15 +1168,15 @@ def build_direct_match_xml(plan: dict[str, Any]) -> bytes:
 async def upload_matchset(xml_payload: bytes, *, _auth_retry=True) -> str:
     token = await _access_token()
     async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
-        resp = await client.post(
-            MATCHSETS_URL,
-            params={"Topic": "MatchSets", "_Division_": str(DIVISION)},
-            content=xml_payload,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/xml; charset=utf-8", "Accept": "application/xml,text/xml,*/*"},
-        )
-    if resp.status_code == 401 and _auth_retry:
-        await _access_token(rejected_token=token)
-        return await upload_matchset(xml_payload, _auth_retry=False)
+        from operations.worker_coordination import budgeted_http
+        resp = await budgeted_http(
+            sys.modules[__name__], "maintenance", "POST",
+            lambda: client.post(
+                MATCHSETS_URL,
+                params={"Topic": "MatchSets", "_Division_": str(DIVISION)},
+                content=xml_payload,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/xml; charset=utf-8", "Accept": "application/xml,text/xml,*/*"},
+            ), priority="critical", floor=200)
     if resp.status_code >= 400:
         raise HTTPException(resp.status_code, f"MatchSets upload failed: {resp.text[:1200]}")
     text = resp.text.strip()

@@ -14,7 +14,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from operations.worker_coordination import (
-    BudgetDeferred, LeaseUnavailable, claim_role, initialize, reserve_request,
+    BudgetDeferred, LeaseUnavailable, claim_role, initialize, reserve_request, complete_request,
 )
 
 
@@ -43,6 +43,32 @@ def budget_process(dsn, gate, results, owner):
 
 @unittest.skipUnless(os.environ.get("JNP_TEST_POSTGRES_DSN"), "isolated local PostgreSQL not configured")
 class CoordinationProcessTests(unittest.TestCase):
+    def test_late_response_and_older_pending_request_cannot_restore_budget(self):
+        dsn = os.environ['JNP_TEST_POSTGRES_DSN']
+        settings = conninfo_to_dict(dsn)
+        self.assertIn(settings.get('host'), {'127.0.0.1', 'localhost', '::1'})
+        self.assertTrue(settings.get('dbname', '').startswith('jnp_test_'))
+        self.assertNotIn('service', settings)
+        self.assertNotIn('hostaddr', settings)
+        schema = 'quota_' + uuid.uuid4().hex
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL('CREATE SCHEMA {}').format(sql.Identifier(schema)))
+            try:
+                scoped = make_conninfo(dsn, options='-csearch_path=' + schema)
+                with psycopg.connect(scoped, autocommit=True) as conn:
+                    initialize(conn)
+                    first = reserve_request(conn, 3977752, 'main', 'routing', 'GET', floor=0)
+                    second = reserve_request(conn, 3977752, 'main', 'routing', 'GET', floor=0)
+                    reset = str(int((datetime.now(timezone.utc) + timedelta(hours=4)).timestamp()*1000))
+                    complete_request(conn, second, {'x-ratelimit-remaining': '1', 'x-ratelimit-reset': reset})
+                    # The first call is still reserved despite predating the response.
+                    with self.assertRaises(BudgetDeferred):
+                        reserve_request(conn, 3977752, 'main', 'routing', 'GET', floor=0)
+                    complete_request(conn, first, {'x-ratelimit-remaining': '2', 'x-ratelimit-reset': reset})
+                    self.assertEqual(conn.execute("SELECT daily_remaining FROM jnp_exact_api_budget WHERE connection='main'").fetchone()[0], 1)
+            finally:
+                admin.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(schema)))
+
     def test_competing_processes_get_one_role_and_one_last_budget_slot(self):
         dsn = os.environ["JNP_TEST_POSTGRES_DSN"]
         settings = conninfo_to_dict(dsn)

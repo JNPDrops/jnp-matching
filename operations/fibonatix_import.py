@@ -319,9 +319,12 @@ async def import_xml():
     # One write only. Do not use the generic JSON helper's 401 recursion.
     try:
         async with httpx.AsyncClient(timeout=180, follow_redirects=False) as client:
-            response = await client.post(app.BASE_URL + '/docs/XMLUpload.aspx',
-                params={'Topic':'GLTransactions','_Division_':str(DIVISION)}, content=payload(),
-                headers={'Authorization':'Bearer '+token,'Content-Type':'application/xml; charset=utf-8','Accept':'application/xml,text/xml'})
+            from operations.worker_coordination import budgeted_http
+            response = await budgeted_http(app, 'fibonatix', 'POST',
+                lambda: client.post(app.BASE_URL + '/docs/XMLUpload.aspx',
+                    params={'Topic':'GLTransactions','_Division_':str(DIVISION)}, content=payload(),
+                    headers={'Authorization':'Bearer '+token,'Content-Type':'application/xml; charset=utf-8','Accept':'application/xml,text/xml'}),
+                priority='critical', floor=200)
         try:
             result_xml=ET.fromstring(response.content)
             result_body=ET.tostring(result_xml,encoding='unicode')[:30000] if result_xml.tag in {'eExact','Messages','Message'} else 'unexpected_document'

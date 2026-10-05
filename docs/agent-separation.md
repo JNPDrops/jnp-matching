@@ -153,6 +153,7 @@ claim niet dat aparte workers live zijn.
 | --- | --- |
 | 2026-10-05 00:16 Europe/Amsterdam | Repository, huidige services, main en deployments geïnventariseerd. Proceslokale main-tokenlock en ontbrekende Render-workeractie vastgesteld. Dit dossier gereed; geen productieconfiguratie gewijzigd. |
 | 2026-10-05 01:10 Europe/Amsterdam | Gebouwd op actuele main 2fcf8c5dbd357ea80be8a41142b3daf2a81a1fb8 (PR #85): expliciete runtimecatalogus, beschermd headless startpunt en gedeelde main-tokenlock inclusief callback/401-paden. 95 tests geslaagd; één echte PostgreSQL-procesproef nog overgeslagen. Productie blijft dep-db1ddj8u01pc73duec3g, alle huidige rollen in de bestaande webservice. |
+| 2026-10-05 03:04 Europe/Amsterdam | Fase twee gebouwd op main cf75100f845d1296eaaa60f85225caf3c656e4f2 (PR #87): duurzame role-leases/heartbeats, fail-closed leaseverlies, gedeelde Exact-budgetreserveringen en read-only dashboardstatus. 113 tests geslaagd; twee lokale PostgreSQL-procesproeven overgeslagen. Productie blijft dep-db1ebv6gekts73dec350; nog geen worker of schema geactiveerd. |
 
 Vul dit dossier bij elk werkblok aan met concrete commit/PR, tests, deployment-ID,
 daadwerkelijk actieve rollen en resterende beperkingen. Gebruik alleen technische
@@ -250,3 +251,94 @@ git diff --check
 Geen merge/deployment uitgevoerd in deze fase: echte gedeelde PostgreSQL-werking,
 API-budgetten en veilige drain zijn nog niet voldoende bewezen voor activering.
 Het bekende Render-aanmaakprobleem blijft staan; er zijn geen nieuwe kosten gemaakt.
+
+## Overdracht tweede codefase
+
+Deze fase voegt coördinatie toe maar opent geen execution-gate. De aparte rollen
+blijven fail-closed totdat de gedeelde budgetlaag in iedere Exact-client zit, de
+PostgreSQL-procesproeven slagen en drain per rol is bewezen.
+
+### Duurzaam taakbezit
+
+- `operations/worker_coordination.py` definieert één lease per administratie en
+  rol met een willekeurige lease-ID, actieve eigenaar, gewenste volgende eigenaar,
+  heartbeat, verloopmoment, drainstatus en beperkte operationele details.
+- Claims en overdrachten worden per administratie/rol onder een transactionele
+  PostgreSQL advisory lock uitgevoerd. Een levende andere eigenaar kan niet worden
+  overgenomen. Een verlopen lease kan wel worden hersteld. Tijdens een expliciete
+  overdracht kan na vrijgave uitsluitend de vooraf gekozen eigenaar claimen.
+- De headless worker claimt vóór taakopstart, vernieuwt de lease periodiek en stopt
+  de taken als de heartbeat faalt, de lease is verloren of drain wordt aangevraagd.
+  Bij normale of foutieve exit wordt de lease vrijgegeven. Bestaande specifieke
+  financiële locks/audits blijven daarnaast verplicht.
+- De huidige webservice registreert zichzelf nog niet als afzonderlijke role-owner;
+  dit is bewust onderdeel van de latere gefaseerde overdracht. De nieuwe workers
+  kunnen door de execution-gates nog niet starten.
+
+### Gedeeld Exact-API-budget
+
+- Budgetstatus is gescheiden per administratie en Exact-koppeling (`main` of
+  `allocation`). Een call reserveert atomisch vóór verzending met uitsluitend:
+  request-ID, rol, prioriteit, methode en tijdstip. URL, payload, responsebody,
+  klantgegevens en credentials worden niet opgeslagen.
+- Dag- en minuutheaders worden numeriek gevalideerd. Een reservering telt andere
+  nog lopende/onzekere calls mee. Na een response vervangt de nieuwste waarneming
+  de teller; een niet-verzonden call wordt vrijgegeven; een onzekere netwerkuitkomst
+  blijft conservatief gereserveerd totdat een latere providerwaarneming de teller
+  opnieuw vastlegt.
+- Zonder minuutheaders geldt voorlopig een gedeelde bovengrens van 30 reserveringen
+  per minuut per koppeling. Bekende dagreserves worden eveneens gerespecteerd.
+  Deze fallback voorkomt dat meerdere processen elk hun eigen 1,2-secondenlimiet
+  gebruiken en samen de minuutlimiet overschrijden.
+- De opslaglaag en beslisregels zijn gebouwd. De bestaande clients zijn nog niet
+  allemaal omgezet: main REST/XML, `bacs_debtor_transfer.Exact`, Woo-regels,
+  tax, maintenance, tax-allocation, Fibonatix XML en ICEPAY-paden moeten iedere
+  call via deze laag reserveren/afronden met behoud van hun no-retry-regels.
+  Daarom blijft `shared_api_budget_client_integration_pending` actief.
+
+### Dashboard en gegevensgrens
+
+- Het bestaande Microsoft-dashboardresultaat bevat voortaan een afzonderlijk
+  `agents`-blok zodra de coördinatietabellen bestaan: duurzame rolstatus,
+  leasegeldigheid en veilige budgetmetadata. Het blijft read-only en zet
+  `financial_execution_enabled` niet aan.
+- Interne owner-ID's worden voor weergave gehasht. Heartbeatdetails accepteren
+  alleen een vaste lijst operationele velden; exceptions, providerresponses,
+  URLs, tokens en payloads worden niet opgeslagen of getoond.
+- Als de tabellen nog niet bestaan of de statusbron faalt, meldt het dashboard
+  `available: false` zonder databaseadres of foutdetails. Dit is de huidige
+  productie-uitkomst totdat een geteste migratie wordt geactiveerd.
+
+### Validatie fase twee
+
+Uitgevoerd met synthetische gegevens en zonder productie-DB/API:
+
+```sh
+python -m unittest discover -s tests -q
+python -m unittest operations.test_automatic_debtor_routing operations.test_routing_transport operations.test_customer_only_routing operations.test_source_order_policy operations.test_allocation_connection -q
+git diff --check
+```
+
+- Testmap: 79 ontdekt, 77 geslaagd, 2 PostgreSQL-procesproeven overgeslagen.
+- Bestaande routing/transport/beleid/Allocation: 36 geslaagd.
+- Totaal 113 geslaagd. Nieuwe tests dekken onder meer concurrerende budgetlogica,
+  dag-/minuutreserve, ontbrekende headers, live/expired lease, gewenste overdracht,
+  heartbeatfiltering, leaseverlies en dashboardafscherming.
+- `tests/test_worker_coordination_postgres.py` start in een expliciete lokale
+  `jnp_test_*`-database vier processen: twee concurreren om één role-lease en twee
+  om de laatste API-budgetplaats. Per paar mag exact één proces winnen.
+  De eerdere token-procesproef blijft daarnaast bestaan. Beide zijn nog niet lokaal
+  uitgevoerd omdat een PostgreSQL-server ontbreekt; productie is niet gebruikt.
+
+### Resterend vóór activering
+
+1. Draai beide opt-in procesproeven op een lokale/test-PostgreSQL.
+2. Integreer alle Exact-clients met reservering en veilige afronding. Schrijfcalls
+   krijgen nooit een automatische retry; een onzekere call blijft voor readback.
+3. Implementeer per continue taak een drainpunt vóór een nieuwe claim/call; SIGTERM
+   mag geen nieuwe taak starten en moet lopend werk afronden of onzeker vastleggen.
+4. Maak en valideer de afzonderlijke native-Python worker-Blueprint, inclusief
+   handmatige deploys, secretverwijzingen, kleinste passende plannen, browservereisten,
+   `maxShutdownDelaySeconds` en kosten.
+5. Activeer pas daarna één rol tegelijk volgens de overdrachtsprocedure. Tot die tijd
+   blijft productie monolithisch en worden geen nieuwe Render-kosten gemaakt.

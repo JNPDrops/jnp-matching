@@ -134,22 +134,40 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await wait_for_stop(runtime, asyncio.Event())
         self.assertNotIn("PRIVATE_RESPONSE", str(error.exception))
 
+    async def test_worker_stops_when_durable_lease_is_lost(self):
+        from app.worker import wait_for_stop
+        task = asyncio.create_task(asyncio.Event().wait())
+        lost = asyncio.Event()
+        runtime = SimpleNamespace(role="routing", tasks={"routing":task},
+                                  specs=[SimpleNamespace(name="routing", continuous=True)])
+        waiter = asyncio.create_task(wait_for_stop(runtime, asyncio.Event(), lost))
+        lost.set()
+        with self.assertRaisesRegex(RuntimeError, "role_lease_lost:routing"):
+            await waiter
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     async def test_headless_signal_stops_and_releases_handlers(self):
         import signal
         from app.worker import run
         loop = asyncio.get_running_loop()
         handlers = {}
         runtime = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), tasks={}, specs=[])
+        lease = SimpleNamespace(start=AsyncMock(), mark_draining=AsyncMock(), close=AsyncMock(), lost=asyncio.Event())
 
         async def started():
             handlers[signal.SIGTERM]()
 
         runtime.start.side_effect = started
         with patch("app.worker.require_ready"), patch("app.worker.BackgroundTasks", return_value=runtime), \
+             patch("operations.worker_coordination.DurableRoleLease", return_value=lease), \
              patch.object(loop, "add_signal_handler", side_effect=lambda sig, cb: handlers.update({sig: cb})), \
              patch.object(loop, "remove_signal_handler") as remove:
             await run("routing")
         runtime.stop.assert_awaited_once()
+        lease.start.assert_awaited_once()
+        lease.mark_draining.assert_awaited_once()
+        lease.close.assert_awaited_once_with("stopped")
         self.assertCountEqual([args.args[0] for args in remove.call_args_list], [signal.SIGTERM, signal.SIGINT])
 
 

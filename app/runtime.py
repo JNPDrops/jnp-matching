@@ -40,8 +40,8 @@ ROLES = ("web", "routing", "woo-rules", "tax", "maintenance", "fibonatix", "icep
 
 # Remove these gates only as the corresponding handover requirements are proven.
 # There is intentionally no environment-variable override for premature splitting.
-COMMON_BLOCKERS = ("shared_token_integration_pending", "shared_api_budget_pending", "durable_role_ownership_pending",
-                   "verified_drain_pending", "durable_worker_status_pending")
+COMMON_BLOCKERS = ("shared_token_postgres_test_pending", "shared_api_budget_client_integration_pending",
+                   "coordination_postgres_test_pending", "verified_drain_pending")
 ROLE_BLOCKERS = {
     role: COMMON_BLOCKERS + (("http_job_queue_pending",) if role in {"web", "fibonatix"} else ())
     for role in ROLES

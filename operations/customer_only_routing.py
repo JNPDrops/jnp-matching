@@ -8,6 +8,7 @@ import re
 from operations import bacs_debtor_transfer as m
 from operations import debtor_routing_policy as policy
 from operations.worker_coordination import BudgetDeferred as SharedBudgetDeferred
+from operations.worker_write_fence import audit_metadata, owned_operation
 
 DAILY_RESERVE = 100
 CALLS_PER_ENTRY = 3
@@ -70,6 +71,7 @@ def budget_available(api, calls=CALLS_PER_ENTRY):
     return type(remaining) is int and remaining >= DAILY_RESERVE + calls
 
 
+@owned_operation('routing')
 async def change_selected(api, selection, accounts, audit):
     """Apply one previously established order-to-entry mapping without replanning."""
     method, reference = selection['payment_method'], selection['reference']
@@ -139,9 +141,10 @@ async def change_selected(api, selection, accounts, audit):
 
     m.append_audit(audit, {'event': 'write_intent', 'entry_id': entry_id,
                          'mode': 'customer_only', 'selection': result,
-                         'before_customer': source, 'payload': {'Customer': destination}})
+                         'before_customer': source, 'payload': {'Customer': destination},
+                         **audit_metadata()})
     # Never retry an ambiguous write. The caller pauses with the durable intent.
     await api.change_customer(entry_id, destination)
     result.update(state='applied', reason=None, confirmation='Exact HTTP acknowledgement')
-    m.append_audit(audit, {'event': 'customer_applied', **result})
+    m.append_audit(audit, {'event': 'customer_applied', **result, **audit_metadata()})
     return result

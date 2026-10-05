@@ -82,7 +82,7 @@ class LeaseTests(unittest.TestCase):
 
     def test_expired_owner_can_be_replaced(self):
         conn = self.connection((None, "worker-a", NOW - timedelta(seconds=1), False))
-        conn.execute.side_effect = [Cursor(), Cursor(), Cursor((None, "worker-a", NOW-timedelta(seconds=1), False)), Cursor()]
+        conn.execute.side_effect = [Cursor(), Cursor(), Cursor((None, "worker-a", NOW-timedelta(seconds=1), False)), Cursor(), Cursor()]
         lease = c.claim_role(conn, 3977752, "routing", "worker-b", now=NOW)
         self.assertEqual(str(c.UUID(lease)), lease)
         update = conn.execute.call_args_list[-1]
@@ -96,7 +96,7 @@ class LeaseTests(unittest.TestCase):
 
     def test_drained_role_transfers_only_to_desired_owner(self):
         conn = self.connection(("worker-b", None, None, True))
-        conn.execute.side_effect = [Cursor(), Cursor(), Cursor(("worker-b", None, None, True)), Cursor()]
+        conn.execute.side_effect = [Cursor(), Cursor(), Cursor(("worker-b", None, None, True)), Cursor(), Cursor()]
         lease = c.claim_role(conn, 3977752, "tax", "worker-b", now=NOW)
         self.assertEqual(str(c.UUID(lease)), lease)
         self.assertIn("draining=FALSE", conn.execute.call_args_list[-1].args[0])
@@ -110,6 +110,13 @@ class LeaseTests(unittest.TestCase):
         self.assertTrue(result["draining"])
         stored = json.loads(conn.execute.call_args.args[1][3])
         self.assertEqual(stored, {"phase": "scan", "queue_depth": 4})
+
+    def test_expired_lease_with_unresolved_write_cannot_be_replaced(self):
+        conn = self.connection((None, "worker-a", NOW-timedelta(seconds=1), False))
+        conn.execute.side_effect = [Cursor(), Cursor(),
+            Cursor((None, "worker-a", NOW-timedelta(seconds=1), False)), Cursor((1,))]
+        with self.assertRaisesRegex(c.LeaseUnavailable, 'write_requires_review'):
+            c.claim_role(conn, 3977752, 'routing', 'worker-b', now=NOW)
 
     def test_lost_lease_cannot_heartbeat_or_release(self):
         conn = MagicMock()

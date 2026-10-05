@@ -1,6 +1,6 @@
 # Opsplitsing van JNP-agents — uitvoeringsdossier
 
-Status: drie voorbereidende codefasen gebouwd en lokaal getest in concept-PR #82;
+Status: vier voorbereidende codefasen gebouwd in concept-PR #82;
 nog niet samengevoegd of uitgerold. Geen workers aangemaakt of geactiveerd.
 Opdracht: gebruiker heeft op 5 oktober 2026 rond 00:09 Europe/Amsterdam toestemming
 gegeven om de agents en modules afzonderlijk in te richten en hier vannacht aan te werken.
@@ -473,3 +473,54 @@ eigenaarschap vlak vóór een schrijfactie controleren, en de beheeractie voor
 drain/overdracht duurzaam vastleggen. De huidige routing-stop is hiervoor een
 bouwsteen, geen volledige productieoverdracht. HTTP-gestarte Fibonatix-taken
 houden bovendien hun afzonderlijke queue-gate.
+
+## Vervolg 5 oktober 2026, avond — eigenaarschap bij verzending
+
+Bij hervatting stond PR #82 nog op `ee73f52bcd4ebb89e3d3714cd3ce8e6cd466d37f`.
+Main/live was ongewijzigd `cf75100f845d1296eaaa60f85225caf3c656e4f2`, deployment
+`dep-db1ebv6gekts73dec350`. Alleen PR #82 en de oudere probe-PR #1 stonden open.
+Er was geen nieuwere implementatie of lopende deployment om mee te concurreren.
+
+### Nieuwe codefase: duurzame schrijfblokkade
+
+- `operations/worker_write_fence.py`: headless taken erven via een ContextVar hun
+  role-owner. Bij een schrijfactie wordt de actuele eigenaar/lease en drainstatus
+  in PostgreSQL gecontroleerd, onder dezelfde role-lock als een overname. De
+  databaseklok bepaalt of de lease nog geldig is. Een andere administratie,
+  database of ontbrekende operation-adapter wordt geweigerd vóór verzending.
+- De tabel `jnp_worker_writes` bewaart een operation-ID, administratie, rol,
+  lease-ID, verbinding, methode, tijdstippen en status. Geen URL, payload, token
+  of klantgegevens. Een toegelaten schrijfpoging blijft duurzaam `unresolved`
+  totdat de eigen operation-adapter haar HTTP-bevestiging én audit heeft voltooid.
+- Een nieuwe role-claim wordt bij zo'n onopgeloste schrijfpoging geweigerd, ook
+  bij een verlopen lease of na vrijgave/drain. Geen automatische vrijgave op tijd,
+  herhaling of force-reset. Een crash tussen toelating en verzending kan daarom
+  conservatief handmatige beoordeling vereisen, zonder dat er iets is verstuurd.
+- `customer_only_routing.change_selected` is de eerste aangesloten adapter:
+  precies één PUT, met dezelfde operation-ID in `write_intent` en
+  `customer_applied`. De bestaande audit/queue worden eerst opgeslagen, daarna
+  wordt de schrijfblokkade vrijgegeven. Bij transportfout, cancellation, fout
+  tijdens auditopslag of niet-succesvolle HTTP-response blijft de blokkade staan.
+- De headless worker geeft de owner-context mee aan zijn taken. Andere owned
+  schrijfpaden zonder operation-adapter worden bewust geweigerd. De bestaande
+  legacy-runtime heeft nog geen owner-context en houdt zijn huidige werking.
+- De read-only duurzame dashboardstatus bevat per rol `unresolved_writes`.
+  Een verlopen heartbeat verbergt dus niet dat er nog beoordeling nodig is.
+
+### Tests en resterende afbakening
+
+Lokaal: 107 tests ontdekt, 101 geslaagd, 6 PostgreSQL-tests overgeslagen; daarnaast
+alle 36 bestaande routing/transport/beleid/Allocation-tests geslaagd. Totaal
+137 lokaal geslaagd. `git diff --check` geslaagd. Geen echte financiële acties.
+
+Drie nieuwe PostgreSQL-procesproeven controleren: geen overname met een lopende
+schrijfpoging ondanks leaseverloop, geen vrijgave door drain/restart, en atomische
+uitsluiting tussen schrijftoelating en overname. GitHub CI moet deze zes
+databaseproeven nog voor de nieuwe commit uitvoeren; resultaat hieronder vastleggen.
+
+Deze fase sluit **niet** de migratie af. Legacy moet nog dezelfde rolclaims
+gebruiken; een duurzaam bedieningspad voor drain/overdracht en operation-adapters
+voor de overige schrijvers ontbreken nog. De bestaande gespecialiseerde locks,
+cursors, pauzes, historische taakstatus en boekhoudregels blijven ongewijzigd.
+Alle execution-gates blijven dicht; geen merge/deployment, nieuwe worker of kosten.
+Productie voert de huidige rollen nog in de bestaande webservice uit.

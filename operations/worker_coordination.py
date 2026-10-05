@@ -144,6 +144,15 @@ def _initialize(conn):
         CHECK(state IN ('reserved','observed','uncertain','released'))
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS jnp_exact_api_reservations_active ON jnp_exact_api_reservations(division,connection,reserved_at) WHERE state IN ('reserved','uncertain')")
+    conn.execute("""CREATE TABLE IF NOT EXISTS jnp_worker_writes (
+        operation_id UUID PRIMARY KEY, division INTEGER NOT NULL, role TEXT NOT NULL,
+        lease_id UUID NOT NULL, connection TEXT NOT NULL, method TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'unresolved',
+        admitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), settled_at TIMESTAMPTZ,
+        CHECK(state IN ('unresolved','settled')),
+        CHECK(method IN ('POST','PUT','DELETE'))
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS jnp_worker_writes_unresolved ON jnp_worker_writes(division,role) WHERE state='unresolved'")
 
 
 def lock(conn, division, scope):
@@ -168,6 +177,9 @@ def claim_role(conn, division, role, owner, *, lease_seconds=90, now=None):
             raise LeaseUnavailable("role_not_assigned")
         if active not in (None, owner) and until is not None and until > now:
             raise LeaseUnavailable("role_already_owned")
+        if conn.execute("SELECT 1 FROM jnp_worker_writes WHERE division=%s AND role=%s AND state='unresolved' LIMIT 1",
+                        (division, role)).fetchone():
+            raise LeaseUnavailable("role_write_requires_review")
         conn.execute("""UPDATE jnp_worker_roles SET active_owner=%s,lease_id=%s,
             lease_until=%s,heartbeat_at=%s,draining=FALSE,status='starting',detail='{}',updated_at=%s
             WHERE division=%s AND role=%s""",
@@ -306,6 +318,8 @@ def status_snapshot(conn, division):
     budgets = conn.execute("""SELECT connection,daily_limit,daily_remaining,daily_reset_ms,
         minute_limit,minute_remaining,minute_reset_ms,observed_at
         FROM jnp_exact_api_budget WHERE division=%s ORDER BY connection""", (division,)).fetchall()
+    blocked = dict(conn.execute("""SELECT role,COUNT(*) FROM jnp_worker_writes
+        WHERE division=%s AND state='unresolved' GROUP BY role""", (division,)).fetchall())
     now = utcnow()
     owner_label = lambda value: hashlib.sha256(value.encode()).hexdigest()[:12] if value else None
     return {
@@ -313,7 +327,8 @@ def status_snapshot(conn, division):
                    "lease_until": r[3].isoformat() if r[3] else None,
                    "heartbeat_at": r[4].isoformat() if r[4] else None,
                    "draining": r[5], "status": r[6], "detail": r[7],
-                   "lease_live": bool(r[3] and r[3] > now)} for r in roles],
+                   "lease_live": bool(r[3] and r[3] > now),
+                   "unresolved_writes": blocked.get(r[0], 0)} for r in roles],
         "api_budgets": [{"connection": r[0], "daily_limit": r[1], "daily_remaining": r[2],
                          "daily_reset_ms": r[3], "minute_limit": r[4], "minute_remaining": r[5],
                          "minute_reset_ms": r[6], "observed_at": r[7].isoformat() if r[7] else None}
@@ -422,13 +437,15 @@ async def budgeted_http(app, role, method, send, *, priority="routine", floor=20
     and therefore always use the shared budget in production.
     """
     database_url, division, connection = application_budget_identity(app)
+    from operations.worker_write_fence import fenced_send, validate_context
+    validate_context(database_url, division)
     if not database_url:
         return await send()
     reservation = await asyncio.to_thread(
         _budget_database_call, database_url, reserve_request,
         division, connection, role, method, priority=priority, floor=floor)
     try:
-        response = await send()
+        response = await fenced_send(database_url, division, connection, method, send)
     except BaseException:
         try:
             await asyncio.to_thread(

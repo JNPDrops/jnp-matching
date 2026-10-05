@@ -44,6 +44,7 @@ async def run(role):
     # Importing the app does not enter its FastAPI lifespan.
     from app import main as app_module
     from operations.worker_coordination import DurableRoleLease
+    from operations.worker_write_fence import owner_scope
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed = []
@@ -55,7 +56,8 @@ async def run(role):
             loop.add_signal_handler(signum, stop.set)
             installed.append(signum)
         await lease.start()
-        await runtime.start()
+        with owner_scope(lease):
+            await runtime.start()
         # One-shot historical tasks are not automatically restarted here.
         # Task-specific drain/ownership must be implemented before gates open.
         await wait_for_stop(runtime, stop, lease.lost)

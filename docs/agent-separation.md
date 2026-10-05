@@ -665,3 +665,10 @@ De GitHub-workflow voert deze suites en de echte PostgreSQL-proeven samen uit me
 uitsluitend tijdelijke synthetische data. Controleer vóór samenvoegen de actuele
 head, de testuitkomst en de veilige eerste productieoverdracht. De uitrolgrens uit
 het eerste onderdeel blijft gelden; er zijn nog geen zelfstandige workers live.
+
+
+Vastgelegde codecommit tweede onderdeel: `f0c382dbb18db12afd1daa2315a1327e8a4630fd`
+(`feat: separate Woo rule worker with durable ownership and audited writes`).
+Alle 251 lokale tests en beide Blueprint-schema-validaties hierboven betreffen
+precies deze code. Een volgende uitsluitend documentaire checkpointcommit wijzigt
+de runtime niet. De head-tests in GitHub moeten nog worden gecontroleerd.

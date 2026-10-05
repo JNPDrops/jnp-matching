@@ -1,8 +1,8 @@
 # Opsplitsing van JNP-agents — uitvoeringsdossier
 
 Status: gedeelde basis en alle zeven achtergrondrollen gebouwd in concept-PR #82:
-routering, Woo-bankregels, tax, maintenance, Fibonatix, ICEPAY en leesrapporten. Databasevalidatie en veilige eerste productieoverdracht staan nog
-open; niet samengevoegd of uitgerold. Geen workers aangemaakt of geactiveerd.
+routering, Woo-bankregels, tax, maintenance, Fibonatix, ICEPAY en leesrapporten. Databasevalidatie is geslaagd op 6 oktober 01:03 CEST; de veilige eerste
+productieoverdracht staat nog open. Niet samengevoegd of uitgerold. Geen workers aangemaakt of geactiveerd.
 Opdracht: gebruiker heeft op 5 oktober 2026 rond 00:09 Europe/Amsterdam toestemming
 gegeven om de agents en modules afzonderlijk in te richten en hier vannacht aan te werken.
 Deze toestemming omvat benodigde infrastructuur voor de opsplitsing, maar verandert
@@ -865,3 +865,22 @@ als live opgesplitste verwerking of een generieke PSP-import voor nieuwe periode
 Resterend vóór live: echte databaseproeven, bewezen eerste drain, geteste gate-open-
 commit, merge/handmatige webdeployment, echte Render-workeractivatie en gecontroleerde
 overdracht per rol. Productie blijft intussen bij de bestaande webservice.
+
+## Operationeel checkpoint — 6 oktober 2026, circa 01:04 CEST
+
+Zie `docs/night-processing-2026-10-06.md` voor actuele status en uitvoeringsgrenzen.
+Main/live en de beide services zijn ongewijzigd. De routering is enabled/watching,
+Allocation verbonden en heeft nog API-ruimte; er is geen tweede router gestart.
+De oude financiële HTTP-flags zijn false, maar een complete drain is niet bewezen.
+Nieuwe PSP-bronnen, imports of afletteringen zijn in deze controle niet uitgevoerd:
+private databasebereikbaarheid en een toegestane interne uitvoeringsroute ontbreken;
+bestaande expirerend beveiligde PSP-taken zijn niet blind hergebruikt.
+
+**Nieuwe bewezen voortgang:** de eenmalig herstarte GitHub workflow 37372650914,
+attempt 2/job 112019986193, is geslaagd voor codecommit
+`e9086e9fe984596b0a039fe1e04ca9e831cd1051`.
+439 tests geslaagd, nul skips, inclusief alle 21 echte PostgreSQL-proeven.
+De eerdere queued/cancelled-status is hiermee vervangen door een geslaagde
+run. Geen gates geopend: de gebruiker vereist daarnaast bewezen eerste drain
+vóór gate-open, merge of deployment. Een documentatiecheckpoint verandert de
+geteste runtime niet. Geen geheimen of individuele financiële gegevens in Git.

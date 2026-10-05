@@ -52,7 +52,7 @@ class MaintenanceAPI(woo.ExactAPI):
         self.post_count = 0
 
     async def request(self, method, url, params=None, payload=None):
-        if task_drain.requested() and not audit_metadata():
+        if task_drain.requested() and not audit_metadata().get('worker_operation_id'):
             raise MaintenanceDrained()
         p = urlparse(url)
         prefix = f'/api/v1/{m.DIVISION}/'

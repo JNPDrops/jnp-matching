@@ -18,7 +18,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             async def task(*args):
                 seen.append((spec.name, args))
                 try:
-                    if spec.role in {"routing", "woo-rules", "tax", "maintenance"}:
+                    if spec.role in {"routing", "woo-rules", "tax", "maintenance", "fibonatix"}:
                         from operations.task_drain import wait
                         await wait(3600)
                     else:
@@ -30,7 +30,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = BackgroundTasks(app, resolver=resolver)
         await runtime.start()
         await asyncio.sleep(0)
-        self.assertEqual(len(seen), 12)
+        self.assertEqual(len(seen), len(TASKS))
         self.assertEqual(seen, [(spec.name, (app,) if spec.with_app else ()) for spec in TASKS])
         with self.assertRaisesRegex(RuntimeError, "already_started"):
             await runtime.start()
@@ -62,7 +62,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 if spec.name == "debtor-routing":
                     raise ValueError("SENSITIVE_PROVIDER_BODY")
                 try:
-                    if spec.role in {"woo-rules", "tax", "maintenance"}:
+                    if spec.role in {"woo-rules", "tax", "maintenance", "fibonatix"}:
                         from operations.task_drain import wait
                         await wait(3600)
                     else:
@@ -76,7 +76,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         with self.assertLogs("uvicorn.error", level="ERROR") as messages:
             await runtime.stop()
-        self.assertEqual(len(stopped), 11)
+        self.assertEqual(len(stopped), len(TASKS)-1)
         self.assertNotIn("SENSITIVE_PROVIDER_BODY", str(messages.output))
         self.assertIn("ValueError", str(messages.output))
 

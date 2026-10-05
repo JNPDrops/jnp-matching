@@ -34,3 +34,4 @@ jobs:
       - run: python -m unittest discover -s tests -q
       - run: python -m unittest operations.test_automatic_debtor_routing operations.test_routing_transport operations.test_customer_only_routing operations.test_source_order_policy operations.test_allocation_connection -q
       - run: python -m pytest operations/test_woo_iban_rules.py operations/test_tax_ledger_routing.py operations/test_tax_reference.py operations/test_tax_allocation.py operations/test_allocation_maintenance.py operations/test_bank_resolution.py -q
+      - run: python -m pytest operations/test_fibonatix_import.py operations/test_strict_order_matching.py -q

@@ -27,6 +27,7 @@ TASKS = (
     TaskSpec("debtor-routing", "routing", "operations.automatic_debtor_routing", "serve", True, True),
     TaskSpec("woo-bank-rules", "woo-rules", "operations.woo_iban_rules", "serve", True, True),
     TaskSpec("tax-rules", "tax", "operations.tax_agent", "serve", True, True),
+    TaskSpec("fibonatix-jobs", "fibonatix", "operations.fibonatix_jobs", "serve", True, True),
     TaskSpec("bank-maintenance", "maintenance", "operations.allocation_maintenance", "serve", True, True),
     TaskSpec("fibonetics-report", "reports", "operations.fibonetics_read_report", "run", True),
     TaskSpec("recent-import-report", "reports", "operations.recent_import_read_report", "run", True),
@@ -55,6 +56,7 @@ ROLE_BLOCKERS["routing"] = ("routing_handover_postgres_pending",)
 ROLE_BLOCKERS["woo-rules"] = ("woo_rules_handover_postgres_pending",)
 ROLE_BLOCKERS["tax"] = ("tax_handover_postgres_pending",)
 ROLE_BLOCKERS["maintenance"] = ("maintenance_handover_postgres_pending",)
+ROLE_BLOCKERS["fibonatix"] = ("fibonatix_handover_postgres_pending",)
 
 
 class SeparationNotReady(RuntimeError):
@@ -94,7 +96,7 @@ class BackgroundTasks:
         self.specs = task_specs(role)
         self.resolver = resolver
         self.tasks = {}
-        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules", "tax", "maintenance")}
+        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules", "tax", "maintenance", "fibonatix")}
         self.routing_stop = self.owned_stops["routing"]
         self.started = False
 

@@ -15,6 +15,7 @@ from operations import worker_coordination as c
 
 _owner = ContextVar('jnp_write_owner', default=None)
 _operation = ContextVar('jnp_write_operation', default=None)
+_job = ContextVar('jnp_worker_job', default=None)
 
 
 class WriteFenced(c.CoordinationError):
@@ -46,9 +47,28 @@ def validate_context(database_url, division):
         raise WriteFenced('worker_connection_scope_mismatch')
 
 
+def current_owner():
+    return _owner.get()
+
+
+@contextmanager
+def job_scope(job_id):
+    token = _job.set(job_id)
+    try:
+        yield
+    finally:
+        _job.reset(token)
+
+
+def current_job():
+    return _job.get()
+
+
 def audit_metadata():
     operation = _operation.get()
-    return {'worker_operation_id': operation.operation_id} if operation is not None else {}
+    result = {'worker_operation_id': operation.operation_id} if operation is not None else {}
+    if _job.get(): result['worker_job_id'] = _job.get()
+    return result
 
 
 def admit_write(conn, operation, connection, method):
@@ -143,3 +163,19 @@ async def fenced_send(database_url, division, connection, method, send):
     response = await send()
     operation.acknowledged = 200 <= response.status_code < 300
     return response
+
+
+async def browser_save(app, role, save):
+    """Fence one UI save; the surrounding adapter must verify and persist outcome.
+
+    A completed click is not proof of bookkeeping. Only the outer operation's
+    successful business readback permits settlement of the admitted write.
+    """
+    from types import SimpleNamespace
+    lease = current_owner()
+    if lease is not None and lease.role != role:
+        raise WriteFenced('wrong_browser_write_role')
+    async def send():
+        await save()
+        return SimpleNamespace(status_code=200)
+    return await fenced_send(app.DATABASE_URL,app.DIVISION,'main','POST',send)

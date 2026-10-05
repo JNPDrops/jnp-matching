@@ -767,3 +767,38 @@ De actuele databasevalidatie staat nog open; alle uitvoergates blijven dicht.
 Nieuwe handleiding en Blueprint: docs/maintenance-worker-handover.md en
 render/maintenance-worker.yaml. Begrote extra compute $7/maand, nog geen kosten.
 Geen merge, deployment, infrastructuuraanmaak of financiële uitvoering in deze fase.
+
+
+Vierde onderdeel duurzaam vastgelegd in commit
+`73a0813ed018fe1b1a9381f88e33b7fb78ee16a3`.
+
+## Vijfde onderdeel, 5 oktober 2026 — Fibonatix en duurzame opdrachten
+
+HTTP-acties voor import/controle, strict matching en orderaudit worden naar een
+PostgreSQL-wachtrij geschreven; ze starten geen losse financiële webtaken meer.
+De nieuwe legacy-fibonatix/worker-fibonatix-supervisor verwerkt één opdracht per
+keer. Dubbele indiening, verlopen autorisatie, procesuitval en onzekere writes
+zijn expliciet afgevangen. Geen automatische retry van verlaten running-jobs.
+XML-import en iedere strict UI-save hebben een eigen write-intent met bestaande
+business-readback en opgeslagen bewijs vóór vrijgave. Er is geen nieuwe algemene
+matchingregel of vrijgave van oude Automatically/settle-acties.
+
+De bestaande FIBO-20260922-20261002-identiteit en EXPIRES blijven ongewijzigd.
+Die historische autorisatie is nu verlopen: deze migratie activeert haar niet
+opnieuw. Nieuwe periode-invoer/Paragon-transactie-extractie is geen bestaande
+algemene adapter en wordt niet als operationeel geclaimd.
+
+Nieuwe bestanden: operations/agent_jobs.py, operations/fibonatix_jobs.py,
+render/fibonatix-worker.yaml en docs/fibonatix-worker-handover.md.
+Gemeenschappelijke GET-budgetten worden toegerekend aan de daadwerkelijke owner;
+UI-opslag heeft gedeelde eigenaarscontrole en telt niet als een REST-aanvraag.
+Dashboardstatus toont ook aantallen queued/running/blocked/uncertain opdrachten.
+Drie extra PostgreSQL-tests controleren idempotentie, één claim, verloren proces,
+autorisatieverval en pauze. Een oude importtest verwacht nu expliciet de fout bij
+onbevestigde teruglezing en blijft bewijzen dat exact één POST is uitgevoerd.
+Alleen synthetische tests; geen Exact- of PSP-opdracht live uitgevoerd.
+
+Vijfde onderdeel lokaal: `pytest tests operations/test_fibonatix_import.py
+operations/test_strict_order_matching.py operations/test_source_order_policy.py -q`:
+**203 passed, 19 skipped**. De 19 overgeslagen proeven vereisen een geïsoleerde
+PostgreSQL-database. Geen execution-gate geopend en geen productie gewijzigd.

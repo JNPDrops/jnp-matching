@@ -322,6 +322,11 @@ def status_snapshot(conn, division):
         FROM jnp_exact_api_budget WHERE division=%s ORDER BY connection""", (division,)).fetchall()
     blocked = dict(conn.execute("""SELECT role,COUNT(*) FROM jnp_worker_writes
         WHERE division=%s AND state='unresolved' GROUP BY role""", (division,)).fetchall())
+    job_counts = {}
+    if conn.execute("SELECT to_regclass('jnp_agent_jobs')").fetchone()[0]:
+        for role, state, count in conn.execute("""SELECT role,state,COUNT(*) FROM jnp_agent_jobs
+            WHERE division=%s GROUP BY role,state""", (division,)).fetchall():
+            job_counts.setdefault(role,{})[state] = count
     now = utcnow()
     owner_label = lambda value: hashlib.sha256(value.encode()).hexdigest()[:12] if value else None
     return {
@@ -329,16 +334,18 @@ def status_snapshot(conn, division):
                    "execution_location": {"legacy-routing": "web", "worker-routing": "worker",
                        "legacy-woo-rules": "web", "worker-woo-rules": "worker",
                        "legacy-tax": "web", "worker-tax": "worker",
-                       "legacy-maintenance": "web", "worker-maintenance": "worker"}.get(r[2]),
+                       "legacy-maintenance": "web", "worker-maintenance": "worker",
+                       "legacy-fibonatix": "web", "worker-fibonatix": "worker"}.get(r[2]),
                    "desired_location": {"legacy-routing": "web", "worker-routing": "worker",
                        "legacy-woo-rules": "web", "worker-woo-rules": "worker",
                        "legacy-tax": "web", "worker-tax": "worker",
-                       "legacy-maintenance": "web", "worker-maintenance": "worker"}.get(r[1]),
+                       "legacy-maintenance": "web", "worker-maintenance": "worker",
+                       "legacy-fibonatix": "web", "worker-fibonatix": "worker"}.get(r[1]),
                    "lease_until": r[3].isoformat() if r[3] else None,
                    "heartbeat_at": r[4].isoformat() if r[4] else None,
                    "draining": r[5], "status": r[6], "detail": r[7],
                    "lease_live": bool(r[3] and r[3] > now),
-                   "unresolved_writes": blocked.get(r[0], 0)} for r in roles],
+                   "unresolved_writes": blocked.get(r[0], 0), "jobs": job_counts.get(r[0], {})} for r in roles],
         "api_budgets": [{"connection": r[0], "daily_limit": r[1], "daily_remaining": r[2],
                          "daily_reset_ms": r[3], "minute_limit": r[4], "minute_remaining": r[5],
                          "minute_reset_ms": r[6], "observed_at": r[7].isoformat() if r[7] else None}
@@ -448,8 +455,11 @@ async def budgeted_http(app, role, method, send, *, priority="routine", floor=20
     and therefore always use the shared budget in production.
     """
     database_url, division, connection = application_budget_identity(app)
-    from operations.worker_write_fence import fenced_send, validate_context
+    from operations.worker_write_fence import fenced_send, validate_context, current_owner
     validate_context(database_url, division)
+    owner = current_owner()
+    if owner is not None:
+        role = owner.role
     if not database_url:
         return await send()
     reservation = await asyncio.to_thread(

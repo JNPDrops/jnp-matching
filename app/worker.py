@@ -49,6 +49,10 @@ async def run(role):
         return await run_woo_rules(app_module)
     if role == 'tax':
         return await run_tax(app_module)
+    if role == 'fibonatix':
+        from operations.fibonatix_jobs import serve
+        from operations.assigned_role import owner_for, supervise
+        return await run_supervisor(app_module, supervise, owner_for(role, 'worker'), serve, role=role)
     if role == 'maintenance':
         from operations.allocation_maintenance import serve
         from operations.assigned_role import owner_for, supervise

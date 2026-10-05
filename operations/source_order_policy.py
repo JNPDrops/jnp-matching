@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from operations import fibonatix_import as legacy
+from operations.worker_write_fence import current_job
 
 POLICY = 'same_source_order_required_20261004_2145_CEST'
 ARTIFACT = 'order_match_audit'
@@ -61,6 +62,7 @@ async def audit():
     try:
         locked=conn.execute('SELECT pg_try_advisory_lock(%s)',(legacy.LOCK,)).fetchone()[0]
         if not locked:
+            if current_job(): raise HTTPException(409,'job_already_running')
             return
         legacy.update(running=True,action='audit_order_matches',last_error=None)
         lines=await legacy.ledger()
@@ -76,6 +78,7 @@ async def audit():
         raise
     except Exception as exc:
         if locked: legacy.update(phase='order_match_audit_failed',last_error=type(exc).__name__)
+        if current_job(): raise
     finally:
         if locked:
             legacy.update(running=False)
@@ -94,10 +97,6 @@ async def policy(request:Request):
 @router.post('/audit_order_matches')
 async def start_audit(request:Request):
     legacy.authorize(request)
-    legacy.state()
-    if any(not t.done() for t in legacy.TASKS):
-        raise HTTPException(409,'job_already_running')
-    task=asyncio.create_task(audit())
-    legacy.TASKS.add(task)
-    task.add_done_callback(legacy.TASKS.discard)
-    return {'accepted':True,'read_only':True,'policy':POLICY}
+    from operations.fibonatix_jobs import submit
+    job=submit(request,'audit_order_matches')
+    return {'accepted':True,'read_only':True,'policy':POLICY,**job}

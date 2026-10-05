@@ -831,3 +831,37 @@ probe-identiteit en financiële schrijfweigering. Eén nieuwe PostgreSQL-test
 controleert dat voltooide rapporten niet opnieuw worden opgepakt na overdracht.
 Die 21 PostgreSQL-tests zijn lokaal niet uitgevoerd; dit is geen geslaagde
 productievalidatie. Dashboard-login, administratierechten en CSRF-tests slagen.
+
+## Gezamenlijke afronding van de codefases — 5 oktober 2026, 22:53 CEST
+
+- Rapportfase vastgelegd als `4bb8ef69f1e1f949d72ee26b27c7d3b1f97f2690`.
+- De parallel toegevoegde CI-correctie `1e8dcf4a072f300e0ca312ed49284dce51b04980`
+  is behouden. De rapportcommit is daarop opnieuw gebouwd; geen force-push of
+  overschrijving. Die correctie voorkomt dubbele push-/PR-workflowstarts.
+- Alle zeven afzonderlijke worker-Blueprints en de bijgewerkte referentiecatalogus
+  voldoen aan het officiële Render-JSON-schema. Het oude root-render.yaml is
+  ongemoeid gelaten. Kosten en exacte één-voor-één stappen staan in
+  `docs/agent-separation-activation.md`.
+- De actuele HTTP-inventaris staat in `docs/agent-http-entrypoints.md`. Fibonatix-
+  starts gebruiken de databasequeue, Woo de bestaande HMAC-queue. Twee legacy
+  directe schrijfknoppen moeten vóór de eerste productieoverdracht aantoonbaar
+  uitgeschakeld en gedraind zijn; ze zijn niet als veilig voor parallelle workers
+  aangemerkt. Dashboardbeslissingen zijn alleen dossierwijzigingen.
+- Runtime-gates benoemen nu ook expliciet `initial_legacy_web_drain_pending`,
+  naast de per-rol PostgreSQL-validatie. Geen env-override of vroege activering.
+- Gezamenlijke lokale suite (tests plus de 16 relevante operations-testmodules
+  uit de workflow): **418 passed, 21 skipped**, 74 subtests. Alle 21 skips zijn
+  expliciete geïsoleerde PostgreSQL-proeven; lokaal is geen server beschikbaar.
+  Eén bestaande Starlette-deprecatiewaarschuwing, geen nieuwe testfouten in deze
+  suite. De vier oudere ICEPAY-breedtesuiteproblemen staan hierboven apart.
+- Main bij eindcontrole `b7fd86c3dbe369b630e8f8a0367c22837015b178`. Productie nog
+  `cf75100f845d1296eaaa60f85225caf3c656e4f2`, deployment
+  `dep-db1ebv6gekts73dec350` live. Geen nieuwe deployment gestart, geen stop,
+  geen worker aangemaakt, geen boekhouding gewijzigd. GitHub-databasetests van
+  de nieuwe commits stonden queued; geen geslaagde actuele PostgreSQL-run claimen.
+
+De codeopdeling van de zeven achtergrondrollen is voorbereid. Dit is niet hetzelfde
+als live opgesplitste verwerking of een generieke PSP-import voor nieuwe perioden.
+Resterend vóór live: echte databaseproeven, bewezen eerste drain, geteste gate-open-
+commit, merge/handmatige webdeployment, echte Render-workeractivatie en gecontroleerde
+overdracht per rol. Productie blijft intussen bij de bestaande webservice.

@@ -34,26 +34,16 @@ TASKS = (
 )
 ROLES = ("web", "routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay", "reports")
 
-# Remove these gates only as the corresponding handover requirements are proven.
-# There is intentionally no environment-variable override for premature splitting.
-# PostgreSQL process tests passed in GitHub run 37285557409 (2026-10-05).
-# The legacy web process still needs the same ownership and write fencing.
-COMMON_BLOCKERS = ("legacy_role_ownership_pending", "lease_write_fencing_pending",
-                   "verified_drain_pending")
+# All background roles now use shared ownership and write admission. These are
+# operational gates, not an environment-switch to bypass missing validation.
+# Initial legacy production has none of these claims: bootstrapping still needs
+# a proven stop/drain of *all* financial entrypoints before deployment.
+COMMON_BLOCKERS = ("initial_legacy_web_drain_pending",)
 ROLE_BLOCKERS = {
-    role: COMMON_BLOCKERS + (("http_job_queue_pending",) if role in {"web", "fibonatix"} else ())
-    for role in ROLES
+    role: COMMON_BLOCKERS + (role.replace('-', '_') + "_handover_postgres_pending",)
+    for role in ROLES if role != "web"
 }
-
-# Routing ownership, fencing and drain are implemented; require the new
-# PostgreSQL handover suite before enabling this first standalone role.
-ROLE_BLOCKERS["routing"] = ("routing_handover_postgres_pending",)
-ROLE_BLOCKERS["woo-rules"] = ("woo_rules_handover_postgres_pending",)
-ROLE_BLOCKERS["tax"] = ("tax_handover_postgres_pending",)
-ROLE_BLOCKERS["maintenance"] = ("maintenance_handover_postgres_pending",)
-ROLE_BLOCKERS["fibonatix"] = ("fibonatix_handover_postgres_pending",)
-ROLE_BLOCKERS["icepay"] = ("icepay_handover_postgres_pending",)
-ROLE_BLOCKERS["reports"] = ("reports_handover_postgres_pending",)
+ROLE_BLOCKERS["web"] = COMMON_BLOCKERS + ("manual_http_write_queue_or_disable_pending",)
 
 
 class SeparationNotReady(RuntimeError):

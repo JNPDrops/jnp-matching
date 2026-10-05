@@ -22,6 +22,9 @@ class WorkerStatusTests(unittest.TestCase):
         assert.ok(expired.includes('Geen actuele heartbeat'));assert.ok(!expired.includes('Actief taakbezit'));
         const uncertain=testUI.status({available:true,roles:[{...base,unresolved_writes:1}]});
         assert.ok(uncertain.includes('onzekere schrijfpoging'));assert.ok(!uncertain.includes('Actief taakbezit'));
+        assert.ok(testUI.status({available:true,roles:[{...base,role:'reports'}]}).includes('Leesrapporten en probes'));
+        const interrupted=testUI.status({available:true,roles:[{...base,jobs:{uncertain:1}}]});
+        assert.ok(interrupted.includes('onderbroken opdracht'));assert.ok(!interrupted.includes('Actief taakbezit'));
         assert.ok(testUI.status({available:true,roles:[{...base,role:'<script>test</script>'}]}).includes('&lt;script&gt;'));
         """
         result=subprocess.run(['node','-e',harness],capture_output=True,text=True)

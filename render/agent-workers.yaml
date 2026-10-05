@@ -1,6 +1,6 @@
-# Prepared worker Blueprint for the guarded agent-separation handover.
-# Do not apply until the PostgreSQL process tests and per-role drain are proven.
-# The existing root render.yaml is legacy Docker configuration and is unrelated.
+# Reference catalogue only: activate one reviewed role at a time.
+# Do not bulk-apply; expired historical PSP/report jobs do not justify paid workers.
+# Individual worker files are the deployment units. Root render.yaml remains legacy.
 services:
   - type: worker
     name: jnp-routing-worker
@@ -95,7 +95,6 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
       - key: SESSION_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
-
   - type: worker
     name: jnp-maintenance-worker
     runtime: python
@@ -125,7 +124,43 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
       - key: SESSION_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
-
+      - key: METORIK_API_KEY
+        fromService: {name: jnp-matching, type: web, envVarKey: METORIK_API_KEY}
+  - type: worker
+    name: jnp-fibonatix-worker
+    runtime: python
+    repo: https://github.com/JNPDrops/jnp-matching
+    branch: main
+    plan: 1c-2g
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt && python -m playwright install chromium --only-shell
+    startCommand: python -m app.worker --role fibonatix
+    autoDeployTrigger: 'off'
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: DATABASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: DATABASE_URL}
+      - key: EXACT_BASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
+      - key: EXACT_DIVISION
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: COLLECTIVE_DEBTOR_CODE
+        fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
+      - key: EXACT_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_ID}
+      - key: EXACT_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_SECRET}
+      - key: EXACT_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_REDIRECT_URI}
+      - key: EXACT_WEB_USERNAME
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_USERNAME}
+      - key: EXACT_WEB_PASSWORD
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_PASSWORD}
+      - key: EXACT_WEB_TOTP_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_TOTP_SECRET}
+      - key: METORIK_API_KEY
+        fromService: {name: jnp-matching, type: web, envVarKey: METORIK_API_KEY}
   - type: worker
     name: jnp-icepay-worker
     runtime: python
@@ -145,19 +180,32 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
       - key: EXACT_DIVISION
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: COLLECTIVE_DEBTOR_CODE
+        fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
       - key: EXACT_CLIENT_ID
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_ID}
       - key: EXACT_CLIENT_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_SECRET}
       - key: EXACT_REDIRECT_URI
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_REDIRECT_URI}
+      - key: EXACT_WEB_USERNAME
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_USERNAME}
+      - key: EXACT_WEB_PASSWORD
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_PASSWORD}
+      - key: EXACT_WEB_TOTP_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_TOTP_SECRET}
       - key: ICEPAY_WEB_USERNAME
         fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_USERNAME}
       - key: ICEPAY_WEB_PASSWORD
         fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_PASSWORD}
       - key: ICEPAY_WEB_TOTP_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_TOTP_SECRET}
-
+      - key: ICEPAY_FETCH_PROBE_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_FETCH_PROBE_ID}
+      - key: ICEPAY_TRANSACTION_TASK_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_TRANSACTION_TASK_ID}
+      - key: ICEPAY_MATCH_TASK_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_MATCH_TASK_ID}
   - type: worker
     name: jnp-reports-worker
     runtime: python
@@ -179,27 +227,35 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
       - key: COLLECTIVE_DEBTOR_CODE
         fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
-      - key: EXACT_ALLOCATION_CLIENT_ID
-        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
-      - key: EXACT_ALLOCATION_CLIENT_SECRET
-        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
-      - key: EXACT_ALLOCATION_REDIRECT_URI
-        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
-      - key: SESSION_SECRET
-        fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
-      - key: METORIK_API_KEY
-        fromService: {name: jnp-matching, type: web, envVarKey: METORIK_API_KEY}
+      - key: EXACT_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_ID}
+      - key: EXACT_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_SECRET}
+      - key: EXACT_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_REDIRECT_URI}
       - key: EXACT_WEB_USERNAME
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_USERNAME}
       - key: EXACT_WEB_PASSWORD
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_PASSWORD}
       - key: EXACT_WEB_TOTP_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_TOTP_SECRET}
-      - key: PARAGON_EMAIL
-        fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_EMAIL}
+      - key: METORIK_API_KEY
+        fromService: {name: jnp-matching, type: web, envVarKey: METORIK_API_KEY}
+      - key: EXACT_ALLOCATION_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
+      - key: EXACT_ALLOCATION_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
       - key: PARAGON_USERNAME
         fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_USERNAME}
       - key: PARAGON_PASSWORD
         fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_PASSWORD}
       - key: PARAGON_TOTP_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_TOTP_SECRET}
+      - key: PARAGON_LOGIN_PROBE_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_LOGIN_PROBE_ID}
+      - key: EXACT_LOGIN_PROBE_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_LOGIN_PROBE_ID}
+      - key: PARAGON_EMAIL
+        fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_EMAIL}
+      - key: EXACT_ALLOCATION_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}

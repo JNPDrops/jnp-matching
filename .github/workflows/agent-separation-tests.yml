@@ -1,7 +1,8 @@
 name: Agent separation tests
 on:
+  # Pull requests cover development pushes; main covers merged changes.
   push:
-    branches: [refactor/agent-separation]
+    branches: [main]
   pull_request:
     branches: [main]
 permissions:

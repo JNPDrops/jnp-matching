@@ -7,7 +7,7 @@ from operations.assigned_role import owner_for
 
 class AgentControlTests(unittest.TestCase):
     def test_only_selected_role_assignment_is_changed(self):
-        for role in ('routing','woo-rules','tax'):
+        for role in ('routing','woo-rules','tax','maintenance'):
             for action in ('status','to-web','to-worker','pause'):
                 with self.subTest(role=role,action=action):
                     conn=MagicMock()

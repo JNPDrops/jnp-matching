@@ -5,7 +5,7 @@ from operations import task_drain
 from operations import worker_coordination as c
 from operations.worker_write_fence import owner_scope
 
-ROLES = frozenset({'routing', 'woo-rules', 'tax'})
+ROLES = frozenset({'routing', 'woo-rules', 'tax', 'maintenance'})
 DRAIN_SECONDS = 240
 
 

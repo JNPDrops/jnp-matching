@@ -1,0 +1,33 @@
+# Fourth worker only; follow docs/maintenance-worker-handover.md.
+services:
+  - type: worker
+    name: jnp-maintenance-worker
+    runtime: python
+    repo: https://github.com/JNPDrops/jnp-matching
+    branch: main
+    plan: 0.5c-512mb
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.worker --role maintenance
+    autoDeployTrigger: 'off'
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: DATABASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: DATABASE_URL}
+      - key: EXACT_BASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
+      - key: EXACT_DIVISION
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: COLLECTIVE_DEBTOR_CODE
+        fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
+      - key: EXACT_ALLOCATION_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
+      - key: EXACT_ALLOCATION_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
+      - key: EXACT_ALLOCATION_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
+      - key: SESSION_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
+      - key: METORIK_API_KEY
+        fromService: {name: jnp-matching, type: web, envVarKey: METORIK_API_KEY}

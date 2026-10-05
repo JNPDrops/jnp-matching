@@ -54,6 +54,7 @@ ROLE_BLOCKERS = {
 ROLE_BLOCKERS["routing"] = ("routing_handover_postgres_pending",)
 ROLE_BLOCKERS["woo-rules"] = ("woo_rules_handover_postgres_pending",)
 ROLE_BLOCKERS["tax"] = ("tax_handover_postgres_pending",)
+ROLE_BLOCKERS["maintenance"] = ("maintenance_handover_postgres_pending",)
 
 
 class SeparationNotReady(RuntimeError):
@@ -93,7 +94,7 @@ class BackgroundTasks:
         self.specs = task_specs(role)
         self.resolver = resolver
         self.tasks = {}
-        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules", "tax")}
+        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules", "tax", "maintenance")}
         self.routing_stop = self.owned_stops["routing"]
         self.started = False
 

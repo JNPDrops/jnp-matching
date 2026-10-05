@@ -746,3 +746,24 @@ Vastgelegde codecommit derde onderdeel: `87576b263e2ca745ad6d0e211776f1576678b1d
 De 311 lokale tests en drie Blueprint-schema-validaties hierboven betreffen deze
 code. De nieuwe actuele CI-run moet nog worden uitgevoerd/gecontroleerd; de
 PostgreSQL- en uitrolgates blijven dicht. Deze checkpointaanvulling wijzigt geen runtime.
+
+
+## Vierde onderdeel, 5 oktober 2026 — maintenance
+
+Startpunt 508cdc86206fb7d98fd6fe213d8206c86525ffea. Main b7fd86c en live cf75100
+zijn opnieuw gecontroleerd en ongewijzigd; de vorige GitHub-runs staan queued.
+Maintenance is nu een toegewezen rol met headless supervisor, drain, per-write
+controle en `jnp_maintenance_rule_attempts`. Alle bestaande POSTs en cleanup-
+DELETEs worden bevestigd en geaudit vóór vrijgave. De werkvoorraad en statussen
+blijven duurzaam; onvolledige scans vervangen geen volledig dashboardoverzicht.
+De functionaliteit, bewijsregels en functionele pauzes blijven behouden. Een oude
+instructie in nieuwe regelvoorstellen verwees naar de inmiddels verboden
+Automatically-route; die verwijst nu naar beoordeling van de eigen order/factuur.
+
+Lokale gecombineerde pytest-suite: 304 passed, 15 skipped vóór toevoeging van
+één extra PostgreSQL-proef voor maintenance. Die extra proef verifieert de echte
+operation-/write-auditkoppeling, overnameblokkade en onafhankelijkheid van tax.
+De actuele databasevalidatie staat nog open; alle uitvoergates blijven dicht.
+Nieuwe handleiding en Blueprint: docs/maintenance-worker-handover.md en
+render/maintenance-worker.yaml. Begrote extra compute $7/maand, nog geen kosten.
+Geen merge, deployment, infrastructuuraanmaak of financiële uitvoering in deze fase.

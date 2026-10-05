@@ -139,3 +139,33 @@ class TaxDatabaseTests(unittest.TestCase):
             self.assertEqual(saved[0],cursor)
             self.assertEqual(saved[1]['state'],'draining')
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM jnp_tax_rules').fetchone()[0],0)
+
+    def test_maintenance_audits_and_role_handover_use_same_single_writer_contract(self):
+        from operations import maintenance_write_operations as write
+        with self.database() as (dsn,conn):
+            conn.execute('CREATE TABLE jnp_woo_iban_events(rule_id UUID)')
+            maintenance.initialize(conn)
+            roles.initialize_assignment(conn,3977752,'maintenance')
+            epoch=c.claim_role(conn,3977752,'maintenance','legacy-maintenance',require_assigned=True)
+            lease=SimpleNamespace(database_url=dsn,division=3977752,role='maintenance',
+                owner='legacy-maintenance',lease_id=epoch,lost=asyncio.Event(),_stop=asyncio.Event())
+            app=SimpleNamespace(DATABASE_URL=dsn,DIVISION=3977752)
+            send=AsyncMock(return_value=SimpleNamespace(status_code=201,headers={}))
+            async def request(method,*args,**kwargs):return await c.budgeted_http(app,'maintenance',method,send)
+            for words,confirmed in [('synthetic-first',True),('synthetic-second',False)]:
+                payload={**PAYLOAD,'Words':words}
+                conn.execute("INSERT INTO jnp_suspense_rules(words,payload,bank_line_id) VALUES(%s,%s::jsonb,%s)",
+                    (words,json.dumps(payload),str(uuid4())))
+                api=SimpleNamespace(allowed_posts={},request=request,
+                    rules=AsyncMock(return_value=[{**payload,'ID':str(uuid4())}] if confirmed else []))
+                with f.owner_scope(lease):
+                    if confirmed:asyncio.run(write.create_confirmed_rule(conn,api,payload))
+                    else:
+                        with self.assertRaises(write.RuleUnconfirmed):asyncio.run(write.create_confirmed_rule(conn,api,payload))
+            self.assertEqual(conn.execute('SELECT a.state,w.state FROM jnp_maintenance_rule_attempts a JOIN jnp_worker_writes w USING(operation_id) ORDER BY a.created_at').fetchall(),
+                [('confirmed','settled'),('uncertain','unresolved')])
+            roles.request_handover(conn,3977752,'maintenance','worker-maintenance')
+            c.release_role(conn,3977752,'maintenance','legacy-maintenance',epoch)
+            with self.assertRaisesRegex(c.LeaseUnavailable,'write_requires_review'):
+                c.claim_role(conn,3977752,'maintenance','worker-maintenance',require_assigned=True)
+            self.assertEqual(conn.execute("SELECT desired_owner FROM jnp_worker_roles WHERE role='tax'").fetchone(),('legacy-tax',))

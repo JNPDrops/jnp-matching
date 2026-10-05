@@ -20,6 +20,9 @@ from operations import tax_reference as tax, woo_iban_rules as woo
 from operations.tax_allocation import ROOT
 from operations import bank_resolution as resolution
 from operations.bank_review_dashboard import decorate
+from operations import task_drain, maintenance_write_operations as writes
+from operations.worker_write_fence import audit_metadata
+from operations.worker_coordination import BudgetDeferred
 from fastapi.responses import HTMLResponse, JSONResponse
 
 router = APIRouter()
@@ -36,6 +39,10 @@ PSP = re.compile(r'icepay|paynetics|fibonat|stripe|paypal|plisio|ninja|suap|myco
 BOSCI = re.compile(r'(?<![a-z0-9_])bosci_[a-f0-9]{29}(?:[a-f0-9]{3})?(?![a-z0-9_])', re.I)
 
 
+class MaintenanceDrained(Exception):
+    pass
+
+
 class MaintenanceAPI(woo.ExactAPI):
     def __init__(self, app, limits):
         super().__init__(app, role='maintenance', priority='routine', floor=200)
@@ -45,6 +52,8 @@ class MaintenanceAPI(woo.ExactAPI):
         self.post_count = 0
 
     async def request(self, method, url, params=None, payload=None):
+        if task_drain.requested() and not audit_metadata():
+            raise MaintenanceDrained()
         p = urlparse(url)
         prefix = f'/api/v1/{m.DIVISION}/'
         collection = p.path == urlparse(ROOT).path
@@ -223,6 +232,7 @@ def can_retire_payment(body, bank_rows, open_refs, now):
 
 
 def initialize(conn):
+    writes.initialize(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS jnp_allocation_maintenance (
         singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton), enabled BOOLEAN NOT NULL DEFAULT TRUE,
         next_scan TIMESTAMPTZ, next_cleanup TIMESTAMPTZ, cache JSONB, cache_at TIMESTAMPTZ,
@@ -336,16 +346,7 @@ async def create_rule(conn, api, item, payload):
                         or len(headers) != 1 or headers[0]['Currency'] != 'EUR'):
                     conn.execute("UPDATE jnp_suspense_rules SET state='source_changed' WHERE words=%s", (words,))
                     return 'source_changed'
-            conn.execute("UPDATE jnp_suspense_rules SET state='creating' WHERE words=%s", (words,))
-            api.allowed_posts[words] = payload
-            try:
-                await api.request('POST', ROOT, payload=payload)
-                check = [r for r in await api.rules() if signature(r) == signature(payload)]
-                state, rule_id = ('confirmed', check[0]['ID']) if len(check) == 1 else ('uncertain', None)
-            except Exception:
-                state = 'uncertain'
-            finally:
-                api.allowed_posts.pop(words, None)
+            return await writes.create_confirmed_rule(conn, api, payload)
     conn.execute('UPDATE jnp_suspense_rules SET state=%s,rule_id=%s WHERE words=%s', (state, rule_id, words))
     return state
 
@@ -355,10 +356,12 @@ async def cleanup(conn, api, recs, now, banks):
     preferred.update(str(r[0]) for r in conn.execute('SELECT rule_id FROM jnp_woo_iban_events WHERE rule_id IS NOT NULL').fetchall())
     cleaned = Counter()
     for duplicate, keeper in duplicates(await api.rules(), preferred)[:20]:
-        cleaned[await delete_rule(conn, api, duplicate, 'identical_duplicate', keeper['ID'])] += 1
+        if task_drain.requested(): return cleaned
+        cleaned[await writes.delete_confirmed_rule(conn, api, duplicate, 'identical_duplicate', keeper['ID'])] += 1
     open_refs = {str(r.get('YourRef') or '').strip().upper() for r in recs}
     old_jobs = conn.execute("SELECT event_id,body,rule_id FROM jnp_woo_iban_events WHERE state='done' AND rule_id IS NOT NULL AND rule_retired_at IS NULL").fetchall()
     for event_id, body, rule_id in old_jobs:
+        if task_drain.requested(): return cleaned
         if 'bank_reference' not in body or now.date() - tax.bank_date(body['payment_date']) < timedelta(days=90):
             continue
         words = woo.camt_words(body['bank_reference'])
@@ -370,12 +373,12 @@ async def cleanup(conn, api, recs, now, banks):
                       and not any(r.get(k) for k in ('GLAccount','AccountBankAccount','Costcenter','Costunit','VATCode'))
                       and r.get('Account') == matching[0]['Account']]
         if len(candidates) == 1:
-            state = await delete_rule(conn, api, candidates[0], 'bosci_allocated_invoice_closed_90_days')
+            checkpoint = lambda: conn.execute("UPDATE jnp_woo_iban_events SET rule_retired_at=NOW(),reason='Toegewezen betaling; factuur niet meer open; regel na 90 dagen gearchiveerd' WHERE event_id=%s", (event_id,))
+            state = await writes.delete_confirmed_rule(conn, api, candidates[0], 'bosci_allocated_invoice_closed_90_days', checkpoint=checkpoint)
             cleaned[state] += 1
-            if state == 'deleted':
-                conn.execute("UPDATE jnp_woo_iban_events SET rule_retired_at=NOW(),reason='Toegewezen betaling; factuur niet meer open; regel na 90 dagen gearchiveerd' WHERE event_id=%s", (event_id,))
     for words, payload, bank_id, rule_id, created_at in conn.execute(
             "SELECT words,payload,bank_line_id,rule_id,created_at FROM jnp_suspense_rules WHERE state='confirmed' AND rule_id IS NOT NULL").fetchall():
+        if task_drain.requested(): return cleaned
         if payload.get('GLAccount') or now - created_at < timedelta(days=90):
             continue  # Tax rules remain available for refunds and instalments.
         if any(words.lower() in str(b.get('Description') or '').lower() for b in banks):
@@ -389,10 +392,9 @@ async def cleanup(conn, api, recs, now, banks):
             continue
         found = [r for r in await api.rules() if str(r['ID']) == str(rule_id) and signature(r) == signature(payload)]
         if len(found) == 1:
-            state = await delete_rule(conn, api, found[0], 'transaction_assigned_90_days')
+            checkpoint = lambda: conn.execute("UPDATE jnp_suspense_rules SET state='retired' WHERE words=%s", (words,))
+            state = await writes.delete_confirmed_rule(conn, api, found[0], 'transaction_assigned_90_days', checkpoint=checkpoint)
             cleaned[state] += 1
-            if state == 'deleted':
-                conn.execute("UPDATE jnp_suspense_rules SET state='retired' WHERE words=%s", (words,))
     return cleaned
 
 
@@ -457,6 +459,8 @@ async def run(app, conn, api, now):
     reference_counts = Counter(x.get('reference') for x in items)
     created = Counter()
     for item in items:
+        if task_drain.requested():
+            raise MaintenanceDrained()
         payload = refund_proposals.get(item['bank_line_id'])
         if item['gl_account'] == '1360' and item.get('order_check') == 'verified':
             payload = payload or proposal(item, orders.get('#' + str(item.get('reference') or '')[2:]), reference_counts)
@@ -465,8 +469,8 @@ async def run(app, conn, api, now):
             created[state] += 1
             item.update(status='new_rule_' + state, payload=payload)
             if state == 'confirmed':
-                item.update(next_action='Pas de bevestigde toewijzingsregel toe via Automatically; controleer daarna aflettering',
-                    retry_when='na Automatically en nieuwe uitlezing', reason='Toewijzingsregel bevestigd; bankregel nog niet afgehandeld')
+                item.update(next_action='Beoordeel de bevestigde regel en de eigen order/factuur vóór afhandeling',
+                    retry_when='na ondersteunde afhandeling en nieuwe uitlezing', reason='Toewijzingsregel bevestigd; bankregel nog niet afgehandeld')
         item.update(decorate(item, now.isoformat()))
     # Publish a full snapshot together: interrupted scans leave the last full
     # worklist available, including the unresolved identities and instructions.
@@ -484,7 +488,7 @@ async def run(app, conn, api, now):
         conn.execute('DELETE FROM jnp_bank_identity_review WHERE NOT (cashflow_id = ANY(%s::uuid[]))', ([x['cashflow_id'] for x in unresolved],))
     next_cleanup = conn.execute('SELECT next_cleanup FROM jnp_allocation_maintenance').fetchone()[0]
     cleaned = Counter()
-    if not next_cleanup or now >= next_cleanup:
+    if not task_drain.requested() and (not next_cleanup or now >= next_cleanup):
         conn.execute('UPDATE jnp_allocation_maintenance SET next_cleanup=%s', (now + timedelta(days=1),))
         cleaned = await cleanup(conn, api, recs, now, banks)
     counts = Counter(x['status'] for x in items)
@@ -513,6 +517,7 @@ async def run(app, conn, api, now):
 
 
 async def cycle(app):
+    if task_drain.requested(): return
     if app.DIVISION != m.DIVISION or app.BASE_URL != m.BASE or not app.DATABASE_URL:
         STATUS['state'] = 'configuration_error'; return
     with app._db_connect() as conn:
@@ -529,10 +534,8 @@ async def cycle(app):
                 STATUS['state'] = 'paused'; return
             now = datetime.now(timezone.utc)
             if next_scan and now < next_scan and version == VERSION: return
-            from operations.automatic_debtor_routing import STATUS as ROUTING
-            limits = ROUTING.get('api_limits') or {}
-            if limits.get('remaining', 1000) < 400:
-                STATUS['state'] = 'waiting_for_budget'; return
+            # Every HTTP call reserves its quota in the shared database.
+            limits = {}
             for key in (woo.LOCK, tax_agent.LOCK_ID):
                 if not conn.execute('SELECT pg_try_advisory_lock(%s)', (key,)).fetchone()[0]: return
                 locks.append(key)
@@ -542,13 +545,26 @@ async def cycle(app):
             summary = await run(app, conn, api, now)
             conn.execute('UPDATE jnp_allocation_maintenance SET summary=%s::jsonb', (json.dumps(summary),))
             STATUS.update(summary)
+        except MaintenanceDrained:
+            STATUS['state'] = 'draining'
+        except BudgetDeferred:
+            STATUS['state'] = 'waiting_for_budget'
+        except asyncio.CancelledError:
+            STATUS['state'] = 'interrupted'
+            raise
+        except Exception:
+            STATUS['state'] = 'error'
+            raise
         finally:
-            for key in reversed(locks + [LOCK]):
-                conn.execute('SELECT pg_advisory_unlock(%s)', (key,))
+            try:
+                conn.execute('UPDATE jnp_allocation_maintenance SET summary=%s::jsonb', (json.dumps(STATUS),))
+            finally:
+                for key in reversed(locks + [LOCK]):
+                    conn.execute('SELECT pg_advisory_unlock(%s)', (key,))
 
 
 async def serve(app):
-    while True:
+    while not task_drain.requested():
         try:
             await cycle(app)
         except asyncio.CancelledError:
@@ -556,12 +572,22 @@ async def serve(app):
         except Exception as exc:
             STATUS['state'] = 'error'
             log.warning('allocation_maintenance error type=%s status=%s stage=%s', type(exc).__name__, exc.status_code if isinstance(exc, m.ExactRequestError) else None, STATUS.get('read_stage'))
-        await asyncio.sleep(60)
+        await task_drain.wait(60)
 
 
 @router.get('/api/allocation-maintenance/status')
 async def status():
-    return dict(STATUS)
+    from app import main
+    from operations.worker_coordination import status_snapshot
+    try:
+        with main._db_connect() as conn:
+            conn.execute('SET default_transaction_read_only=on')
+            row = conn.execute('SELECT enabled,summary FROM jnp_allocation_maintenance').fetchone()
+            roles = status_snapshot(conn, main.DIVISION)['roles']
+        return {**row[1], 'enabled': row[0], 'available': True,
+                'worker': next((r for r in roles if r['role'] == 'maintenance'), None)}
+    except Exception:
+        return {'available': False, 'state': 'unavailable'}
 
 
 class PrivateJSONResponse(JSONResponse):
@@ -577,10 +603,12 @@ async def report(request: Request):
         raise HTTPException(401, 'Operatoraanmelding via /allocation/login vereist')
     from app import main
     with main._db_connect() as conn:
+        conn.execute('SET default_transaction_read_only=on')
+        saved = conn.execute('SELECT summary FROM jnp_allocation_maintenance').fetchone()
         rows = conn.execute('SELECT details FROM jnp_suspense_review ORDER BY observed_at DESC,bank_line_id').fetchall()
         identities = conn.execute('SELECT details FROM jnp_bank_identity_review ORDER BY observed_at DESC,cashflow_id').fetchall()
     from operations.bank_review_dashboard import report_data
-    return report_data(dict(STATUS), [r[0] for r in rows], [r[0] for r in identities])
+    return report_data(saved[0] if saved else {}, [r[0] for r in rows], [r[0] for r in identities])
 
 
 @router.get('/allocation/review')

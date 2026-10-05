@@ -739,3 +739,10 @@ Volgende bouwstap: allocation-maintenance als eigen rol onderbrengen, inclusief
 alle eigen POST/DELETE-paden, duurzame status en pauzes. De gedeelde DELETE-lock
 is hiervoor al aanwezig. Open geen execution-gate en start geen productie-
 deployment voordat de actuele databaseproeven en initiële drain bewezen zijn.
+
+
+Vastgelegde codecommit derde onderdeel: `87576b263e2ca745ad6d0e211776f1576678b1d4`
+(`feat: separate tax worker with confirmed writes and durable status`).
+De 311 lokale tests en drie Blueprint-schema-validaties hierboven betreffen deze
+code. De nieuwe actuele CI-run moet nog worden uitgevoerd/gecontroleerd; de
+PostgreSQL- en uitrolgates blijven dicht. Deze checkpointaanvulling wijzigt geen runtime.

@@ -878,20 +878,20 @@ def decode(stdout):
     return result,artifacts
 
 
-async def run():
-    if os.environ.get('ICEPAY_MATCH_TASK_ID','').startswith('icepay-match-20261001-03-'):
+async def run(task_id=None):
+    if task_id is None and os.environ.get('ICEPAY_MATCH_TASK_ID','').startswith('icepay-match-20261001-03-'):
         from operations.icepay_matching import run as match_icepay_orders
         await match_icepay_orders()
         return
-    if os.environ.get(ACTIVATION) in {'icepay-booking-20261001-03-import-v1','icepay-booking-20261001-03-reconcile-v1'}:
+    if task_id is None and os.environ.get(ACTIVATION) in {'icepay-booking-20261001-03-import-v1','icepay-booking-20261001-03-reconcile-v1'}:
         from operations.icepay_apply import run as apply_booking
         await apply_booking()
         return
-    if os.environ.get(ACTIVATION)=='icepay-booking-20261001-03-prepare-v2':
+    if task_id is None and os.environ.get(ACTIVATION)=='icepay-booking-20261001-03-prepare-v2':
         from operations.icepay_booking import run as prepare_booking
         await prepare_booking()
         return
-    if os.environ.get(ACTIVATION)!=JOB or datetime.now(timezone.utc)>=EXPIRES:
+    if (task_id if task_id is not None else os.environ.get(ACTIVATION))!=JOB or datetime.now(timezone.utc)>=EXPIRES:
         return
     result, artifacts, summary = status('blocked','configuration','configuration'), {}, {}
     database_url = os.environ.get('DATABASE_URL')

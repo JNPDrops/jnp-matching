@@ -7,7 +7,7 @@ from operations.assigned_role import owner_for
 
 class AgentControlTests(unittest.TestCase):
     def test_only_selected_role_assignment_is_changed(self):
-        for role in ('routing','woo-rules','tax','maintenance','fibonatix'):
+        for role in ('routing','woo-rules','tax','maintenance','fibonatix','icepay'):
             for action in ('status','to-web','to-worker','pause'):
                 with self.subTest(role=role,action=action):
                     conn=MagicMock()
@@ -27,5 +27,5 @@ class AgentControlTests(unittest.TestCase):
 
     def test_unsupported_role_rejected_before_connect(self):
         with patch('psycopg.connect') as connect, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            control.main(['--role','icepay','to-worker'])
+            control.main(['--role','reports','to-worker'])
         connect.assert_not_called()

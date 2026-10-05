@@ -11,10 +11,10 @@ from operations import agent_jobs as jobs, assigned_role as roles, worker_coordi
 @unittest.skipUnless(os.environ.get('JNP_TEST_POSTGRES_DSN'),'isolated local PostgreSQL not configured')
 class DurableJobTests(unittest.TestCase):
     database=fixtures.TaxDatabaseTests.database
-    def setup_queue(self,conn):
-        jobs.initialize(conn);roles.initialize_assignment(conn,3977752,'fibonatix')
-        epoch=c.claim_role(conn,3977752,'fibonatix','legacy-fibonatix',require_assigned=True)
-        return SimpleNamespace(division=3977752,role='fibonatix',owner='legacy-fibonatix',lease_id=epoch)
+    def setup_queue(self,conn,role="fibonatix"):
+        jobs.initialize(conn);roles.initialize_assignment(conn,3977752,role)
+        epoch=c.claim_role(conn,3977752,role,'legacy-'+role,require_assigned=True)
+        return SimpleNamespace(division=3977752,role=role,owner='legacy-'+role,lease_id=epoch)
     def test_submission_is_idempotent_and_one_lease_claims_once(self):
         with self.database() as (_,conn):
             lease=self.setup_queue(conn)
@@ -48,3 +48,12 @@ class DurableJobTests(unittest.TestCase):
             self.assertEqual(jobs.snapshot(conn,3977752,'fibonatix')[0]['state'],'blocked')
             roles.request_handover(conn,3977752,'fibonatix',None)
             with self.assertRaises(c.LeaseUnavailable):jobs.claim_next(conn,lease)
+
+    def test_icepay_does_not_claim_another_psp_job(self):
+        with self.database() as (_,conn):
+            fibo=self.setup_queue(conn)
+            icepay=self.setup_queue(conn,'icepay')
+            other=jobs.submit(conn,3977752,'fibonatix','synthetic','preflight',{},'same-request')
+            own=jobs.submit(conn,3977752,'icepay','synthetic','run',{},'same-request')
+            self.assertEqual(jobs.claim_next(conn,icepay)['job_id'],own['job_id'])
+            self.assertEqual(jobs.claim_next(conn,fibo)['job_id'],other['job_id'])

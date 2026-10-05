@@ -4,6 +4,7 @@ No matching, payout, expense, opening balance, configurable XML or retry of a
 write. A durable batch claim precedes the one XMLUpload request.
 """
 import asyncio
+from operations import worker_write_fence as fence
 import base64
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -121,8 +122,9 @@ def reconcile(manifest, ledger):
         'safe_to_import':not any(hits.values()) and not occupied}
 
 
-async def run():
-    task=os.environ.get('ICEPAY_TRANSACTION_TASK_ID')
+@fence.owned_operation('icepay')
+async def run(task_id=None):
+    task=task_id if task_id is not None else os.environ.get('ICEPAY_TRANSACTION_TASK_ID')
     if task not in {APPLY,RECONCILE} or datetime.now(timezone.utc)>=EXPIRES:
         return
     from app import main
@@ -155,7 +157,7 @@ async def run():
         if not await asyncio.to_thread(claim_write,main):
             summary['state']='prior_write_claim_reconcile_only'
             return
-        summary.update(state='upload_requested',write_attempted=True,xml_sha256=EXPECTED_SHA)
+        summary.update(state='upload_requested',write_attempted=True,xml_sha256=EXPECTED_SHA,**fence.audit_metadata())
         await persist()
         import httpx
         from operations.bacs_debtor_transfer import TLS_CONTEXT
@@ -194,3 +196,5 @@ async def run():
         summary.update(state='blocked',failure=failure_location(error))
     finally:
         await persist()
+    if summary['write_attempted'] and summary['state']!='import_verified':
+        raise ValueError('icepay_upload_requires_review_no_retry')

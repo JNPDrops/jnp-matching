@@ -129,8 +129,9 @@ async def stop_child(child):
         await child.wait()
 
 
-async def run():
-    if not eligible(os.environ, datetime.now(timezone.utc)):
+async def run(task_id=None):
+    activation = os.environ if task_id is None else {ACTIVATION:task_id}
+    if not eligible(activation, datetime.now(timezone.utc)):
         return
     missing = [n for n in REQUIRED if not os.environ.get(n)]
     if missing:

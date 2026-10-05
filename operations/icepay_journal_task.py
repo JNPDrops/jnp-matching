@@ -269,10 +269,12 @@ async def run_create(app):
               error_type=type(exc).__name__, exact_writes='inspect_durable_result')
 
 
-async def run(app):
+async def run(app, task_id=None):
     if datetime.now(timezone.utc) >= EXPIRES:
         return
-    if os.environ.get(CREATE_ENV) == CREATE_ID:
+    if task_id not in (None,TASK_ID):
+        raise ValueError('unsupported_journal_task')
+    if task_id is None and os.environ.get(CREATE_ENV) == CREATE_ID:
         await run_create(app)
         return
     try:

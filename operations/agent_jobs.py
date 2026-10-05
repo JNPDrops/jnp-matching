@@ -126,7 +126,7 @@ async def execute(app, lease, job, dispatch):
     await asyncio.to_thread(database_call,app,finish,job,lease,state,error)
 
 
-async def consume(app, role, dispatch):
+async def consume(app, role, dispatch, *, seed=None):
     lease=fence.current_owner()
     if lease is None or lease.role!=role:
         # Local development without a database must never execute queued work.
@@ -135,6 +135,7 @@ async def consume(app, role, dispatch):
     await asyncio.to_thread(database_call,app,initialize)
     while not task_drain.requested() and not lease.lost.is_set():
         try:
+            if seed: await seed()
             job=await asyncio.to_thread(database_call,app,claim_next,lease)
         except c.LeaseUnavailable:
             return

@@ -802,3 +802,17 @@ Vijfde onderdeel lokaal: `pytest tests operations/test_fibonatix_import.py
 operations/test_strict_order_matching.py operations/test_source_order_policy.py -q`:
 **203 passed, 19 skipped**. De 19 overgeslagen proeven vereisen een geïsoleerde
 PostgreSQL-database. Geen execution-gate geopend en geen productie gewijzigd.
+
+## Vervolg: ICEPAY-rol gebouwd — 5 oktober 2026
+
+Fibonatix-code vastgelegd als `36cca262d02d8e6dfc59e19f567020931ba0c57f`.
+ICEPAY heeft nu een duurzame queueadapter, expliciete taak-ID's, per-ontvangst
+schrijfafscherming, opgeslagen uitvoerstatus en eigen worker-Blueprint. Geen nieuw
+bankboek, geen verlengde opdracht, geen productiehandeling. Zie
+`docs/icepay-worker-handover.md`. Activatie blijft gesloten tot echte PostgreSQL-
+validatie en veilige eerste drain. De brede oude ICEPAY-testset had vier fouten;
+precies dezelfde vier zijn gereproduceerd op de voorafgaande Fibonatix-commit
+(twee tijdafhankelijke verlopen probes, oude transportmock en gewijzigde review-
+verwachting). De gerichte nieuwe worker- en adaptertests worden apart uitgevoerd.
+
+ICEPAY-validatie: `pytest tests operations/test_icepay_booking.py operations/test_icepay_matching.py operations/test_icepay_transactions.py -q`: **209 passed, 20 skipped** (alle skips vereisen geïsoleerde PostgreSQL). Geen echte financiële actie uitgevoerd.

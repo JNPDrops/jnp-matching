@@ -33,9 +33,7 @@ TASKS = (
     TaskSpec("recent-import-report", "reports", "operations.recent_import_read_report", "run", True),
     TaskSpec("paragon-login-probe", "reports", "operations.paragon_login_probe", "run"),
     TaskSpec("exact-login-probe", "reports", "operations.exact_login_probe", "run"),
-    TaskSpec("icepay-journal", "icepay", "operations.icepay_journal_task", "run", True),
-    TaskSpec("icepay-fetch", "icepay", "operations.icepay_fetch_probe", "run"),
-    TaskSpec("icepay-transactions", "icepay", "operations.icepay_transactions", "run"),
+    TaskSpec("icepay-jobs", "icepay", "operations.icepay_jobs", "serve", True, True),
 )
 ROLES = ("web", "routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay", "reports")
 
@@ -57,6 +55,7 @@ ROLE_BLOCKERS["woo-rules"] = ("woo_rules_handover_postgres_pending",)
 ROLE_BLOCKERS["tax"] = ("tax_handover_postgres_pending",)
 ROLE_BLOCKERS["maintenance"] = ("maintenance_handover_postgres_pending",)
 ROLE_BLOCKERS["fibonatix"] = ("fibonatix_handover_postgres_pending",)
+ROLE_BLOCKERS["icepay"] = ("icepay_handover_postgres_pending",)
 
 
 class SeparationNotReady(RuntimeError):
@@ -96,7 +95,7 @@ class BackgroundTasks:
         self.specs = task_specs(role)
         self.resolver = resolver
         self.tasks = {}
-        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules", "tax", "maintenance", "fibonatix")}
+        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay")}
         self.routing_stop = self.owned_stops["routing"]
         self.started = False
 

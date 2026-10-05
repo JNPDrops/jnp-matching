@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 import hashlib
 import hmac
 import json
@@ -164,6 +165,7 @@ def test_reference_endpoint_idempotency(monkeypatch):
     import time
     class Store:
         def __init__(self):self.rows={};self.orders=set();self.result=None
+        def transaction(self):return nullcontext()
         def __enter__(self):return self
         def __exit__(self,*a):pass
         def execute(self,sql,args=None):
@@ -235,6 +237,7 @@ def test_status_is_read_only_and_reports_verified_rules(monkeypatch):
     from app import main
     from starlette.requests import Request
     class StatusDB:
+        def transaction(self):return nullcontext()
         def __enter__(self):return self
         def __exit__(self,*args):pass
         def execute(self,sql):

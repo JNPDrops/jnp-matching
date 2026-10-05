@@ -1,7 +1,8 @@
 # Opsplitsing van JNP-agents — uitvoeringsdossier
 
-Status: vier voorbereidende codefasen gebouwd in concept-PR #82;
-nog niet samengevoegd of uitgerold. Geen workers aangemaakt of geactiveerd.
+Status: gedeelde basis, routeringsworker en Woo-bankregels-worker gebouwd in
+concept-PR #82. Databasevalidatie en veilige eerste productieoverdracht staan nog
+open; niet samengevoegd of uitgerold. Geen workers aangemaakt of geactiveerd.
 Opdracht: gebruiker heeft op 5 oktober 2026 rond 00:09 Europe/Amsterdam toestemming
 gegeven om de agents en modules afzonderlijk in te richten en hier vannacht aan te werken.
 Deze toestemming omvat benodigde infrastructuur voor de opsplitsing, maar verandert
@@ -595,3 +596,72 @@ Laatste codecommit van deze fase: `925f6b802edd6334382b400289a811b2c1ca4033`
 (`test: verify routing control and stop on unresolved writes`). De hierboven
 beschreven 158 lokale tests en schema-validatie betreffen deze code. Opvolgende
 wijzigingen die alleen dit dossier bijwerken, veranderen de runtime niet.
+
+
+## Tweede onderdeel, 5 oktober 2026 — Woo-bankregels-worker
+
+Startpunt `324595a97a4947ecfbe3c6ab9058615f031e744f`. Main blijft
+`b7fd86c3dbe369b630e8f8a0367c22837015b178`; productie blijft
+`cf75100f845d1296eaaa60f85225caf3c656e4f2` / `dep-db1ebv6gekts73dec350`.
+Geen parallelle wijzigingen of lopende deployments aangetroffen bij hervatting.
+
+### Gebouwd
+
+- Gedeelde `assigned_role`-supervisor voor routing en Woo. De eerdere routing-
+  API/CLI blijft compatibel, inclusief identiteiten, queue, cursor en stopgedrag.
+- Legacy-web en headless Woo gebruiken `(3977752, woo-rules)`, met afzonderlijke
+  locaties legacy-woo-rules/worker-woo-rules. Default is web, nieuwe worker wacht.
+- `app.agent_control --role routing|woo-rules status|to-worker|to-web|pause`.
+  Opdrachten wijzigen alleen de geselecteerde taak; status gebruikt read-only SQL.
+- Woo controleert de stop bij cycle-/entrygrenzen. Beide rollen drainen parallel;
+  bestaande Woo cycle-lock blijft tot het einde van de huidige opdracht behouden.
+- `create_confirmed_rule` is een owned-operation-adapter. De gedeelde intent wordt
+  pas vrijgegeven na POST, bewezen bestaande eigen regel bij readback, queue-done
+  en auditopslag. Een geslaagde POST met mislukte teruglezing wordt niet afgewikkeld.
+- `jnp_woo_rule_attempts` bewaart operation-ID, event-ID, status en bevestigde rule-ID.
+  Historische operation-ID's blijven bestaan bij IBAN-naar-BOSCI-upgrades. Geen
+  tokens, secrets of betalingsbody in deze extra tabel.
+- POST-budgetweigering vóór transport blijft pending. Time-out, cancellation,
+  readbackfout of auditfout blijft onzeker en stopt nieuwe writes/overname.
+- De bestaande HMAC-ontvangstroutes schrijven alleen in dezelfde duurzame queue;
+  statusroutes blijven lezend. Er is geen nieuwe openbare financiële uitvoerroute.
+- Dashboard toont routing en Woo-bankregels uit duurzame status. Afzonderlijke
+  `render/woo-rules-worker.yaml`: één echte worker, handmatige deployments, 300s
+  shutdown, intern PostgreSQL en noodzakelijke main OAuth-env-verwijzingen. Geen
+  ontvangstsecret aan de worker; bestaande enable-vlag wordt niet geforceerd.
+- Runbook: `docs/woo-rules-worker-handover.md`. Begrote extra compute $7/maand;
+  niets aangemaakt of live geactiveerd. Geen boekhoudwijzigingen als migratietest.
+
+### Validatie en grenzen
+
+Nieuwe synthetische tests controleren: readback vóór afronding, mislukte audit,
+POST-time-out, cancellation, verschil tussen budgetweigering vóór/ná POST,
+historisch onzekere jobs niet herhalen, stoppen zonder volgende entry, behouden
+cycle-lock, rolisolatie, CLI en Woo-SIGTERM. Twee nieuwe PostgreSQL-proeven controleren
+concurrerende gelijke Woo-owners en de volledige duurzame write-/readbackketen,
+plus queuebehoud, pause en onafhankelijke routingrol.
+
+De CI-workflow installeert pytest voor de bestaande Woo-tests en voert deze ook uit.
+Lokale resultaten en definitieve commit worden hieronder vastgelegd. De elf
+PostgreSQL-proeven vereisen nog uitvoering op de actuele code; beide afzonderlijke
+execution-gates blijven dicht. Andere rollen behouden hun bestaande blokkades.
+Geen merge, deploy, worker-create of onzekere financiële retry in deze stap.
+
+
+Lokale eindvalidatie tweede onderdeel:
+
+- `pytest tests operations/test_woo_iban_rules.py -q`: **196 passed, 11 skipped**.
+- Bestaande routing/transport/customer-only/orderbeleid/Allocation-suite: **36 passed**.
+- `pytest operations/test_tax_ledger_routing.py -q`: **19 passed**; uitsluiting van
+  Belastingdienst-IBAN's en bestaande tax-/bankregelgrenzen blijven behouden.
+- Totaal **251 lokaal geslaagd**. Elf echte PostgreSQL-proeven expliciet niet
+  uitgevoerd wegens ontbrekende lokale testdatabase; geen live database gebruikt.
+- Zowel routing-worker.yaml als woo-rules-worker.yaml geldig tegen het officiële
+  Render JSON Schema. Dit is geen live validatie van env-verwijzingen of netwerk.
+- De bestaande Woo HTTP-contracten en HMAC/idempotentietests slagen. De nieuwe
+  beheer-CLI biedt uitsluitend routering en Woo aan; andere rollen worden geweigerd.
+
+De GitHub-workflow voert deze suites en de echte PostgreSQL-proeven samen uit met
+uitsluitend tijdelijke synthetische data. Controleer vóór samenvoegen de actuele
+head, de testuitkomst en de veilige eerste productieoverdracht. De uitrolgrens uit
+het eerste onderdeel blijft gelden; er zijn nog geen zelfstandige workers live.

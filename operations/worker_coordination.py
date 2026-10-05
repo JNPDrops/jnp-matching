@@ -326,8 +326,10 @@ def status_snapshot(conn, division):
     owner_label = lambda value: hashlib.sha256(value.encode()).hexdigest()[:12] if value else None
     return {
         "roles": [{"role": r[0], "desired_owner": owner_label(r[1]), "active_owner": owner_label(r[2]),
-                   "execution_location": {"legacy-routing": "web", "worker-routing": "worker"}.get(r[2]),
-                   "desired_location": {"legacy-routing": "web", "worker-routing": "worker"}.get(r[1]),
+                   "execution_location": {"legacy-routing": "web", "worker-routing": "worker",
+                       "legacy-woo-rules": "web", "worker-woo-rules": "worker"}.get(r[2]),
+                   "desired_location": {"legacy-routing": "web", "worker-routing": "worker",
+                       "legacy-woo-rules": "web", "worker-woo-rules": "worker"}.get(r[1]),
                    "lease_until": r[3].isoformat() if r[3] else None,
                    "heartbeat_at": r[4].isoformat() if r[4] else None,
                    "draining": r[5], "status": r[6], "detail": r[7],

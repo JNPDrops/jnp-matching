@@ -18,7 +18,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             async def task(*args):
                 seen.append((spec.name, args))
                 try:
-                    if spec.role == "routing":
+                    if spec.role in {"routing", "woo-rules"}:
                         from operations.task_drain import wait
                         await wait(3600)
                     else:
@@ -62,7 +62,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 if spec.name == "debtor-routing":
                     raise ValueError("SENSITIVE_PROVIDER_BODY")
                 try:
-                    await asyncio.Event().wait()
+                    if spec.role == "woo-rules":
+                        from operations.task_drain import wait
+                        await wait(3600)
+                    else:
+                        await asyncio.Event().wait()
                 finally:
                     stopped.append(spec.name)
             return task

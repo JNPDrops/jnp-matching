@@ -45,6 +45,8 @@ async def run(role):
     from app import main as app_module
     if role == 'routing':
         return await run_routing(app_module)
+    if role == 'woo-rules':
+        return await run_woo_rules(app_module)
     from operations.worker_coordination import DurableRoleLease
     from operations.worker_write_fence import owner_scope
     stop = asyncio.Event()
@@ -77,6 +79,17 @@ async def run(role):
 async def run_routing(app_module):
     from operations.automatic_debtor_routing import serve
     from operations.routing_role import WORKER, supervise
+    return await run_supervisor(app_module, supervise, WORKER, serve)
+
+
+async def run_woo_rules(app_module):
+    from operations.woo_iban_rules import serve
+    from operations.assigned_role import owner_for, supervise
+    return await run_supervisor(app_module, supervise, owner_for('woo-rules', 'worker'),
+                                serve, role='woo-rules')
+
+
+async def run_supervisor(app_module, supervise, owner, function, **kwargs):
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed = []
@@ -84,7 +97,7 @@ async def run_routing(app_module):
         for signum in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(signum, stop.set)
             installed.append(signum)
-        await supervise(app_module, stop, WORKER, serve)
+        await supervise(app_module, stop, owner, function, **kwargs)
     finally:
         for signum in installed:
             loop.remove_signal_handler(signum)

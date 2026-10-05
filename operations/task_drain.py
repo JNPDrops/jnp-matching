@@ -1,8 +1,8 @@
-"""Cooperative stop for routing; a current entry keeps its original audit/lock."""
+"""Cooperative stop per owned task; an in-flight operation keeps its audit/lock."""
 import asyncio
 from contextvars import ContextVar
 
-_stop = ContextVar("routing_stop", default=None)
+_stop = ContextVar("owned_task_stop", default=None)
 
 
 def requested():

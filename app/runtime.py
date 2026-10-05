@@ -52,6 +52,7 @@ ROLE_BLOCKERS = {
 # Routing ownership, fencing and drain are implemented; require the new
 # PostgreSQL handover suite before enabling this first standalone role.
 ROLE_BLOCKERS["routing"] = ("routing_handover_postgres_pending",)
+ROLE_BLOCKERS["woo-rules"] = ("woo_rules_handover_postgres_pending",)
 
 
 class SeparationNotReady(RuntimeError):
@@ -91,7 +92,8 @@ class BackgroundTasks:
         self.specs = task_specs(role)
         self.resolver = resolver
         self.tasks = {}
-        self.routing_stop = asyncio.Event()
+        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules")}
+        self.routing_stop = self.owned_stops["routing"]
         self.started = False
 
     async def start(self):
@@ -103,10 +105,11 @@ class BackgroundTasks:
         self.started = True
         try:
             for spec, function in functions:
-                if spec.role == "routing":
-                    from operations.routing_role import LEGACY, WORKER, supervise
-                    coroutine = supervise(self.app_module, self.routing_stop,
-                                          LEGACY if self.role == 'legacy' else WORKER, function)
+                if spec.role in self.owned_stops:
+                    from operations.assigned_role import owner_for, supervise
+                    owner = owner_for(spec.role, 'web' if self.role == 'legacy' else 'worker')
+                    coroutine = supervise(self.app_module, self.owned_stops[spec.role],
+                                          owner, function, role=spec.role)
                 else:
                     coroutine = function(self.app_module) if spec.with_app else function()
                 try:
@@ -119,14 +122,16 @@ class BackgroundTasks:
             raise
 
     async def stop(self):
-        self.routing_stop.set()
-        routing = self.tasks.get("debtor-routing")
-        if routing is not None and not routing.done():
-            # Keep the routing cycle's existing advisory lock until the current
-            # entry has completed. No next entry/cycle is admitted after stop.
-            done, _ = await asyncio.wait({routing}, timeout=270)
-            if not done:
-                log.error("routing_drain_timeout_review_required")
+        for stop in self.owned_stops.values():
+            stop.set()
+        owned = {self.tasks[spec.name] for spec in self.specs
+                 if spec.role in self.owned_stops and spec.name in self.tasks
+                 and not self.tasks[spec.name].done()}
+        if owned:
+            # Drain independent roles concurrently within the same 300s window.
+            _, pending = await asyncio.wait(owned, timeout=270)
+            if pending:
+                log.error("owned_tasks_drain_timeout_review_required")
         # Cancel all before awaiting any one. One failed task must not prevent
         # the remaining owners from releasing their existing locks/audits.
         for task in self.tasks.values():

@@ -52,3 +52,18 @@ class FirstRoutingBlueprintTests(unittest.TestCase):
         self.assertIn('envVarKey: DATABASE_URL',text)
         self.assertIn('envVarKey: METORIK_API_KEY',text)
         self.assertNotIn('sync: false',text)
+
+
+class SecondWooBlueprintTests(unittest.TestCase):
+    def test_second_phase_is_one_worker_without_ingress_secret_or_new_database(self):
+        text = (BLUEPRINT.parent / 'woo-rules-worker.yaml').read_text()
+        self.assertEqual(text.count('type: worker'),1)
+        self.assertIn('startCommand: python -m app.worker --role woo-rules',text)
+        self.assertIn("autoDeployTrigger: 'off'",text)
+        self.assertIn('maxShutdownDelaySeconds: 300',text)
+        self.assertIn('numInstances: 1',text)
+        self.assertIn('plan: 0.5c-512mb',text)
+        self.assertNotIn('databases:',text)
+        self.assertNotIn('WOO_IBAN_SHARED_SECRET',text)
+        self.assertIn('envVarKey: DATABASE_URL',text)
+        self.assertIn('envVarKey: ENABLE_WOO_IBAN_RULE_WRITES',text)

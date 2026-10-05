@@ -16,6 +16,7 @@ class WorkerStatusTests(unittest.TestCase):
         assert.ok(testUI.status({available:true,roles:[]}).includes('geen afzonderlijk taakbezit'));
         const base={role:'routing',execution_location:'worker',desired_location:'worker',lease_live:true,unresolved_writes:0};
         assert.ok(testUI.status({available:true,roles:[base]}).includes('Actief taakbezit'));
+        assert.ok(testUI.status({available:true,roles:[{...base,role:'woo-rules'}]}).includes('Woo-bankregels'));
         const expired=testUI.status({available:true,roles:[{...base,lease_live:false}]});
         assert.ok(expired.includes('Geen actuele heartbeat'));assert.ok(!expired.includes('Actief taakbezit'));
         const uncertain=testUI.status({available:true,roles:[{...base,unresolved_writes:1}]});

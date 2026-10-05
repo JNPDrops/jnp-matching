@@ -37,3 +37,18 @@ class AgentWorkerBlueprintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class FirstRoutingBlueprintTests(unittest.TestCase):
+    def test_first_phase_creates_only_one_real_manual_worker(self):
+        text = (BLUEPRINT.parent / 'routing-worker.yaml').read_text()
+        self.assertEqual(text.count('type: worker'),1)
+        self.assertIn('startCommand: python -m app.worker --role routing',text)
+        self.assertIn("autoDeployTrigger: 'off'",text)
+        self.assertIn('maxShutdownDelaySeconds: 300',text)
+        self.assertIn('numInstances: 1',text)
+        self.assertIn('plan: 0.5c-512mb',text)
+        self.assertNotIn('databases:',text)
+        self.assertNotIn('type: web\n',text)
+        self.assertIn('envVarKey: DATABASE_URL',text)
+        self.assertIn('envVarKey: METORIK_API_KEY',text)
+        self.assertNotIn('sync: false',text)

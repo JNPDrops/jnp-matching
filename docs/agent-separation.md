@@ -554,3 +554,39 @@ Andere rollen blijven eveneens geblokkeerd; HTTP-gestarte Fibonatix en andere
 financiële taken zijn niet naar workers verplaatst. Geen merge of live activatie
 zonder voldoende validatie en bewezen veilige bootstrap/drain. Geen infra/kosten
 of boekhoudmutaties door deze ontwikkelstap.
+
+### Vastlegging en validatie van deze bouwstap
+
+Eerste codecommit: `cc61299f9bf1fc43ba4e5d7def4a306bd7316e42` (merge-parent
+`b7fd86c3dbe369b630e8f8a0367c22837015b178` behoudt de actuele dashboardwijzigingen).
+Daarna aangescherpt: een fout na schrijftoelating stopt de rol bij de eerstvolgende
+grens. Daardoor blijft hij niet verder API-ruimte verbruiken terwijl zijn eerdere
+schrijfpoging beoordeling nodig heeft. Geen automatische financiële herhaling.
+CLI-status zet de databaseverbinding expliciet op read-only; de beheercommando's
+zijn apart getest. De routing-gate heet nu alleen `routing_handover_postgres_pending`:
+de implementatievoorwaarden zijn gebouwd, de databaseproeven zijn nog niet bewezen.
+
+Uitgevoerd op 5 oktober 2026:
+
+- `python -m pytest tests -q`: **122 passed, 9 skipped**. De negen skips zijn alle
+  lokale PostgreSQL-proeven; ze zijn niet als geslaagd meegeteld. De nieuwe tests
+  omvatten SIGTERM, wachten zonder toewijzing, drain-timeout, foutafhandeling,
+  CLI-beperking en dashboardstatus bij ontbrekende/verlopen/onzekere gegevens.
+- Bestaande routing-, transport-, customer-only-, orderbeleid- en Allocation-suite:
+  **36 passed**. Totaal **158 lokaal geslaagd**; geen echte Exact-schrijfacties.
+- `render/routing-worker.yaml` gevalideerd met `jsonschema` tegen de officiële
+  `https://render.com/schema/render.yaml.json`: **geldig**. Dit bevestigt de
+  structuur, niet de aanwezigheid/rechten van env-referenties in de workspace.
+- Nieuwe GitHub-runs voor cc61299: `37370140037` en `37370145083` stonden nog queued.
+  [GitHub Status](https://www.githubstatus.com/) meldt sinds 5 oktober 19:11 UTC
+  een Actions-storing; update 19:50 UTC bevestigt vertraging bij het toewijzen van
+  hosted runners. Dit verklaart de wachtende uitvoering, niet een bewezen testfout.
+- Render opnieuw gecontroleerd: productie blijft live op cf75100 / dep-db1ebv6gekts73dec350.
+  Geen worker aangemaakt, geen merge of deployment uitgevoerd, geen extra kosten.
+
+Volgende stap: controleer de GitHub-run van de actuele branch-head. Vereist zijn
+alle negen PostgreSQL-proeven plus de regressies, zonder database-skips. Pas na
+succes mag uitsluitend de routing-gate leeg worden gemaakt, met opnieuw de
+bijbehorende manifest-/runtime-tests aangepast en uitgevoerd. Andere roles blijven
+geblokkeerd. Daarna bootstrap volgens `docs/routing-worker-handover.md`; geen
+productieherstart zonder bewezen drain van de nog samengestelde webservice.

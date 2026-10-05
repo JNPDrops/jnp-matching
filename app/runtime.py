@@ -49,6 +49,10 @@ ROLE_BLOCKERS = {
     for role in ROLES
 }
 
+# Routing ownership, fencing and drain are implemented; require the new
+# PostgreSQL handover suite before enabling this first standalone role.
+ROLE_BLOCKERS["routing"] = ("routing_handover_postgres_pending",)
+
 
 class SeparationNotReady(RuntimeError):
     pass

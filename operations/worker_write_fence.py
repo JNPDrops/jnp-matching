@@ -109,7 +109,15 @@ before returning. Unadapted owned writers are denied by fenced_send.
                 if operation.admitted and operation.acknowledged:
                     await asyncio.to_thread(c._budget_database_call, lease.database_url,
                                             settle_write, operation)
+                elif operation.admitted:
+                    lease.lost.set()
                 return result
+            except BaseException:
+                # Stop this owner at the next boundary instead of spending
+                # more API quota on a role whose last write needs review.
+                if operation.admitted:
+                    lease.lost.set()
+                raise
             finally:
                 _operation.reset(token)
         return run

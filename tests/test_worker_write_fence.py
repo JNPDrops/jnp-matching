@@ -74,11 +74,13 @@ class OwnedOperationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OSError):
                 await operation()
         self.assertNotIn('settle_write', self.calls)
+        self.assertTrue(self.lease.lost.is_set())
         send.assert_awaited_once()
 
     async def test_transport_failure_cancellation_and_5xx_retain_intent(self):
         for error in (OSError('test'), asyncio.CancelledError(), None):
             self.calls.clear()
+            self.lease = owner()
             send = AsyncMock(side_effect=error, return_value=SimpleNamespace(status_code=503, headers={}))
             @f.owned_operation('routing')
             async def operation():
@@ -90,6 +92,7 @@ class OwnedOperationTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     await operation()
             self.assertNotIn('settle_write', self.calls)
+            self.assertTrue(self.lease.lost.is_set())
             send.assert_awaited_once()
 
     async def test_denied_admission_does_not_send(self):

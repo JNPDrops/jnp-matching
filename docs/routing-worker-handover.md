@@ -41,7 +41,7 @@ suap_wordpresspayplugin 109422. Xcore en DIRECT_WOO_BANK blijven ongewijzigd.
    main, pad `render/routing-worker.yaml`. Selecteer bestaande workspace en dezelfde
    netwerk-/projectomgeving als jnp-matching. Plan: 0.5 CPU / 512 MB, één instance,
    Frankfurt, native Python, geen autoscaling, handmatige deployments. Begroot
-   $7/maand extra compute (Render-prijstabel gecontroleerd 5 oktober 2026;
+   $7/maand extra compute ([Render-prijstabel](https://render.com/pricing) gecontroleerd 5 oktober 2026;
    bevestig het actuele bedrag op het scherm vóór aanmaken).
    `fromService/envVarKey` hergebruikt de bestaande interne database en verbinding;
    kopieer/toon geen secrets. Bij onopgeloste referenties stoppen, geen nieuwe DB,

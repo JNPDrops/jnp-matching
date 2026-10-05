@@ -21,7 +21,9 @@ def main(argv=None):
     import psycopg
     try:
         with psycopg.connect(database_url, autocommit=True, connect_timeout=10) as conn:
-            if args.action != 'status':
+            if args.action == 'status':
+                conn.execute('SET default_transaction_read_only = on')
+            else:
                 c.initialize(conn)
                 target = {'to-worker': WORKER, 'to-web': LEGACY, 'pause': None}[args.action]
                 request_handover(conn, division, target)

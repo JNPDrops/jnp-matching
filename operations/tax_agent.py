@@ -2,8 +2,8 @@
 
 Existing BankEntryLines have no documented PUT operation. Do not turn a
 classification into a fictitious completed booking or delete/reimport entries.
-The separate tax_allocation module creates scoped allocation rules; the user
-applies them in Exact through Automatically. No existing bank entry is rewritten.
+The separate tax_allocation module maintains scoped allocation rules. This
+worker does not apply them to or rewrite existing bank entries.
 """
 import asyncio
 from collections import Counter
@@ -17,6 +17,8 @@ from fastapi import APIRouter, HTTPException, Request
 from operations import allocation_connection as allocation
 from operations import bacs_debtor_transfer as transport
 from operations import tax_reference as tax
+from operations import task_drain
+from operations.worker_coordination import BudgetDeferred as SharedBudgetDeferred
 
 router = APIRouter()
 log = logging.getLogger('uvicorn.error')
@@ -29,6 +31,10 @@ STATUS = {'state': 'starting', 'read_only': True, 'booking_writes': False,
           'existing_bank_update_supported': False, 'last_scan': None}
 ACCOUNT_CACHE = []
 READS = {'financial/GLAccounts', 'crm/Accounts', 'financialtransaction/BankEntryLines'}
+
+
+class ScanDrained(Exception):
+    pass
 
 
 class BudgetDeferred(transport.Stop):
@@ -58,6 +64,8 @@ class TaxAPI(transport.Exact):
         root = f'{transport.BASE}/api/v1/{transport.DIVISION}/{resource}'
         url, seen, result = root, set(), []
         for _ in range(200):
+            if task_drain.requested():
+                raise ScanDrained()
             if url in seen or urlparse(url).path != urlparse(root).path:
                 raise transport.Stop('Invalid tax pagination')
             seen.add(url)
@@ -82,6 +90,7 @@ def initialize(conn):
         summary JSONB NOT NULL DEFAULT '{}')''')
     conn.execute('INSERT INTO jnp_tax_control(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING')
     conn.execute('ALTER TABLE jnp_tax_control ADD COLUMN IF NOT EXISTS scan_version TEXT')
+    conn.execute("ALTER TABLE jnp_tax_control ADD COLUMN IF NOT EXISTS rule_summary JSONB NOT NULL DEFAULT '{}'")
     conn.execute('''CREATE TABLE IF NOT EXISTS jnp_tax_observations (
         bank_line_id UUID PRIMARY KEY, bank_entry_id UUID, bank_modified TEXT,
         bank_date TEXT, description TEXT, decision JSONB NOT NULL,
@@ -125,6 +134,8 @@ def candidate(bank):
 
 async def cycle(app):
     global ACCOUNT_CACHE
+    if task_drain.requested():
+        return
     if app.DIVISION != transport.DIVISION or app.BASE_URL != transport.BASE or not app.DATABASE_URL:
         STATUS['state'] = 'configuration_error'
         return
@@ -145,13 +156,8 @@ async def cycle(app):
             now = datetime.now(timezone.utc)
             if next_scan and now < next_scan and scan_version == SCAN_VERSION:
                 return
-            # Check shared observed routing quota before obtaining a fresh header.
-            from operations.automatic_debtor_routing import STATUS as routing_status
-            limits = routing_status.get('api_limits') or {}
-            remaining, reset = limits.get('remaining'), limits.get('reset_ms')
-            if type(remaining) is int and remaining <= RESERVE and type(reset) is int and reset / 1000 > now.timestamp():
-                STATUS['state'] = 'waiting_for_api_budget'
-                return
+            # The transport reserves quota in shared PostgreSQL before each
+            # call; another process's in-memory routing STATUS is not evidence.
             api = TaxAPI(allocation.RoutingApp(app))
             if scan_version != SCAN_VERSION:
                 # Preserve full-rescan intent even if the first attempt fails.
@@ -169,6 +175,8 @@ async def cycle(app):
                     [{'code': a['code'], 'description': a['description']} for a in v]
                     for k, v in candidates.items()}))
             ACCOUNT_CACHE = saved['accounts']
+            if task_drain.requested():
+                raise ScanDrained()
             STATUS['read_stage'] = 'bank_lines'
             # Reclassify historical misallocations when recognition changes.
             banks = await api.rows('financialtransaction/BankEntryLines', selection(
@@ -213,14 +221,28 @@ async def cycle(app):
                 'templates': [{'letter': k[0], 'subnumber': k[1], 'year': k[2], 'period': k[3],
                                'kind': k[4], 'direction': k[5], 'count': v} for k, v in templates.items()]}))
             from operations import tax_allocation
+            if task_drain.requested():
+                raise ScanDrained()
             try:
                 await tax_allocation.sync(app, conn, POLICY, saved, api.limits)
                 log.info('tax_agent allocation_rules %s', json.dumps(tax_allocation.STATUS))
+            except asyncio.CancelledError:
+                tax_allocation.STATUS['state'] = 'interrupted'
+                raise
             except Exception as exc:
                 tax_allocation.STATUS['state'] = 'error'
                 log.warning('tax_agent allocation_rules_error type=%s status=%s', type(exc).__name__,
                             exc.status_code if isinstance(exc, transport.ExactRequestError) else None)
-        except BudgetDeferred:
+            finally:
+                # Aggregate state is visible to a different web process; no
+                # raw provider payload, token or individual bank data is stored.
+                summary = {key: tax_allocation.STATUS[key] for key in
+                    ('state','counts','planned','by_tax','last_check','bank_writes','automatically_executed')
+                    if key in tax_allocation.STATUS}
+                conn.execute('UPDATE jnp_tax_control SET rule_summary=%s::jsonb', (json.dumps(summary),))
+        except ScanDrained:
+            STATUS['state'] = 'draining'
+        except (BudgetDeferred, SharedBudgetDeferred):
             STATUS['state'] = 'waiting_for_api_budget'
         except transport.ExactRequestError as exc:
             STATUS.update(state='read_error', last_http_status=exc.status_code)
@@ -233,12 +255,21 @@ async def cycle(app):
             reason = reasons.get(str(exc), 'other_guard')
             STATUS.update(state='read_error', read_error_reason=reason)
             log.warning('tax_agent read_error stage=%s reason=%s', STATUS.get('read_stage'), reason)
+        except asyncio.CancelledError:
+            STATUS['state'] = 'interrupted'
+            raise
+        except Exception:
+            STATUS['state'] = 'read_error'
+            raise
         finally:
-            conn.execute('SELECT pg_advisory_unlock(%s)', (LOCK_ID,))
+            try:
+                conn.execute('UPDATE jnp_tax_control SET summary=%s::jsonb', (json.dumps(STATUS),))
+            finally:
+                conn.execute('SELECT pg_advisory_unlock(%s)', (LOCK_ID,))
 
 
 async def serve(app):
-    while True:
+    while not task_drain.requested():
         try:
             await cycle(app)
         except asyncio.CancelledError:
@@ -246,13 +277,28 @@ async def serve(app):
         except Exception as exc:
             STATUS['state'] = 'read_error'
             log.warning('tax_agent read_error type=%s', type(exc).__name__)
-        await asyncio.sleep(30)
+        if await task_drain.wait(30):
+            return
 
 
 @router.get('/api/tax/status')
 async def status():
-    from operations.tax_allocation import STATUS as RULE_STATUS
-    return {**STATUS, 'allocation_rules': dict(RULE_STATUS)}
+    from app import main
+    from operations.worker_coordination import status_snapshot
+    if not main.DATABASE_URL:
+        return {'available': False, 'state': 'unavailable'}
+    try:
+        with main._db_connect() as conn:
+            conn.execute('SET default_transaction_read_only=on')
+            row = conn.execute('SELECT enabled,summary,rule_summary FROM jnp_tax_control').fetchone()
+            roles = status_snapshot(conn, main.DIVISION)['roles']
+        if row is None:
+            return {'available': False, 'state': 'unavailable'}
+        return {**row[1], 'available': True, 'enabled': row[0],
+                'allocation_rules': row[2],
+                'worker': next((r for r in roles if r['role'] == 'tax'), None)}
+    except Exception:
+        return {'available': False, 'state': 'unavailable'}
 
 
 @router.get('/api/tax/report')
@@ -263,12 +309,15 @@ async def report(request: Request):
         raise HTTPException(401, 'Operatoraanmelding via /allocation/login vereist')
     from app import main
     with main._db_connect() as conn:
+        conn.execute('SET default_transaction_read_only=on')
+        saved = conn.execute('SELECT metadata FROM jnp_tax_control').fetchone()
+        accounts = (saved[0] or {}).get('accounts', []) if saved else []
         rows = conn.execute('''SELECT bank_line_id::text,bank_date,description,decision
             FROM jnp_tax_observations ORDER BY observed_at DESC,bank_line_id LIMIT 500''').fetchall()
         total = conn.execute('SELECT COUNT(*) FROM jnp_tax_observations').fetchone()[0]
     return {'read_only': True, 'booking_writes': False, 'total': total, 'shown': len(rows),
-            'truncated': total > len(rows), 'account_candidates': tax.account_candidates(ACCOUNT_CACHE),
+            'truncated': total > len(rows), 'account_candidates': tax.account_candidates(accounts),
             'gl_mapping': POLICY['gl_accounts'], 'items': [
                 {'bank_line_id': row[0], 'bank_date': row[1], 'description': row[2],
-                 'tax': tax.add_account_proposal(row[3], ACCOUNT_CACHE, POLICY['gl_accounts'])}
+                 'tax': tax.add_account_proposal(row[3], accounts, POLICY['gl_accounts'])}
                 for row in rows]}

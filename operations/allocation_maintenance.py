@@ -232,9 +232,7 @@ def initialize(conn):
         bank_line_id UUID PRIMARY KEY, details JSONB NOT NULL, observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
     conn.execute('''CREATE TABLE IF NOT EXISTS jnp_bank_identity_review (
         cashflow_id UUID PRIMARY KEY, details JSONB NOT NULL, observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS jnp_rule_cleanup_audit (
-        rule_id UUID PRIMARY KEY, payload JSONB NOT NULL, keeper_id UUID, reason TEXT NOT NULL,
-        state TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
+    initialize_cleanup(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS jnp_suspense_rules (
         words TEXT PRIMARY KEY, payload JSONB NOT NULL, bank_line_id UUID NOT NULL,
         state TEXT NOT NULL DEFAULT 'pending', rule_id UUID,
@@ -242,21 +240,52 @@ def initialize(conn):
     conn.execute('ALTER TABLE jnp_woo_iban_events ADD COLUMN IF NOT EXISTS rule_retired_at TIMESTAMPTZ')
 
 
+def initialize_cleanup(conn):
+    # Tax and maintenance can initialize in different processes.
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('jnp:rule-cleanup-schema',0))")
+        conn.execute('''CREATE TABLE IF NOT EXISTS jnp_rule_cleanup_audit (
+            rule_id UUID PRIMARY KEY, payload JSONB NOT NULL, keeper_id UUID, reason TEXT NOT NULL,
+            state TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
+
+
 async def delete_rule(conn, api, rule, reason, keeper=None):
     rule_id = m.guid(rule['ID'])
-    conn.execute('''INSERT INTO jnp_rule_cleanup_audit(rule_id,payload,keeper_id,reason,state)
-        VALUES(%s,%s::jsonb,%s,%s,'deleting') ON CONFLICT(rule_id) DO NOTHING''',
-        (rule_id, json.dumps({k: rule.get(k) for k in FIELDS}), keeper, reason))
+    # Session lock covers both the remote read/write and the durable result.
+    # A try-lock never blocks the event loop behind another role's HTTP request.
+    lock_key = 'jnp:allocation-rule:' + rule_id
+    if not conn.execute('SELECT pg_try_advisory_lock(hashtextextended(%s,0))', (lock_key,)).fetchone()[0]:
+        return 'busy_keep'
+    try:
+        return await _delete_rule(conn, api, rule, reason, keeper)
+    finally:
+        conn.execute('SELECT pg_advisory_unlock(hashtextextended(%s,0))', (lock_key,))
+
+
+async def _delete_rule(conn, api, rule, reason, keeper=None):
+    rule_id = m.guid(rule['ID'])
+    previous = conn.execute('SELECT state FROM jnp_rule_cleanup_audit WHERE rule_id=%s',
+                            (rule_id,)).fetchone()
     # Fresh read immediately before deletion. Never delete an operator-edited rule.
     fresh = await api.rules()
     found = [r for r in fresh if r['ID'] == rule_id]
     if not found:
         state = 'deleted'
+    elif previous and previous[0] in ('deleting', 'uncertain', 'deleted'):
+        # Preserve an uncertain intent even when the operator changed the rule.
+        # Continued presence is never authorization to send DELETE again.
+        return 'uncertain'
     elif len(found) != 1 or signature(found[0]) != signature(rule):
         state = 'changed_keep'
     elif keeper and not any(r['ID'] == keeper and signature(r) == signature(rule) for r in fresh):
         state = 'keeper_missing_keep'
     else:
+        state = 'deleting'
+    conn.execute('''INSERT INTO jnp_rule_cleanup_audit(rule_id,payload,keeper_id,reason,state)
+        VALUES(%s,%s::jsonb,%s,%s,%s) ON CONFLICT(rule_id) DO NOTHING''',
+        (rule_id, json.dumps({k: rule.get(k) for k in FIELDS}), keeper, reason, state))
+    if state == 'deleting':
+        conn.execute("UPDATE jnp_rule_cleanup_audit SET state='deleting',updated_at=NOW() WHERE rule_id=%s", (rule_id,))
         api.allowed_deletes.add(rule_id)
         try:
             await api.request('DELETE', ROOT + "(guid'" + rule_id + "')")

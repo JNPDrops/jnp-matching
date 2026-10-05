@@ -104,7 +104,7 @@ async def test_missing_rule_after_prior_intent_is_never_recreated(previous):
 @pytest.mark.asyncio
 async def test_ambiguous_write_reconciles_without_repeat():
     db = DB(); api = MagicMock(limits={'remaining': 1000})
-    api.rules = AsyncMock(side_effect=[[], [], [{**PAYLOAD, 'ID': RULE}]])
+    api.rules = AsyncMock(side_effect=[[], [{**PAYLOAD, 'ID': RULE}]])
     api.request = AsyncMock(side_effect=TimeoutError())
     await m.reconcile(db, api, PROPOSALS)
     assert db.rows[WORDS]['state'] == 'uncertain'

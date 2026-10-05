@@ -18,7 +18,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             async def task(*args):
                 seen.append((spec.name, args))
                 try:
-                    if spec.role in {"routing", "woo-rules"}:
+                    if spec.role in {"routing", "woo-rules", "tax"}:
                         from operations.task_drain import wait
                         await wait(3600)
                     else:
@@ -62,7 +62,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 if spec.name == "debtor-routing":
                     raise ValueError("SENSITIVE_PROVIDER_BODY")
                 try:
-                    if spec.role == "woo-rules":
+                    if spec.role in {"woo-rules", "tax"}:
                         from operations.task_drain import wait
                         await wait(3600)
                     else:
@@ -171,7 +171,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
              patch("operations.worker_coordination.DurableRoleLease", return_value=lease), \
              patch.object(loop, "add_signal_handler", side_effect=lambda sig, cb: handlers.update({sig: cb})), \
              patch.object(loop, "remove_signal_handler") as remove:
-            await run("tax")
+            await run("maintenance")
         runtime.stop.assert_awaited_once()
         lease.start.assert_awaited_once()
         lease.mark_draining.assert_awaited_once()

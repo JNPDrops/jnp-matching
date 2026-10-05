@@ -67,3 +67,18 @@ class SecondWooBlueprintTests(unittest.TestCase):
         self.assertNotIn('WOO_IBAN_SHARED_SECRET',text)
         self.assertIn('envVarKey: DATABASE_URL',text)
         self.assertIn('envVarKey: ENABLE_WOO_IBAN_RULE_WRITES',text)
+
+
+class ThirdTaxBlueprintTests(unittest.TestCase):
+    def test_third_worker_uses_allocation_connection_and_existing_internal_db(self):
+        text = (BLUEPRINT.parent / 'tax-worker.yaml').read_text()
+        self.assertEqual(text.count('type: worker'), 1)
+        self.assertIn('startCommand: python -m app.worker --role tax', text)
+        self.assertIn("autoDeployTrigger: 'off'", text)
+        self.assertIn('maxShutdownDelaySeconds: 300', text)
+        self.assertIn('numInstances: 1', text)
+        self.assertIn('plan: 0.5c-512mb', text)
+        self.assertNotIn('databases:', text)
+        self.assertNotIn('EXACT_CLIENT_SECRET', text)
+        self.assertIn('envVarKey: EXACT_ALLOCATION_CLIENT_SECRET', text)
+        self.assertIn('envVarKey: DATABASE_URL', text)

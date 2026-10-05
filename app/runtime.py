@@ -53,6 +53,7 @@ ROLE_BLOCKERS = {
 # PostgreSQL handover suite before enabling this first standalone role.
 ROLE_BLOCKERS["routing"] = ("routing_handover_postgres_pending",)
 ROLE_BLOCKERS["woo-rules"] = ("woo_rules_handover_postgres_pending",)
+ROLE_BLOCKERS["tax"] = ("tax_handover_postgres_pending",)
 
 
 class SeparationNotReady(RuntimeError):
@@ -92,7 +93,7 @@ class BackgroundTasks:
         self.specs = task_specs(role)
         self.resolver = resolver
         self.tasks = {}
-        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules")}
+        self.owned_stops = {role: asyncio.Event() for role in ("routing", "woo-rules", "tax")}
         self.routing_stop = self.owned_stops["routing"]
         self.started = False
 

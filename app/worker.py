@@ -47,6 +47,8 @@ async def run(role):
         return await run_routing(app_module)
     if role == 'woo-rules':
         return await run_woo_rules(app_module)
+    if role == 'tax':
+        return await run_tax(app_module)
     from operations.worker_coordination import DurableRoleLease
     from operations.worker_write_fence import owner_scope
     stop = asyncio.Event()
@@ -87,6 +89,13 @@ async def run_woo_rules(app_module):
     from operations.assigned_role import owner_for, supervise
     return await run_supervisor(app_module, supervise, owner_for('woo-rules', 'worker'),
                                 serve, role='woo-rules')
+
+
+async def run_tax(app_module):
+    from operations.tax_agent import serve
+    from operations.assigned_role import owner_for, supervise
+    return await run_supervisor(app_module, supervise, owner_for('tax', 'worker'),
+                                serve, role='tax')
 
 
 async def run_supervisor(app_module, supervise, owner, function, **kwargs):

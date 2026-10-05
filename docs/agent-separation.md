@@ -1,6 +1,6 @@
 # Opsplitsing van JNP-agents — uitvoeringsdossier
 
-Status: gedeelde basis, routeringsworker en Woo-bankregels-worker gebouwd in
+Status: gedeelde basis, routeringsworker, Woo-bankregels-worker en tax-worker gebouwd in
 concept-PR #82. Databasevalidatie en veilige eerste productieoverdracht staan nog
 open; niet samengevoegd of uitgerold. Geen workers aangemaakt of geactiveerd.
 Opdracht: gebruiker heeft op 5 oktober 2026 rond 00:09 Europe/Amsterdam toestemming
@@ -672,3 +672,70 @@ Vastgelegde codecommit tweede onderdeel: `f0c382dbb18db12afd1daa2315a1327e8a4630
 Alle 251 lokale tests en beide Blueprint-schema-validaties hierboven betreffen
 precies deze code. Een volgende uitsluitend documentaire checkpointcommit wijzigt
 de runtime niet. De head-tests in GitHub moeten nog worden gecontroleerd.
+
+
+## Derde onderdeel, 5 oktober 2026 — belastingregels-worker
+
+Startpunt `c8e894dc7fa435c669d48470d666e49e4826e490`. Main is ongewijzigd
+`b7fd86c3dbe369b630e8f8a0367c22837015b178`; productie blijft live op
+`cf75100f845d1296eaaa60f85225caf3c656e4f2`, deployment `dep-db1ebv6gekts73dec350`.
+Er zijn geen parallelle branchwijzigingen of lopende deployments aangetroffen.
+
+### Gebouwd en begrensd
+
+- Tax toegevoegd aan de gedeelde toegewezen rollen, headless entrypoint, beheer-CLI
+  en duurzame dashboardstatus. Identiteit `(3977752, tax)`, default legacy-tax;
+  worker-tax voert pas na expliciete overdracht werk uit.
+- Scanner stopt tussen pagina's; onvolledige scans leveren geen nieuwe cursor.
+  Bestaande enabled-vlag, cadans, metadata, observaties en historische regels blijven.
+- Iedere POST krijgt eigen eigenaarscontrole, audit en bevestiging vóór de volgende
+  POST. `jnp_tax_rule_attempts` koppelt operation-ID en de bestaande regelidentiteit.
+  Geen tweede poging na onzekere uitkomst. Extra GETs voor teruglezing per regel
+  gebruiken het gedeelde quotum; de bestaande 40-POST-grens en reserves blijven.
+- Ook de bestaande DELETE van één expliciet bekende oude belastingregel is nu
+  meegenomen. Tax en maintenance delen een regellock en respecteren historische
+  deleting/uncertain-status. De adapter slikt een onzekere verwijdering niet in.
+- /api/tax/status leest opgeslagen scanner-/regelstatus en role-heartbeat.
+  /api/tax/report gebruikt opgeslagen grootboekmetadata, met bestaande auth.
+  De tax-routes starten geen financiële achtergrondtaken.
+- Eén eigen `render/tax-worker.yaml`, native Python, handmatige deploy, kleinste
+  passende 0.5c-512mb, Allocation-env-verwijzingen, bestaande private database.
+  Kostenraming $7/maand extra; drie voorbereide kleine workers samen $21/maand.
+- Runbook: `docs/tax-worker-handover.md`. Geen wijziging aan belastingbeleid,
+  debiteurenregels, Microsoft-login, Xcore, DIRECT_WOO_BANK of ordermatchingbeleid.
+
+### Validatie en uitrolgrens
+
+Lokale synthetische proeven testen bevestiging vóór vrijgave, individuele
+operation-ID's, mislukte readback/audit, timeout, cancellation, budget vóór/ná POST,
+stop tijdens een regel, partial pagination, CLI, SIGTERM en database-status.
+Vier nieuwe echte PostgreSQL-proeven testen procesconcurrentie, behoud van
+pauze/cursor/historie, auditkoppeling, geblokkeerde overdracht bij onzekerheid,
+gedeelde DELETE-lock en behoud van scan-cursor bij onderbreking.
+
+De actuele GitHub-runs van het tweede onderdeel (`37371032416`, `37371026785`)
+stonden bij controle nog queued. De nieuwe fase houdt daarom de tax-, routing- en
+Woo-uitvoergates dicht. Bestaande groene oudere runs gelden niet als bewijs voor
+deze code. Geen merge, deployment, processtop of worker-create uitgevoerd.
+Definitieve lokale resultaten en commit volgen hieronder.
+
+
+Lokale eindvalidatie derde onderdeel:
+
+- `pytest tests operations/test_woo_iban_rules.py operations/test_tax_allocation.py
+  operations/test_tax_reference.py operations/test_tax_ledger_routing.py
+  operations/test_allocation_maintenance.py -q`: **275 passed, 15 skipped**.
+- Bestaande routing-/transport-/customer-only-/orderbeleid-/Allocation-suite:
+  **36 passed**. Totaal **311 lokaal geslaagd**; geen echte Exact-aanvraag als test.
+- Alle drie afzonderlijke worker-Blueprints gevalideerd tegen het officiële
+  Render JSON Schema: geldig. Geen live bewijs van env-referenties/netwerk.
+- Vijftien echte PostgreSQL-tests niet lokaal uitgevoerd wegens ontbrekende
+  geïsoleerde testdatabase. De vier tax-proeven zijn toegevoegd aan dezelfde
+  CI-suite met uitsluitend tijdelijke synthetische data.
+- Belastingbeleid, debiteurenroutering en strikt eigen-orderbeleid zijn bytegelijk
+  aan het startpunt. De veilige initiële web-overdracht blijft vereist.
+
+Volgende bouwstap: allocation-maintenance als eigen rol onderbrengen, inclusief
+alle eigen POST/DELETE-paden, duurzame status en pauzes. De gedeelde DELETE-lock
+is hiervoor al aanwezig. Open geen execution-gate en start geen productie-
+deployment voordat de actuele databaseproeven en initiële drain bewezen zijn.

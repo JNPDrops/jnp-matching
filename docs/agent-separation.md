@@ -590,3 +590,8 @@ succes mag uitsluitend de routing-gate leeg worden gemaakt, met opnieuw de
 bijbehorende manifest-/runtime-tests aangepast en uitgevoerd. Andere roles blijven
 geblokkeerd. Daarna bootstrap volgens `docs/routing-worker-handover.md`; geen
 productieherstart zonder bewezen drain van de nog samengestelde webservice.
+
+Laatste codecommit van deze fase: `925f6b802edd6334382b400289a811b2c1ca4033`
+(`test: verify routing control and stop on unresolved writes`). De hierboven
+beschreven 158 lokale tests en schema-validatie betreffen deze code. Opvolgende
+wijzigingen die alleen dit dossier bijwerken, veranderen de runtime niet.

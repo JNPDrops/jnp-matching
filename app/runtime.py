@@ -100,8 +100,9 @@ class BackgroundTasks:
         try:
             for spec, function in functions:
                 if spec.role == "routing":
-                    from operations.task_drain import run
-                    coroutine = run(self.routing_stop, function, self.app_module)
+                    from operations.routing_role import LEGACY, WORKER, supervise
+                    coroutine = supervise(self.app_module, self.routing_stop,
+                                          LEGACY if self.role == 'legacy' else WORKER, function)
                 else:
                     coroutine = function(self.app_module) if spec.with_app else function()
                 try:
@@ -119,7 +120,7 @@ class BackgroundTasks:
         if routing is not None and not routing.done():
             # Keep the routing cycle's existing advisory lock until the current
             # entry has completed. No next entry/cycle is admitted after stop.
-            done, _ = await asyncio.wait({routing}, timeout=240)
+            done, _ = await asyncio.wait({routing}, timeout=270)
             if not done:
                 log.error("routing_drain_timeout_review_required")
         # Cancel all before awaiting any one. One failed task must not prevent

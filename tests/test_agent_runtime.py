@@ -167,7 +167,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
              patch("operations.worker_coordination.DurableRoleLease", return_value=lease), \
              patch.object(loop, "add_signal_handler", side_effect=lambda sig, cb: handlers.update({sig: cb})), \
              patch.object(loop, "remove_signal_handler") as remove:
-            await run("routing")
+            await run("tax")
         runtime.stop.assert_awaited_once()
         lease.start.assert_awaited_once()
         lease.mark_draining.assert_awaited_once()

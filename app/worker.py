@@ -43,6 +43,8 @@ async def run(role):
     require_ready(role)
     # Importing the app does not enter its FastAPI lifespan.
     from app import main as app_module
+    if role == 'routing':
+        return await run_routing(app_module)
     from operations.worker_coordination import DurableRoleLease
     from operations.worker_write_fence import owner_scope
     stop = asyncio.Event()
@@ -68,6 +70,22 @@ async def run(role):
         await lease.mark_draining()
         await runtime.stop()
         await lease.close("error" if failed else "stopped")
+        for signum in installed:
+            loop.remove_signal_handler(signum)
+
+
+async def run_routing(app_module):
+    from operations.automatic_debtor_routing import serve
+    from operations.routing_role import WORKER, supervise
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    installed = []
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(signum, stop.set)
+            installed.append(signum)
+        await supervise(app_module, stop, WORKER, serve)
+    finally:
         for signum in installed:
             loop.remove_signal_handler(signum)
 

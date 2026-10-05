@@ -159,7 +159,7 @@ def lock(conn, division, scope):
     conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (f"jnp:{division}:{scope}",))
 
 
-def claim_role(conn, division, role, owner, *, lease_seconds=90, now=None):
+def claim_role(conn, division, role, owner, *, lease_seconds=90, now=None, require_assigned=False):
     validate_identity(division, "main", role)
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{2,119}", owner or ""):
         raise ValueError("invalid_owner")
@@ -173,9 +173,11 @@ def claim_role(conn, division, role, owner, *, lease_seconds=90, now=None):
         row = conn.execute("SELECT desired_owner,active_owner,lease_until,draining FROM jnp_worker_roles WHERE division=%s AND role=%s FOR UPDATE", (division, role)).fetchone()
         desired, active, until, draining = row
         handover = draining and active is None and desired == owner
-        if (draining and not handover) or (desired is not None and desired != owner):
+        if (draining and not handover) or (desired is not None and desired != owner) or (require_assigned and desired != owner):
             raise LeaseUnavailable("role_not_assigned")
-        if active not in (None, owner) and until is not None and until > now:
+        # Stable role identities may be shared by old/new service instances.
+        # Even the same owner name must not replace a live lease epoch.
+        if active is not None and until is not None and until > now:
             raise LeaseUnavailable("role_already_owned")
         if conn.execute("SELECT 1 FROM jnp_worker_writes WHERE division=%s AND role=%s AND state='unresolved' LIMIT 1",
                         (division, role)).fetchone():
@@ -324,6 +326,8 @@ def status_snapshot(conn, division):
     owner_label = lambda value: hashlib.sha256(value.encode()).hexdigest()[:12] if value else None
     return {
         "roles": [{"role": r[0], "desired_owner": owner_label(r[1]), "active_owner": owner_label(r[2]),
+                   "execution_location": {"legacy-routing": "web", "worker-routing": "worker"}.get(r[2]),
+                   "desired_location": {"legacy-routing": "web", "worker-routing": "worker"}.get(r[1]),
                    "lease_until": r[3].isoformat() if r[3] else None,
                    "heartbeat_at": r[4].isoformat() if r[4] else None,
                    "draining": r[5], "status": r[6], "detail": r[7],
@@ -338,13 +342,14 @@ def status_snapshot(conn, division):
 
 class DurableRoleLease:
     """Async process wrapper around the short synchronous lease transactions."""
-    def __init__(self, database_url, division, role, *, owner=None, lease_seconds=90):
+    def __init__(self, database_url, division, role, *, owner=None, lease_seconds=90, require_assigned=False):
         if not database_url:
             raise ValueError("database_required_for_worker")
         validate_identity(division, "main", role)
         self.database_url, self.division, self.role = database_url, division, role
         self.owner = owner or f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:12]}"
         self.lease_seconds = lease_seconds
+        self.require_assigned = require_assigned
         self.lease_id = None
         self.lost = asyncio.Event()
         self._stop = asyncio.Event()
@@ -359,7 +364,7 @@ class DurableRoleLease:
     async def start(self):
         self.lease_id = await asyncio.to_thread(
             self._connection_call, claim_role, self.division, self.role, self.owner,
-            lease_seconds=self.lease_seconds)
+            lease_seconds=self.lease_seconds, require_assigned=self.require_assigned)
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="jnp:role-heartbeat:" + self.role)
         return self
 

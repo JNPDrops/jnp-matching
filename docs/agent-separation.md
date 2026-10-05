@@ -524,3 +524,33 @@ voor de overige schrijvers ontbreken nog. De bestaande gespecialiseerde locks,
 cursors, pauzes, historische taakstatus en boekhoudregels blijven ongewijzigd.
 Alle execution-gates blijven dicht; geen merge/deployment, nieuwe worker of kosten.
 Productie voert de huidige rollen nog in de bestaande webservice uit.
+
+## Vervolg 5 oktober 2026 — eerste routingoverdracht gebouwd
+
+Startpunt PR #82 `f84a87e24fc4d7a1164404b7c908d94913585311`. Actuele main
+`b7fd86c3dbe369b630e8f8a0367c22837015b178` (PR #88) is geïntegreerd: bankboekgroepen,
+ontbrekende inkoopfacturen en controle van webshoporderstatus blijven behouden.
+Productie blijft op `cf75100f845d1296eaaa60f85225caf3c656e4f2`, deployment
+`dep-db1ebv6gekts73dec350`; geen nieuwe deployment gestart.
+
+- Web en worker gebruiken nu één routing-supervisor met vaste locaties en unieke
+  lease-epochs. Standaard blijft routing bij web; een worker zonder toewijzing wacht.
+- Een tweede instance met dezelfde ownernaam mag een levende lease niet vervangen.
+- `app.routing_control`: status, to-worker, to-web en pause; alleen duurzame
+  coördinatiemetadata. Idempotente opdrachten, geen nieuwe financiële API-route.
+- Stop/overdracht wacht op de huidige operatie/audit, houdt de bestaande cycle-lock
+  vast en start geen volgende post. Time-out wordt een fout, geen blinde retry.
+- Dashboard Verwerking toont nu ook de duurzame uitvoeringslocatie, gewenste
+  locatie, heartbeat en onzekere schrijfpogingen.
+- `render/routing-worker.yaml` bevat alleen de eerste echte worker, met bestaande
+  env-verwijzingen, intern PostgreSQL, één kleine instance en handmatige deploys.
+  Exacte bootstrap/overdracht/rollback: `docs/routing-worker-handover.md`.
+
+Lokale lifecycle-tests geslaagd. Nieuwe PostgreSQL-overdrachtstests zijn toegevoegd.
+De eerdere f84 GitHub-runs 37368223408 en 37368229710 eindigden zonder uitgevoerde
+jobstappen (job cancelled), en gelden dus niet als geslaagde databasevalidatie.
+De routing execution-gate blijft dicht tot de nieuwe databasevalidatie slaagt.
+Andere rollen blijven eveneens geblokkeerd; HTTP-gestarte Fibonatix en andere
+financiële taken zijn niet naar workers verplaatst. Geen merge of live activatie
+zonder voldoende validatie en bewezen veilige bootstrap/drain. Geen infra/kosten
+of boekhoudmutaties door deze ontwikkelstap.

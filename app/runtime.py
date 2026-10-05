@@ -40,8 +40,10 @@ ROLES = ("web", "routing", "woo-rules", "tax", "maintenance", "fibonatix", "icep
 
 # Remove these gates only as the corresponding handover requirements are proven.
 # There is intentionally no environment-variable override for premature splitting.
-COMMON_BLOCKERS = ("shared_token_postgres_test_pending", "shared_api_budget_postgres_test_pending",
-                   "coordination_postgres_test_pending", "verified_drain_pending")
+# PostgreSQL process tests passed in GitHub run 37285557409 (2026-10-05).
+# The legacy web process still needs the same ownership and write fencing.
+COMMON_BLOCKERS = ("legacy_role_ownership_pending", "lease_write_fencing_pending",
+                   "verified_drain_pending")
 ROLE_BLOCKERS = {
     role: COMMON_BLOCKERS + (("http_job_queue_pending",) if role in {"web", "fibonatix"} else ())
     for role in ROLES

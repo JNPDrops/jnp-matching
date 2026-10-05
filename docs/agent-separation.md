@@ -452,3 +452,24 @@ Eerst de CI-uitkomst controleren en daarna gedeelde legacy-role-claims en veilig
 drainbediening bouwen. Vervolgens één rol uitschakelen in web en dezelfde rol
 starten als worker. De plugin heeft nog geen worker-create/Blueprint-apply; een
 Render-UI- of CLI-stap blijft nodig wanneer de code voor overdracht gereed is.
+
+### Vastgelegd en werkelijk getest
+
+Codecommit: `f255e1e0843d5cfd961d0d144264f0a68ed76071`, opgeslagen in PR #82.
+GitHub Actions is daadwerkelijk uitgevoerd met tijdelijke PostgreSQL 16:
+
+- [Push-run 37285557409](https://github.com/JNPDrops/jnp-matching/actions/runs/37285557409): success.
+- [PR-run 37285558302](https://github.com/JNPDrops/jnp-matching/actions/runs/37285558302): success.
+- Logs bevestigen 92 + 36 = **128 tests geslaagd, geen skips**. De drie eerder
+  geblokkeerde PostgreSQL-proeven zijn dus nu uitgevoerd: één refresh bij twee
+  processen, één winnaar bij concurrerende role-/budgetclaims, en conservatief
+  omgaan met vertraagde quota-antwoorden en nog lopende requests.
+
+De drie PostgreSQL-testgates zijn daarom vervangen door de concrete resterende
+voorwaarden: `legacy_role_ownership_pending`, `lease_write_fencing_pending` en
+`verified_drain_pending`. Geen rol is hiermee uitvoerbaar gemaakt. De volgende
+codefase moet legacy en worker hetzelfde eigenaarschap laten gebruiken, dat
+eigenaarschap vlak vóór een schrijfactie controleren, en de beheeractie voor
+drain/overdracht duurzaam vastleggen. De huidige routing-stop is hiervoor een
+bouwsteen, geen volledige productieoverdracht. HTTP-gestarte Fibonatix-taken
+houden bovendien hun afzonderlijke queue-gate.

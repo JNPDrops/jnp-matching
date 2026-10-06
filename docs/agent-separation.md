@@ -884,3 +884,33 @@ De eerdere queued/cancelled-status is hiermee vervangen door een geslaagde
 run. Geen gates geopend: de gebruiker vereist daarnaast bewezen eerste drain
 vóór gate-open, merge of deployment. Een documentatiecheckpoint verandert de
 geteste runtime niet. Geen geheimen of individuele financiële gegevens in Git.
+
+
+## Operationeel checkpoint 6 oktober ochtend — Web Shell bewezen
+
+Na expliciete toestemming voor browserfallback en beveiligde Render-aanmelding
+werkt de Web Shell op de bestaande productie-instance. Private PostgreSQL-
+dossiers zijn intern alleen-lezen ingezien. De eerdere algemene melding dat
+interne uitvoering niet bereikbaar is, geldt daarmee niet meer voor deze sessie.
+Geen secrets/env-dump, publieke databasepoort of nieuwe resource.
+
+Operationele aanvulling staat los van deze migratie in PR #89,
+`ops/psp-catchup-20261005`, documentatiecommit
+`df4e1feda42fc39b919d01c0e05943787795c52f` (`docs/psp-catchup-20261005.md`).
+Runtimecommits: ac1dd90, 3c13a2e, f021c63; 28 synthetische tests geslaagd.
+De gepinde bronopdracht is geïsoleerd via Shell uitgevoerd, zonder webdeploy.
+
+ICEPAY 4–5 oktober: 27 zichtbare PaymentID's/periodebewijs opgeslagen. Een
+ontbrekende browser-runtime is geïnstalleerd. De exportaanvraag en daarna het
+ophalen van uitsluitend de bestaande export liepen vast: laatst opgeslagen
+status blocked/payments_export/TimeoutError, nul gedownloade CSV's. Historische
+opdrachten blijven intact. Geen Exact-import of aflettering uitgevoerd.
+
+Fibonatix: historisch dossier alleen gelezen; de Paragon-bronuitbreiding is door
+automatische autorisatiecontrole afgewezen en is niet gecommit/uitgevoerd.
+De concrete reden en vervolgstap staan in het operationele dossier bij PR #89.
+Geen ontwijking van de afwijzing of geheimenextractie.
+
+Werkelijk actief blijft de bestaande webservice op cf75100. Geen rol afgesplitst,
+geen merge/deployment of processtop; bereikbare Shell en geslaagde tests zijn
+nog geen bewezen globale drain. Migratiegates blijven ongewijzigd gesloten.

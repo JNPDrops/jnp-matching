@@ -39,6 +39,10 @@ def catalog():
 
 
 def validate(job):
+    from operations import icepay_oct06
+    if job['task_key']==icepay_oct06.TASK:
+        icepay_oct06.validate(job)
+        return icepay_oct06
     from operations import icepay_automatic
     if job['task_key'] == icepay_automatic.TASK:
         icepay_automatic.validate(job)
@@ -59,6 +63,9 @@ def observed_outcome(app, task):
 
 
 async def dispatch(app, job):
+    from operations import icepay_oct06
+    if job['task_key']==icepay_oct06.TASK:
+        return await icepay_oct06.run_task(app,job)
     from operations import icepay_automatic
     if job['task_key'] == icepay_automatic.TASK:
         return await icepay_automatic.run(app, job)

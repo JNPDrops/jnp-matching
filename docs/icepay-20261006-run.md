@@ -12,7 +12,7 @@ een export aan te vragen.
 
 Queue-taak `icepay-process-20261006-v1` gebruikt deze onveranderlijke bron. Zij
 controleert bedragen, datums en ID's opnieuw, bouwt de bestaande XML-structuur voor
-bankboek 27 / debiteur 109419, en vergelijkt met Exact. Bestaande of ambigue
+bankboek 27 / debiteur 109419, en vergelijkt met Exact. Expliciete ICE BlendRate-kosten worden op bestaande PSP-kostenrekening 5570 geboekt zonder debiteur; de feeformule wordt gecontroleerd en mislukkingen worden niet geboekt. Bestaande of ambigue
 ontvangsten blokkeren een nieuwe upload. Een bewezen volledig aanwezige batch
 wordt overgeslagen. Refunds moeten afzonderlijk zijn beoordeeld; de ontvangsttaak
 kan alleen doorgaan als de bron geen refunds bevat.

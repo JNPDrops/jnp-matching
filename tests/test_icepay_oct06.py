@@ -85,3 +85,30 @@ class Pipeline(unittest.IsolatedAsyncioTestCase):
  def test_cannot_change_day_or_bank_with_parameters(self):
   for params in ({'date':'2026-10-05'},{'bank':'other'}):
    with self.assertRaises(ValueError): w.validate(dict(task_key=w.TASK,action='run',params=params))
+
+class Fees(unittest.TestCase):
+ def fee(self):
+  return dict(payment_id='999001',merchant='34950',status='OK',order=None,date=w.DAY,amount='-7.00',kind='fee',cost_reference='12345Costs',cost_description='PID 888001 EUR 100.00 | MC | ICE BlendRate 7.00%')
+ def test_fee_has_expense_ledger_and_no_debtor_or_td_reference(self):
+  xml,manifest=build(rows()+[self.fee()]);root=ET.fromstring(xml)
+  fee=root.findall('./GLTransactions/GLTransaction/GLTransactionLine')[-1]
+  self.assertEqual(fee.find('GLAccount').get('code'),'5570')
+  self.assertIsNone(fee.find('Account'))
+  self.assertEqual(fee.findtext('Amount/Value'),'-7.00')
+  self.assertEqual(fee.findtext('References/YourRef'),'12345Costs')
+  self.assertNotIn('TD',fee.findtext('Description'))
+  actual=ledger(manifest)
+  actual[-1].update(GLAccountCode=w.FEE_CODE,GLAccount=w.FEE_GL,Account=None,AccountCode='')
+  self.assertTrue(w.reconcile(manifest,actual)['complete'])
+  actual[-1]['Account']=w.DEBTOR
+  self.assertFalse(w.reconcile(manifest,actual)['complete'])
+ def test_only_proven_processor_fee_is_classified(self):
+  import csv,io
+  fee=self.fee();original={k:v for k,v in fee.items() if k not in {'kind','cost_reference','cost_description'}}
+  def raw(description):
+   o=io.StringIO();writer=csv.writer(o,delimiter=';')
+   writer.writerow(['PaymentID','Description','Reference']);writer.writerow(['999001',description,'12345Costs'])
+   return o.getvalue().encode()
+  self.assertEqual(w.classify_rows(raw(fee['cost_description']),[original]),[fee])
+  for description in ('Payout','PID 888001 EUR 100.00 | MC | ICE BlendRate 8.00%'):
+   with self.assertRaises(ValueError):w.classify_rows(raw(description),[original])

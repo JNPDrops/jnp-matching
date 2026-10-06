@@ -1,9 +1,10 @@
 """Explicit 6 October ICEPAY receipts: prepare, one upload, then readback.
 
-No payouts, fees, account creation, old task activation or automatic write retry.
-Credentials remain inside the existing Allocation integration and its PG lock.
+No payouts, account creation, old task activation or automatic write retry.
+Explicit processor fees use the existing PSP expense ledger, without a debtor.
+Credentials remain in the existing worker configuration.
 """
-import asyncio,base64,copy,hashlib,json,re,time
+import asyncio,base64,copy,csv,hashlib,io,json,re,time
 from datetime import date,datetime,timezone
 from decimal import Decimal
 from urllib.parse import urlsplit
@@ -18,6 +19,8 @@ SOURCE='icepay-source-20261006-20261006-v1'
 TEMPLATE_SHA='18574a6b7fd6cad2fc9144c1d8c0a1c279830d92739cd70f5410db89b9de94f2'
 DAY='2026-10-06'
 ENTRY=26270006
+FEE_GL='6005c8a5-a475-44a4-9ee2-59f6ac987919'
+FEE_CODE='5570'
 BASE='https://start.exactonline.nl';DIVISION=3977752
 DEBTOR='0492e907-6698-4281-98e5-c46e01ae9219'
 JOURNAL='07da1219-d8d8-4f72-b4f8-3d6735d6e65a';BANK_GL='9cb20757-80d9-4199-b2ff-055562855e5e'
@@ -26,11 +29,33 @@ SELECT='ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,Currency,Acc
 def require(ok,reason):
     if not ok:raise ValueError(reason)
 
+def classify_rows(raw, rows):
+    reader=csv.DictReader(io.StringIO(raw.decode('utf-8-sig')),delimiter=';')
+    original={}
+    for row in reader:
+        n={re.sub(r'[^a-z0-9]','',k.lower()):v.strip() for k,v in row.items()}
+        original[n['paymentid']]=n
+    result=[]
+    for r in rows:
+        if r['status']!='OK':continue
+        value=Decimal(r['amount'])
+        if value>0:
+            require(bool(re.fullmatch(r'\d+',str(r.get('order') or ''))),'receipt_order_missing')
+            result.append({**r,'kind':'receipt'})
+        else:
+            n=original[r['payment_id']]
+            match=re.fullmatch(r'PID (\d+) EUR (\d+\.\d{2}) \| (?:MC|VISA) \| ICE BlendRate (\d+\.\d{2})%',n.get('description',''))
+            require(value<0 and r['order'] is None and re.fullmatch(r'\d+Costs',n.get('reference','')) and match is not None,'unrecognized_nonreceipt')
+            require((Decimal(match[2])*Decimal(match[3])/100).quantize(Decimal('0.01'))==-value,'fee_amount_mismatch')
+            result.append({**r,'kind':'fee','cost_reference':n['reference'],'cost_description':n['description']})
+    return result
+
+
 def build_xml(rows,template):
     require(hashlib.sha256(template).hexdigest()==TEMPLATE_SHA,'template_changed')
     require(0<len(rows)<=5000 and len({r['payment_id'] for r in rows})==len(rows),'source_count_changed')
     for r in rows:
-        require(r['status']=='OK' and r['merchant']=='34950' and r['date']==DAY and re.fullmatch(r'\d+',r['payment_id']) and re.fullmatch(r'\d+',str(r.get('order') or '')) and Decimal(r['amount'])>0,'invalid_source')
+        require(r['status']=='OK' and r['merchant']=='34950' and r['date']==DAY and re.fullmatch(r'\d+',r['payment_id']) and ((r.get('kind','receipt')=='receipt' and re.fullmatch(r'\d+',str(r.get('order') or '')) and Decimal(r['amount'])>0) or (r.get('kind')=='fee' and r.get('order') is None and Decimal(r['amount'])<0 and re.fullmatch(r'\d+Costs',r.get('cost_reference','')))),'invalid_source')
     original=ET.fromstring(template)
     candidates=[(e,l) for e in original.findall('./GLTransactions/GLTransaction') for l in e.findall('GLTransactionLine') if l.find('GLAccount').get('code')=='1100' and l.find('Account') is not None and l.find('Account').get('code')=='100100' and Decimal(l.findtext('Amount/Value'))>0]
     require(bool(candidates),'receipt_template_missing')
@@ -50,10 +75,14 @@ def build_xml(rows,template):
             l=copy.deepcopy(lt);l.set('line',str(n));l.find('Date').text=day
             l.find('FinYear').set('number','2026');l.find('FinPeriod').set('number','10')
             l.find('GLAccount').set('code','1100');l.find('Account').set('code','109419')
-            description='ICEPAY TD'+r['order']+' | Payment '+r['payment_id'];ref='TD'+r['order']
+            if r.get('kind','receipt')=='receipt':
+                description='ICEPAY TD'+r['order']+' | Payment '+r['payment_id'];ref='TD'+r['order']
+            else:
+                l.find('GLAccount').set('code',FEE_CODE);l.remove(l.find('Account'))
+                description='ICEPAY Costs | Payment '+r['payment_id'];ref=r['cost_reference']
             l.find('Description').text=description;l.find('Amount/Currency').set('code','EUR');l.find('Amount/Value').text=r['amount']
             l.find('References/PaymentReference').text=r['payment_id'];l.find('References/YourRef').text=ref
-            l.find('Note').text=JOB+' | '+description;e.append(l)
+            l.find('Note').text=JOB+' | '+description+(' | '+r['cost_description'] if r.get('kind')=='fee' else '');e.append(l)
             manifest.append({**r,'entry':number,'description':description,'ref':ref})
     return ET.tostring(root,encoding='utf-8',xml_declaration=True),manifest
 
@@ -70,10 +99,11 @@ def reconcile(manifest,ledger):
         found=hits[r['payment_id']]
         if not found:continue
         bank=[l for l in found if str(l.get('GLAccountCode','')).strip()=='1317']
-        offset=[l for l in found if str(l.get('GLAccountCode','')).strip()=='1100']
+        fee=r.get('kind')=='fee'
+        offset=[l for l in found if str(l.get('GLAccountCode','')).strip()==(FEE_CODE if fee else '1100')]
         valid=len(found)==2 and len(bank)==1 and len(offset)==1
         if valid:
-            valid=(Decimal(str(bank[0]['AmountDC']))==Decimal(r['amount']) and Decimal(str(offset[0]['AmountDC']))==-Decimal(r['amount']) and str(offset[0].get('AccountCode','')).strip()=='109419' and offset[0].get('Account')==DEBTOR and bank[0]['EntryID']==offset[0]['EntryID'])
+            valid=(Decimal(str(bank[0]['AmountDC']))==Decimal(r['amount']) and Decimal(str(offset[0]['AmountDC']))==-Decimal(r['amount']) and ((fee and offset[0].get('Account') is None and offset[0].get('GLAccount')==FEE_GL) or (not fee and str(offset[0].get('AccountCode','')).strip()=='109419' and offset[0].get('Account')==DEBTOR)) and bank[0]['EntryID']==offset[0]['EntryID'])
             valid=valid and all(str(l.get('JournalCode','')).strip()=='27' and l['EntryNumber']==r['entry'] and l['Description']==r['description'] and l.get('Currency')=='EUR' and exact_date(l['Date'])==r['date'] for l in found) and offset[0].get('YourRef')==r['ref']
         (verified if valid else errors).append(r['payment_id'])
     occupied=sorted({l['EntryNumber'] for l in ledger}&{r['entry'] for r in manifest})
@@ -85,9 +115,8 @@ def reconcile(manifest,ledger):
 
 class API:
     def __init__(self,app):
-        from operations.allocation_connection import RoutingApp
         require(app.DIVISION==DIVISION and app.BASE_URL==BASE,'wrong_administration')
-        self.app=RoutingApp(app);self.calls=0;self.quota={};self.last=0
+        self.app=app;self.calls=0;self.quota={};self.last=0
     async def get(self,resource,params=None,url=None):
         import httpx
         from operations.bacs_debtor_transfer import TLS_CONTEXT
@@ -111,7 +140,7 @@ class API:
             if not url:return rows
             require(url not in seen and bool(batch),'bad_pagination');seen.add(url);params=None
     async def ledger(self):
-        return await self.rows('financialtransaction/TransactionLines',{'$filter':f"FinancialYear eq 2026 and (JournalCode eq '27' or GLAccount eq guid'{BANK_GL}' or Account eq guid'{DEBTOR}')",'$select':SELECT,'$orderby':'EntryNumber,LineNumber'})
+        return await self.rows('financialtransaction/TransactionLines',{'$filter':f"FinancialYear eq 2026 and (JournalCode eq '27' or GLAccount eq guid'{BANK_GL}' or Account eq guid'{DEBTOR}' or GLAccount eq guid'{FEE_GL}')",'$select':SELECT,'$orderby':'EntryNumber,LineNumber'})
 
 @fence.owned_operation('icepay')
 async def run(mode):
@@ -120,7 +149,7 @@ async def run(mode):
     if mode=='apply':
         require(fence.current_owner() is not None and fence.current_owner().role=='icepay','assigned_worker_required')
         require(datetime.now(timezone.utc)<EXPIRES,'authorization_expired')
-    task=JOB+':'+mode;data={};summary={'state':'started','financial_writes':False,'connection':'allocation'}
+    task=JOB+':'+mode;data={};summary={'state':'started','financial_writes':False,'connection':'main'}
     conn=app._db_connect();locked=False;claimed=False
     def persist():
         conn.execute('UPDATE icepay_receipt_import_runs SET artifacts=%s::jsonb,summary=%s::jsonb WHERE task=%s',(json.dumps(data),json.dumps(summary),task))
@@ -138,12 +167,12 @@ async def run(mode):
         from operations.icepay_source_window import validate_source
         rows,source_summary,tz=validate_source(raw,parent['proof']['ui_payment_ids'],parent['table_evidence'],date(2026,10,6),date(2026,10,6))
         require(rows==source[1]['transactions'],'source_rows_changed')
-        receipts=[r for r in rows if r['status']=='OK']
+        receipts=classify_rows(raw,rows)
         require(len(receipts)==source[2]['td_ok_count'],'source_count_changed')
         require(sum((Decimal(r['amount']) for r in receipts),Decimal('0.00'))==Decimal(source[2]['td_ok_total']),'source_total_changed')
         xml,manifest=build_xml(receipts,template)
         sha=hashlib.sha256(xml).hexdigest();data.update(manifest=manifest,xml=base64.b64encode(xml).decode(),source_job=SOURCE,source_summary=source_summary)
-        summary.update(receipts=len(receipts),total=source_summary['td_ok_total'],xml_sha256=sha,source_sha256=source[2]['source_sha256'],entries=[ENTRY])
+        summary.update(receipts=sum(r['kind']=='receipt' for r in receipts),fees=sum(r['kind']=='fee' for r in receipts),receipt_total=str(sum((Decimal(r['amount']) for r in receipts if r['kind']=='receipt'),Decimal('0.00'))),fee_total=str(sum((Decimal(r['amount']) for r in receipts if r['kind']=='fee'),Decimal('0.00'))),total=source_summary['td_ok_total'],xml_sha256=sha,source_sha256=source[2]['source_sha256'],entries=[ENTRY])
         if mode!='prepare':
             prepared=conn.execute('SELECT artifacts,summary FROM icepay_receipt_import_runs WHERE task=%s',(JOB+':prepare',)).fetchone()
             require(prepared and prepared[1]['state'] in {'prepared','import_verified'} and prepared[0]['xml']==data['xml'] and prepared[0]['manifest']==manifest,'prepared_source_changed')
@@ -152,15 +181,17 @@ async def run(mode):
         require(len(js)==1 and js[0]['ID']==JOURNAL and js[0]['GLAccount']==BANK_GL and js[0]['Currency']=='EUR' and js[0]['Type']==12 and js[0]['IsBlocked'] is False,'journal_changed')
         acc=await api.rows('crm/Accounts',{'$filter':"Code eq '            109419'",'$select':'ID,Code,IsSales,Status'})
         require(len(acc)==1 and acc[0]['ID']==DEBTOR and acc[0]['IsSales'] is True and acc[0]['Status']=='C','debtor_changed')
+        fees=await api.rows('financial/GLAccounts',{'$filter':"Code eq '5570'",'$select':'ID,Code,Description,BalanceType'})
+        require(len(fees)==1 and fees[0]['ID']==FEE_GL and fees[0]['BalanceType']=='W' and fees[0]['Description']=='Payment service provider','fee_ledger_changed')
         before=await api.ledger();check=reconcile(manifest,before);data.update(before=before,before_check=check)
-        summary.update(api_calls=api.calls,quota=api.quota,verified_receipts=len(check['verified_ids']))
+        summary.update(api_calls=api.calls,quota=api.quota,verified_transactions=len(check['verified_ids']))
         if check['complete']:summary.update(state='import_verified',already_present=True);return summary
         if mode=='reconcile':summary['state']='requires_review';return summary
         require(check['safe_to_import'],'existing_or_ambiguous_receipt')
         if mode=='prepare':summary['state']='prepared';return summary
         require(conn.execute('SELECT 1 FROM icepay_receipt_import_writes WHERE batch=%s',(JOB,)).fetchone() is None,'previous_write_reconcile_only')
-        # One XML write, no generic retry helper. The Allocation integration
-        # serializes token refresh/callback against the running routing service.
+        # One XML write, no generic retry helper. The existing main integration
+        # retains its token lock and the worker retains its durable write fence.
         token=await api.app._access_token()
         require(api.quota.get('daily',0)>200 and api.quota.get('minute',0)>8,'write_budget_low')
         write=conn.execute('INSERT INTO icepay_receipt_import_writes(batch,sha256) VALUES(%s,%s) ON CONFLICT DO NOTHING RETURNING batch',(JOB,sha)).fetchone()
@@ -177,7 +208,7 @@ async def run(mode):
             summary.update(write_outcome='unknown_reconcile_required',write_error_type=type(exc).__name__)
         persist()
         after=await api.ledger();check=reconcile(manifest,after);data.update(after=after,after_check=check)
-        summary.update(state='import_verified' if check['complete'] else 'requires_review_no_retry',verified_receipts=len(check['verified_ids']),api_calls=api.calls,quota=api.quota)
+        summary.update(state='import_verified' if check['complete'] else 'requires_review_no_retry',verified_transactions=len(check['verified_ids']),api_calls=api.calls,quota=api.quota)
     except Exception as exc:
         reason=str(exc) if isinstance(exc,ValueError) and re.fullmatch(r'[a-z0-9_]+',str(exc)) else type(exc).__name__
         summary.update(state='blocked',reason=reason)

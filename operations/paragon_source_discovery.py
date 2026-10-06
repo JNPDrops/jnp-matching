@@ -6,8 +6,8 @@ import re
 from urllib.parse import urlsplit
 from operations import paragon_login_probe as login
 
-JOB='paragon-source-discovery-20261003-05-v3'
-PREDECESSOR='paragon-source-discovery-20261003-05-v2'
+JOB='paragon-source-discovery-20261003-05-v4'
+PREDECESSOR='paragon-source-discovery-20261003-05-v3'
 
 
 def safe_links(links):
@@ -34,6 +34,7 @@ async def observe(page, data):
     p=urlsplit(page.url)
     if p.scheme!='https' or p.netloc!='paragon.online':
         raise ValueError('unexpected_origin')
+    await page.wait_for_function("() => [...document.querySelectorAll('input,select,button')].some(e => e.offsetWidth || e.offsetHeight)",timeout=20000)
     # Public form metadata only: no input values, cookies, tokens, row contents.
     data['path']=p.path
     data['controls']=await page.locator('input,select,button').evaluate_all('''es=>es.filter(e=>e.offsetWidth||e.offsetHeight).map(e=>({

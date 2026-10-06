@@ -44,4 +44,13 @@ class WindowTests(unittest.TestCase):
         with self.assertRaises(t.AcquisitionStopped):
             t.parse_payments(fixture([row]),1,['456'],start=date(2026,10,4),end=date(2026,10,5))
 
+    def test_operator_resume_keeps_previous_failure_and_excludes_later_stages(self):
+        conn=Mock(); conn.execute.return_value.fetchone.return_value=None
+        self.assertFalse(w.resume_before_login(conn,'job'))
+        sql,args=conn.execute.call_args.args
+        self.assertIn("status->>'stage'='browser_launch'",sql)
+        self.assertIn("artifacts='{}'::jsonb",sql)
+        self.assertIn("'before_login_failure',status",sql)
+        self.assertEqual(args,('job',))
+
 if __name__=='__main__': unittest.main()

@@ -35,8 +35,19 @@ def claim(conn, job):
 
 def finish(conn, job, status, artifacts, summary):
     conn.execute('''UPDATE icepay_transaction_tasks SET status=%s::jsonb,
-        artifacts=%s::jsonb,summary=%s::jsonb WHERE job=%s''',
+        artifacts=artifacts || %s::jsonb,summary=%s::jsonb WHERE job=%s''',
         (json.dumps(status),json.dumps(artifacts),json.dumps(summary),job))
+
+
+def resume_before_login(conn, job):
+    # Explicit operator recovery only: once, before any login or source access.
+    return conn.execute('''UPDATE icepay_transaction_tasks
+        SET artifacts=artifacts || jsonb_build_object('before_login_failure',status),
+            status='{"state":"started","stage":"source_capture","financial_writes":false}'::jsonb
+        WHERE job=%s AND status->>'state'='blocked'
+          AND status->>'stage'='browser_launch' AND status->>'reason'='Error'
+          AND artifacts='{}'::jsonb AND summary='{}'::jsonb
+        RETURNING job''',(job,)).fetchone() is not None
 
 
 async def all_evidence(page):
@@ -136,12 +147,13 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--from-date',required=True,type=date.fromisoformat)
     parser.add_argument('--through-date',required=True,type=date.fromisoformat)
+    parser.add_argument('--resume-before-login',action='store_true')
     args=parser.parse_args(); job=identity(args.from_date,args.through_date)
     import psycopg
     # Commit claim BEFORE any remote access. A failed or interrupted claim must
     # be investigated; this command never retries it or chooses another ID.
     with psycopg.connect(os.environ['DATABASE_URL']) as conn:
-        claimed=claim(conn,job)
+        claimed=resume_before_login(conn,job) if args.resume_before_login else claim(conn,job)
     if not claimed:
         print(json.dumps({'job':job,'state':'already_claimed','financial_writes':False})); return
     try:

@@ -91,6 +91,10 @@ async def click(app,day,page,data):
     after,remaining=await selection(page,data['target'])
     data.update(after=after,open_before=1,remaining_open=len(remaining),matched=1-len(remaining),automatic_attempted=True)
     await asyncio.to_thread(save,app,day,'completed',data)
+    if not remaining:
+        with app._db_connect() as conn:
+            conn.execute("UPDATE jnp_suspense_review SET details=details||%s::jsonb,observed_at=now() WHERE bank_line_id=%s",
+                         (json.dumps({'status':'resolved','match_executed':True,'execution_label':'Exact Automatically uitgevoerd; bankregel niet meer open','next_action':'','automatic_processing_date':day.isoformat()}),data['target']['bank_line_id']))
 
 
 async def run_queued(app):
@@ -100,6 +104,7 @@ async def run_queued(app):
         if not conn.execute("SELECT to_regclass('jnp_bank_automatic_runs')").fetchone()[0]:return
         if not conn.execute('SELECT pg_try_advisory_lock(%s)',(LOCK,)).fetchone()[0]:return
         try:
+            if conn.execute("SELECT 1 FROM jnp_bank_automatic_runs WHERE division=%s AND state IN ('inspecting','click_requested','uncertain') LIMIT 1",(n.DIVISION,)).fetchone():return
             row=conn.execute("SELECT processing_date,data FROM jnp_bank_automatic_runs WHERE division=%s AND state='queued' ORDER BY processing_date LIMIT 1",(n.DIVISION,)).fetchone()
             if not row:return
             day,data=row

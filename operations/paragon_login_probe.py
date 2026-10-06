@@ -127,7 +127,7 @@ def store_result(database_url: str, result: dict) -> None:
                      (json.dumps(result), PROBE_ID))
 
 
-async def worker() -> dict:
+async def worker(*, observe=None, accept_downloads=False) -> dict:
     stage = "configuration"
     password_accepted = totp_submitted = dashboard_verified = False
     browser = None
@@ -165,7 +165,7 @@ async def worker() -> dict:
             browser = await playwright.chromium.launch(headless=True, env=install_env)
             try:
                 # No persisted context, storage state, cookies, traces, or video.
-                context = await browser.new_context(accept_downloads=False)
+                context = await browser.new_context(accept_downloads=accept_downloads)
                 page = await context.new_page()
                 page.set_default_timeout(15000)
                 stage = "login_form"
@@ -200,6 +200,8 @@ async def worker() -> dict:
                 await page.get_by_role("heading", name="Dashboard", exact=True).wait_for(state="visible")
                 await page.get_by_role("button", name=re.compile(r"^Hello .+!$")).wait_for(state="visible")
                 dashboard_verified = True
+                if observe is not None:
+                    await observe(page)
             finally:
                 await browser.close()
                 browser = None
@@ -266,3 +268,4 @@ async def run() -> None:
 
 if __name__ == "__main__" and sys.argv[1:] == ["--worker"]:
     print(json.dumps(asyncio.run(worker()), sort_keys=True))
+

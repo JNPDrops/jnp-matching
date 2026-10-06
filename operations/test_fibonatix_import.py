@@ -129,7 +129,7 @@ class NetworkSafety(unittest.IsolatedAsyncioTestCase):
              patch.object(f,'update'),patch.object(f,'payload',return_value=fixture()), \
              patch.object(f,'reconcile',AsyncMock(return_value={'complete':False})) as reconcile, \
              patch.object(f.httpx,'AsyncClient',return_value=manager):
-            await f.import_xml()
+            with self.assertRaises(HTTPException): await f.import_xml()
         claim.assert_called_once_with('xml_upload');client.post.assert_awaited_once();reconcile.assert_awaited_once()
 
 

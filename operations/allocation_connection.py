@@ -127,6 +127,8 @@ class RoutingApp:
         self.DIVISION=app.DIVISION
         self.BASE_URL=app.BASE_URL
         self.COLLECTIVE_DEBTOR_CODE=app.COLLECTIVE_DEBTOR_CODE
+        self.DATABASE_URL=app.DATABASE_URL
+        self.EXACT_CONNECTION_KEY='allocation'
 
     async def _access_token(self):
         return await routing_access_token(self.original)
@@ -161,9 +163,13 @@ async def probe(conn, config, tokens):
         save_tokens(conn,config,tokens)
     try:
         async with httpx.AsyncClient(timeout=30,follow_redirects=False,trust_env=False,verify=TLS_CONTEXT) as client:
-            response=await client.get(BASE+f'/api/v1/{DIVISION}/crm/Accounts',
-                params={'$select':'ID','$filter':"Code eq '            100100'",'$top':1},
-                headers={'Authorization':'Bearer '+tokens['access_token'],'Accept':'application/json'})
+            from operations.worker_coordination import budgeted_http
+            budget_app=RoutingApp(main_module())
+            response=await budgeted_http(budget_app, 'reports', 'GET',
+                lambda: client.get(BASE+f'/api/v1/{DIVISION}/crm/Accounts',
+                    params={'$select':'ID','$filter':"Code eq '            100100'",'$top':1},
+                    headers={'Authorization':'Bearer '+tokens['access_token'],'Accept':'application/json'}),
+                priority='bulk', floor=400)
         result=quota_result(response)
         # No response body, account data, request URLs or credentials are kept.
     except Exception:

@@ -22,6 +22,7 @@ from uuid import UUID
 
 import httpx
 import certifi
+from operations.worker_coordination import BudgetDeferred
 
 # Reuse the verified CA store across short-lived clients. Rebuilding it on every
 # request caused about 24 MiB growth per 25 live requests on the Render runtime.
@@ -109,11 +110,12 @@ def private_write(path, data):
 
 
 class Exact:
-    def __init__(self, app_module):
+    def __init__(self, app_module, *, role="routing", priority="routine", floor=200):
         require(app_module.DIVISION == DIVISION and app_module.BASE_URL == BASE,
                 "Wrong Exact administration or host")
         require(app_module.COLLECTIVE_DEBTOR_CODE == SOURCE, "Collective debtor changed")
         self.app = app_module
+        self.role, self.priority, self.floor = role, priority, floor
         self.last_request = 0.0
         self.limits = {}
 
@@ -124,8 +126,14 @@ class Exact:
             token = await self.app._access_token()
             async with httpx.AsyncClient(timeout=45, follow_redirects=False, trust_env=False,
                                          verify=TLS_CONTEXT) as client:
-                response = await client.request(method, url, params=params, json=payload,
-                    headers={"Authorization": "Bearer " + token, "Accept": "application/json"})
+                from operations.worker_coordination import budgeted_http
+                response = await budgeted_http(
+                    self.app, self.role, method,
+                    lambda: client.request(method, url, params=params, json=payload,
+                        headers={"Authorization": "Bearer " + token, "Accept": "application/json"}),
+                    priority=self.priority, floor=self.floor)
+        except BudgetDeferred:
+            raise
         except Exception:
             # PUT is never retried, including ambiguous network outcomes.
             raise Stop(f"Exact {method} transport/auth failure; inspect audit before retrying") from None

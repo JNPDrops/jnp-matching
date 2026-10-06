@@ -1,0 +1,201 @@
+import asyncio
+import json
+import subprocess
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from app.runtime import BackgroundTasks, ROLES, SeparationNotReady, TASKS, background_tasks, role_manifest
+
+
+class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_task_arguments_and_shutdown(self):
+        seen, stopped = [], []
+        app = object()
+
+        def resolver(spec):
+            async def task(*args):
+                seen.append((spec.name, args))
+                try:
+                    if spec.role in {"routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay", "reports"}:
+                        from operations.task_drain import wait
+                        await wait(3600)
+                    else:
+                        await asyncio.Event().wait()
+                finally:
+                    stopped.append(spec.name)
+            return task
+
+        runtime = BackgroundTasks(app, resolver=resolver)
+        await runtime.start()
+        await asyncio.sleep(0)
+        self.assertEqual(len(seen), len(TASKS))
+        self.assertEqual(seen, [(spec.name, (app,) if spec.with_app else ()) for spec in TASKS])
+        with self.assertRaisesRegex(RuntimeError, "already_started"):
+            await runtime.start()
+        await runtime.stop()
+        self.assertCountEqual(stopped, [spec.name for spec in TASKS])
+
+    async def test_import_failure_starts_no_partial_owners(self):
+        started = []
+
+        def resolver(spec):
+            if spec.name == "icepay-jobs":
+                raise ImportError("missing module")
+            async def task(*_):
+                started.append(spec.name)
+            return task
+
+        runtime = BackgroundTasks(None, resolver=resolver)
+        with self.assertRaises(ImportError):
+            await runtime.start()
+        await asyncio.sleep(0)
+        self.assertEqual(started, [])
+        self.assertEqual(runtime.tasks, {})
+
+    async def test_failed_task_does_not_prevent_other_cleanup_or_leak_message(self):
+        stopped = []
+
+        def resolver(spec):
+            async def task(*_):
+                if spec.name == "debtor-routing":
+                    raise ValueError("SENSITIVE_PROVIDER_BODY")
+                try:
+                    if spec.role in {"woo-rules", "tax", "maintenance", "fibonatix", "icepay", "reports"}:
+                        from operations.task_drain import wait
+                        await wait(3600)
+                    else:
+                        await asyncio.Event().wait()
+                finally:
+                    stopped.append(spec.name)
+            return task
+
+        runtime = BackgroundTasks(None, resolver=resolver)
+        await runtime.start()
+        await asyncio.sleep(0)
+        with self.assertLogs("uvicorn.error", level="ERROR") as messages:
+            await runtime.stop()
+        self.assertEqual(len(stopped), len(TASKS)-1)
+        self.assertNotIn("SENSITIVE_PROVIDER_BODY", str(messages.output))
+        self.assertIn("ValueError", str(messages.output))
+
+    async def test_fibonatix_shutdown_failure_still_stops_lifespan_tasks(self):
+        with patch("app.runtime.BackgroundTasks") as factory, patch(
+            "operations.fibonatix_import.shutdown", new=AsyncMock(side_effect=RuntimeError("shutdown"))
+        ):
+            runtime = factory.return_value
+            runtime.start = AsyncMock()
+            runtime.stop = AsyncMock()
+            with self.assertRaisesRegex(RuntimeError, "shutdown"):
+                async with background_tasks(None):
+                    pass
+            runtime.stop.assert_awaited_once()
+
+    async def test_activated_roles_describe_only_their_assigned_tasks(self):
+        for role in ROLES:
+            with self.subTest(role=role):
+                self.assertTrue(role_manifest(role)["execution_ready"])
+                runtime = BackgroundTasks(None, role)
+                self.assertTrue(all(spec.role == role for spec in runtime.specs))
+
+    async def test_blocked_role_cannot_execute(self):
+        for role in ROLES:
+            with self.subTest(role=role), patch.dict("app.runtime.ROLE_BLOCKERS", {role: ("test_gate",)}):
+                with self.assertRaises(SeparationNotReady):
+                    BackgroundTasks(None, role)
+
+    async def test_worker_refuses_before_importing_the_financial_app(self):
+        from app.worker import run
+        with patch.dict("app.runtime.ROLE_BLOCKERS", {"routing": ("test_gate",)}), \
+                patch("app.runtime.import_module", side_effect=AssertionError("unexpected import")):
+            with self.assertRaises(SeparationNotReady):
+                await run("routing")
+
+    async def test_worker_wakes_on_stop_and_does_not_restart_finished_job(self):
+        from app.worker import wait_for_stop
+        calls = []
+
+        async def one_shot():
+            calls.append("once")
+
+        stop = asyncio.Event()
+        task = asyncio.create_task(one_shot())
+        runtime = SimpleNamespace(tasks={"once": task}, specs=[])
+        waiter = asyncio.create_task(wait_for_stop(runtime, stop))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.assertFalse(waiter.done())
+        stop.set()
+        await waiter
+        self.assertEqual(calls, ["once"])
+
+    async def test_worker_exits_if_continuous_owner_ends(self):
+        from app.worker import wait_for_stop
+        task = asyncio.create_task(asyncio.sleep(0))
+        runtime = SimpleNamespace(tasks={"routing": task}, specs=[SimpleNamespace(name="routing", continuous=True)])
+        with self.assertRaisesRegex(RuntimeError, "continuous_task_exited:routing"):
+            await wait_for_stop(runtime, asyncio.Event())
+
+    async def test_worker_error_does_not_expose_provider_message(self):
+        from app.worker import wait_for_stop
+
+        async def failed():
+            raise ValueError("PRIVATE_RESPONSE")
+
+        task = asyncio.create_task(failed())
+        runtime = SimpleNamespace(tasks={"once": task}, specs=[])
+        with self.assertRaisesRegex(RuntimeError, "background_task_failed:once") as error:
+            await wait_for_stop(runtime, asyncio.Event())
+        self.assertNotIn("PRIVATE_RESPONSE", str(error.exception))
+
+    async def test_worker_stops_when_durable_lease_is_lost(self):
+        from app.worker import wait_for_stop
+        task = asyncio.create_task(asyncio.Event().wait())
+        lost = asyncio.Event()
+        runtime = SimpleNamespace(role="routing", tasks={"routing":task},
+                                  specs=[SimpleNamespace(name="routing", continuous=True)])
+        waiter = asyncio.create_task(wait_for_stop(runtime, asyncio.Event(), lost))
+        lost.set()
+        with self.assertRaisesRegex(RuntimeError, "role_lease_lost:routing"):
+            await waiter
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def test_headless_signal_stops_and_releases_handlers(self):
+        import signal
+        from app.worker import run_supervisor
+        loop = asyncio.get_running_loop()
+        handlers = {}
+        async def supervisor(app,stop,owner,function,**kwargs):
+            handlers[signal.SIGTERM]()
+            await stop.wait()
+        with patch.object(loop,"add_signal_handler",side_effect=lambda sig,cb:handlers.update({sig:cb})), \
+             patch.object(loop,"remove_signal_handler") as remove:
+            await run_supervisor(None,supervisor,'worker-reports',None,role='reports')
+        self.assertCountEqual([args.args[0] for args in remove.call_args_list], [signal.SIGTERM, signal.SIGINT])
+
+
+class CommandTests(unittest.TestCase):
+    def test_check_works_with_no_dependencies_or_credentials(self):
+        # -S prevents site packages, proving --check cannot reach financial
+        # implementations (which require FastAPI/psycopg) or open a database.
+        result = subprocess.run([sys.executable, "-S", "-m", "app.worker", "--role", "routing", "--check"],
+                                capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout)
+        self.assertTrue(data["execution_ready"])
+        self.assertEqual(data["tasks"], ["debtor-routing"])
+
+    def test_headless_execution_exits_nonzero_before_loading_app(self):
+        result = subprocess.run([sys.executable, "-S", "-c",
+                                "from app import runtime; "
+                                "runtime.ROLE_BLOCKERS['icepay']=('test_gate',); "
+                                "from app.worker import main; main(['--role','icepay'])"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("role_not_ready:icepay", result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

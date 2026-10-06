@@ -82,6 +82,25 @@ class ProjectionTest(unittest.TestCase):
         self.assertTrue(all(s["status"]=="error" for s in result["sources"]))
         self.assertNotIn("private detail",str(result))
 
+    def test_durable_agent_status_is_separate_from_financial_execution(self):
+        service=PostgresWorklist("unused")
+        agents={"available":True,"roles":[{"role":"routing","status":"ready","lease_live":True}],
+                "api_budgets":[{"connection":"allocation","daily_remaining":4812}]}
+        with patch.object(service,"read_source",return_value=([],{"status":"ready","observed_at":NOW})), \
+             patch.object(service,"workflow",return_value={}), patch.object(service,"coordination",return_value=agents):
+            result=service.read(DIVISION)
+        self.assertEqual(result["agents"],agents)
+        self.assertFalse(result["financial_execution_enabled"])
+
+    def test_coordination_failure_exposes_no_database_detail(self):
+        service=PostgresWorklist("unused")
+        with patch.object(service,"read_source",return_value=([],{"status":"ready","observed_at":NOW})), \
+             patch.object(service,"workflow",return_value={}), \
+             patch.object(service,"coordination",side_effect=RuntimeError("private database address")):
+            result=service.read(DIVISION)
+        self.assertEqual(result["agents"]["error_type"],"status_unavailable")
+        self.assertNotIn("private database address",str(result))
+
     def test_unconfigured_division_never_queries_jnp(self):
         service=PostgresWorklist("unused")
         with patch.object(service,"read_source") as read:

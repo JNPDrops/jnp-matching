@@ -357,6 +357,15 @@ class PostgresWorklist:
                 raise ValueError("workflow_limit_exceeded")
             return {key: (state, revision) for key, state, revision in rows}
 
+    def coordination(self, division):
+        from operations.worker_coordination import status_snapshot
+        with self.connect() as conn:
+            conn.execute("SET TRANSACTION READ ONLY")
+            if not all(self.exists(conn, name) for name in ("jnp_worker_roles", "jnp_exact_api_budget")):
+                return {"available": False, "roles": [], "api_budgets": []}
+            result = status_snapshot(conn, int(division))
+            return {"available": True, **result}
+
     def read(self, division):
         if division != DIVISION or str(os.getenv("EXACT_DIVISION", DIVISION)) != division:
             return {"division": division, "connected": False, "complete": False, "items": [], "sources": [], "reason": "Administratiebron nog niet aangesloten"}
@@ -377,6 +386,10 @@ class PostgresWorklist:
             workflow_ready = True
         except Exception:
             saved, workflow_ready = {}, False
+        try:
+            agents = self.coordination(division)
+        except Exception:
+            agents = {"available": False, "roles": [], "api_budgets": [], "error_type": "status_unavailable"}
         known = {i["id"] for i in items}
         for item in items:
             state, revision = saved.get(item["id"], ({}, 0))
@@ -398,7 +411,7 @@ class PostgresWorklist:
         return {"division": division, "connected": any(s["status"] == "ready" for s in sources),
                 "complete": all(s["status"] == "ready" for s in sources), "sources": sources, "items": items,
                 "workflow_ready": workflow_ready, "read_at": datetime.now(timezone.utc).isoformat(),
-                "financial_execution_enabled": False}
+                "financial_execution_enabled": False, "agents": agents}
 
     def change(self, division, case_id, actor, action, note, decision, revision, fingerprint):
         current = self.read(division)

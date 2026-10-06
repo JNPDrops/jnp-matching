@@ -27,6 +27,7 @@ import xml.etree.ElementTree as ET
 
 from fastapi import APIRouter, HTTPException, Request
 import httpx
+from operations import worker_write_fence as fence, task_drain
 
 JOB = 'FIBO-20260922-20261002'
 SHA = '18574a6b7fd6cad2fc9144c1d8c0a1c279830d92739cd70f5410db89b9de94f2'
@@ -305,6 +306,7 @@ async def reconcile():
     return result
 
 
+@fence.owned_operation('fibonatix')
 async def import_xml():
     check = await preflight()
     if check['complete']:
@@ -315,13 +317,16 @@ async def import_xml():
     app = application()
     token = await app._access_token()
     claim('xml_upload')
-    update(phase='import_requested', financial_write_attempted=True)
+    update(phase='import_requested', financial_write_attempted=True, **fence.audit_metadata())
     # One write only. Do not use the generic JSON helper's 401 recursion.
     try:
         async with httpx.AsyncClient(timeout=180, follow_redirects=False) as client:
-            response = await client.post(app.BASE_URL + '/docs/XMLUpload.aspx',
-                params={'Topic':'GLTransactions','_Division_':str(DIVISION)}, content=payload(),
-                headers={'Authorization':'Bearer '+token,'Content-Type':'application/xml; charset=utf-8','Accept':'application/xml,text/xml'})
+            from operations.worker_coordination import budgeted_http
+            response = await budgeted_http(app, 'fibonatix', 'POST',
+                lambda: client.post(app.BASE_URL + '/docs/XMLUpload.aspx',
+                    params={'Topic':'GLTransactions','_Division_':str(DIVISION)}, content=payload(),
+                    headers={'Authorization':'Bearer '+token,'Content-Type':'application/xml; charset=utf-8','Accept':'application/xml,text/xml'}),
+                priority='critical', floor=200)
         try:
             result_xml=ET.fromstring(response.content)
             result_body=ET.tostring(result_xml,encoding='unicode')[:30000] if result_xml.tag in {'eExact','Messages','Message'} else 'unexpected_document'
@@ -334,6 +339,7 @@ async def import_xml():
     result = await reconcile()
     if not result['complete']:
         update(phase='import_requires_review_no_retry')
+        raise HTTPException(409,'import_requires_review_no_retry')
 
 
 async def ui_snapshot(page):
@@ -587,6 +593,10 @@ async def browser_snapshot(automatic=False,all_statements=False,inspect_match=Fa
 
 
 async def run(action):
+    if action in {'automatic','settle_48189'}:
+        raise HTTPException(409,'retired_cross_order_operation')
+    if task_drain.requested():
+        raise HTTPException(409,'worker_draining')
     conn = database()
     locked = False
     try:
@@ -601,11 +611,12 @@ async def run(action):
                     'settle_48189':lambda:browser_snapshot(settle=True)}
         await operations[action]()
     except asyncio.CancelledError:
-        update(phase='interrupted_reconcile_before_write',last_error='worker_cancelled')
+        if locked: update(phase='interrupted_reconcile_before_write',last_error='worker_cancelled')
         raise
     except Exception as exc:
         error = str(exc.detail)[:1500] if isinstance(exc,HTTPException) else type(exc).__name__
-        update(phase='stopped',last_error=error,last_error_status=exc.status_code if isinstance(exc,HTTPException) else None)
+        if locked: update(phase='stopped',last_error=error,last_error_status=exc.status_code if isinstance(exc,HTTPException) else None)
+        if fence.current_job(): raise
     finally:
         if locked:
             update(running=False)
@@ -640,7 +651,9 @@ async def prepare(request:Request):
 @router.get('/status')
 async def status(request:Request):
     authorize(request)
-    return dict(state(), runtime_task_running=any(not task.done() for task in TASKS))
+    from operations.fibonatix_jobs import status as job_status
+    jobs=job_status()
+    return dict(state(), runtime_task_running=any(j['state']=='running' for j in jobs), jobs=jobs)
 
 
 @router.get('/artifact/{name}')
@@ -658,12 +671,8 @@ async def get_artifact(name:str,request:Request):
 @router.post('/{action}')
 async def start(action:str,request:Request):
     authorize(request)
-    if action not in {'preflight','import','reconcile','inspect','inspect_all','inspect_match','settle_48189','automatic'}:
-        raise HTTPException(404,'Not found')
-    state()
-    if any(not task.done() for task in TASKS):
-        raise HTTPException(409,'job_already_running')
-    task=asyncio.create_task(run(action))
-    TASKS.add(task)
-    task.add_done_callback(TASKS.discard)
-    return {'accepted':True,'action':action,'job':JOB}
+    from operations.fibonatix_jobs import submit, validate
+    try: validate(action,{})
+    except ValueError: raise HTTPException(404,'Not found') from None
+    job=submit(request,action)
+    return {'accepted':True,'action':action,'job':JOB,**job}

@@ -116,8 +116,8 @@ def save(app, artifacts, summary):
             (json.dumps(artifacts),json.dumps(summary),PREPARE))
 
 
-async def run():
-    if os.environ.get('ICEPAY_TRANSACTION_TASK_ID')!=PREPARE or datetime.now(timezone.utc)>=EXPIRES:
+async def run(task_id=None):
+    if (task_id if task_id is not None else os.environ.get('ICEPAY_TRANSACTION_TASK_ID'))!=PREPARE or datetime.now(timezone.utc)>=EXPIRES:
         return
     from app import main
     if not await asyncio.to_thread(claim,main):

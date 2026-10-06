@@ -1,0 +1,47 @@
+# ICEPAY worker only; follow docs/icepay-worker-handover.md.
+services:
+  - type: worker
+    name: jnp-icepay-worker
+    runtime: python
+    repo: https://github.com/JNPDrops/jnp-matching
+    branch: main
+    plan: 1c-2g
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt && python -m playwright install chromium --only-shell
+    startCommand: python -m app.worker --role icepay
+    autoDeployTrigger: 'off'
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: DATABASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: DATABASE_URL}
+      - key: EXACT_BASE_URL
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_BASE_URL}
+      - key: EXACT_DIVISION
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_DIVISION}
+      - key: COLLECTIVE_DEBTOR_CODE
+        fromService: {name: jnp-matching, type: web, envVarKey: COLLECTIVE_DEBTOR_CODE}
+      - key: EXACT_CLIENT_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_ID}
+      - key: EXACT_CLIENT_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_CLIENT_SECRET}
+      - key: EXACT_REDIRECT_URI
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_REDIRECT_URI}
+      - key: EXACT_WEB_USERNAME
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_USERNAME}
+      - key: EXACT_WEB_PASSWORD
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_PASSWORD}
+      - key: EXACT_WEB_TOTP_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_WEB_TOTP_SECRET}
+      - key: ICEPAY_WEB_USERNAME
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_USERNAME}
+      - key: ICEPAY_WEB_PASSWORD
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_PASSWORD}
+      - key: ICEPAY_WEB_TOTP_SECRET
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_TOTP_SECRET}
+      - key: ICEPAY_FETCH_PROBE_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_FETCH_PROBE_ID}
+      - key: ICEPAY_TRANSACTION_TASK_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_TRANSACTION_TASK_ID}
+      - key: ICEPAY_MATCH_TASK_ID
+        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_MATCH_TASK_ID}

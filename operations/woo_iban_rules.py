@@ -17,6 +17,9 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from operations.bacs_debtor_transfer import TLS_CONTEXT
+from operations import task_drain
+from operations.worker_coordination import BudgetDeferred
+from operations.worker_write_fence import owned_operation, audit_metadata
 
 router = APIRouter()
 CUTOFF = '2026-10-01'
@@ -85,13 +88,22 @@ def authenticate(headers, raw, now=None):
 
 
 def initialize(conn):
-    conn.execute('''CREATE TABLE IF NOT EXISTS jnp_woo_iban_events (
-        event_id TEXT PRIMARY KEY, order_id BIGINT NOT NULL UNIQUE,
-        body JSONB NOT NULL, digest TEXT NOT NULL,
-        state TEXT NOT NULL DEFAULT 'pending', reason TEXT,
-        rule_id TEXT, attempts INTEGER NOT NULL DEFAULT 0,
-        next_check TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('jnp:woo-iban-schema',0))")
+        conn.execute('''CREATE TABLE IF NOT EXISTS jnp_woo_iban_events (
+            event_id TEXT PRIMARY KEY, order_id BIGINT NOT NULL UNIQUE,
+            body JSONB NOT NULL, digest TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending', reason TEXT,
+            rule_id TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+            next_check TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
+        # Append-only operation identities survive IBAN -> BOSCI upgrades of an
+        # existing event. No credentials or duplicate payment body is stored.
+        conn.execute('''CREATE TABLE IF NOT EXISTS jnp_woo_rule_attempts (
+            operation_id UUID PRIMARY KEY, event_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('intent','confirmed','uncertain','deferred')),
+            rule_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
 
 
 def can_upgrade_iban(old, new, state):
@@ -146,7 +158,9 @@ async def receive(request: Request):
 
 
 class ExactAPI:
-    def __init__(self, app): self.app=app; self.last_request=0
+    def __init__(self, app, *, role='woo-rules', priority='routine', floor=200):
+        self.app=app; self.last_request=0
+        self.role, self.priority, self.floor = role, priority, floor
 
     async def request(self, method, url, params=None, payload=None):
         # Never automatically repeat a POST. Ambiguous outcomes require reconciliation.
@@ -154,8 +168,11 @@ class ExactAPI:
         self.last_request=time.monotonic()
         token = await self.app._access_token()
         async with httpx.AsyncClient(timeout=40,follow_redirects=False,trust_env=False,verify=TLS_CONTEXT) as client:
-            r=await client.request(method,url,params=params,json=payload,
-                headers={'Authorization':'Bearer '+token,'Accept':'application/json'})
+            from operations.worker_coordination import budgeted_http
+            r=await budgeted_http(self.app, self.role, method,
+                lambda: client.request(method,url,params=params,json=payload,
+                    headers={'Authorization':'Bearer '+token,'Accept':'application/json'}),
+                priority=self.priority, floor=self.floor)
         if r.status_code not in (200,201,204): raise RuntimeError('Exact HTTP '+str(r.status_code))
         return r.json() if r.content else {}
 
@@ -214,6 +231,47 @@ def existing_words_rule(rules, words, account):
     return 'missing',None
 
 
+class WriteDeferred(RuntimeError):
+    """The POST budget was refused before any write was sent."""
+
+
+def record_attempt(conn, operation_id, event_id, state, rule_id=None):
+    if operation_id is None:
+        return
+    conn.execute('''INSERT INTO jnp_woo_rule_attempts(operation_id,event_id,state,rule_id)
+        VALUES(%s,%s,%s,%s) ON CONFLICT(operation_id) DO UPDATE
+        SET state=EXCLUDED.state,rule_id=EXCLUDED.rule_id,updated_at=NOW()''',
+        (operation_id,event_id,state,rule_id))
+
+
+@owned_operation('woo-rules')
+async def create_confirmed_rule(conn, api, event_id, body, account, words, lookup):
+    operation_id = audit_metadata().get('worker_operation_id')
+    # Persist identity before the network call, confirm only after Exact readback
+    # and the existing event checkpoint. The decorator settles last.
+    conn.execute("UPDATE jnp_woo_iban_events SET state='creating',reason='Aanmaak wordt uitgevoerd',updated_at=NOW() WHERE event_id=%s",(event_id,))
+    record_attempt(conn,operation_id,event_id,'intent')
+    try:
+        try:
+            if words: await api.create_words(account,words)
+            else: await api.create(account,body['iban'])
+        except BudgetDeferred:
+            # The shared POST reservation is made before transport/admission.
+            # A failed GET *after* POST must not enter this branch.
+            conn.execute("UPDATE jnp_woo_iban_events SET state='pending',reason='Wachten op gedeeld API-budget',next_check=NOW()+INTERVAL '5 minutes',updated_at=NOW() WHERE event_id=%s",(event_id,))
+            record_attempt(conn,operation_id,event_id,'deferred')
+            raise WriteDeferred() from None
+        state,rule=lookup(await api.rules())
+        if state!='done': raise RuntimeError('Readback did not confirm creation')
+        conn.execute("UPDATE jnp_woo_iban_events SET state='done',rule_id=%s,reason='Toewijzingsregel voor debiteur 109372 bevestigd',updated_at=NOW() WHERE event_id=%s",(rule,event_id))
+        record_attempt(conn,operation_id,event_id,'confirmed',rule)
+    except WriteDeferred:
+        raise
+    except BaseException:
+        record_attempt(conn,operation_id,event_id,'uncertain')
+        raise
+
+
 async def process(conn, api, event_id, body, previous):
     from operations.tax_reference import TAX_IBANS
     if body.get('iban') in TAX_IBANS:
@@ -230,20 +288,16 @@ async def process(conn, api, event_id, body, previous):
         conn.execute("UPDATE jnp_woo_iban_events SET state='done',rule_id=%s,reason='Toewijzingsregel voor debiteur 109372 bevestigd',updated_at=NOW() WHERE event_id=%s",(rule,event_id)); return
     if previous in ('creating','uncertain'):
         conn.execute("UPDATE jnp_woo_iban_events SET state='uncertain',reason='Eerdere aanmaak niet bevestigd; handmatige controle nodig',next_check=NOW()+INTERVAL '15 minutes',updated_at=NOW() WHERE event_id=%s",(event_id,)); return
-    # Autocommit makes intent durable before network I/O.
-    conn.execute("UPDATE jnp_woo_iban_events SET state='creating',reason='Aanmaak wordt uitgevoerd',updated_at=NOW() WHERE event_id=%s",(event_id,))
     try:
-        if words: await api.create_words(account,words)
-        else: await api.create(account,body['iban'])
-        # Verify through collection rather than trusting a response body alone.
-        state,rule=lookup(await api.rules())
-        if state!='done': raise RuntimeError('Readback did not confirm creation')
-        conn.execute("UPDATE jnp_woo_iban_events SET state='done',rule_id=%s,reason='Toewijzingsregel voor debiteur 109372 bevestigd',updated_at=NOW() WHERE event_id=%s",(rule,event_id))
+        await create_confirmed_rule(conn,api,event_id,body,account,words,lookup)
+    except WriteDeferred:
+        return
     except Exception:
         conn.execute("UPDATE jnp_woo_iban_events SET state='uncertain',reason='Exact-aanmaak niet bevestigd; we controleren opnieuw zonder dubbel aanmaken',next_check=NOW()+INTERVAL '5 minutes',updated_at=NOW() WHERE event_id=%s",(event_id,))
 
 
 async def cycle(app):
+    if task_drain.requested(): return
     if os.getenv('ENABLE_WOO_IBAN_RULE_WRITES','false').lower()!='true': STATUS['state']='disabled'; return
     if app.DIVISION!=DIVISION or app.BASE_URL!=BASE or not app.DATABASE_URL: STATUS['state']='configuration_error'; return
     with app._db_connect() as conn:
@@ -253,6 +307,7 @@ async def cycle(app):
             rows=conn.execute("SELECT event_id,body,state FROM jnp_woo_iban_events WHERE state IN ('pending','creating','uncertain') AND next_check<=NOW() ORDER BY created_at LIMIT 5").fetchall()
             api=ExactAPI(app)
             for event_id,body,state in rows:
+                if task_drain.requested(): break
                 conn.execute("UPDATE jnp_woo_iban_events SET attempts=attempts+1,next_check=NOW()+INTERVAL '5 minutes' WHERE event_id=%s",(event_id,))
                 try: await process(conn,api,event_id,body,state)
                 except Exception:
@@ -262,11 +317,12 @@ async def cycle(app):
 
 
 async def serve(app):
-    while True:
+    while not task_drain.requested():
         try: await cycle(app)
         except asyncio.CancelledError: raise
         except Exception: STATUS['state']='queue_error'
-        await asyncio.sleep(15)
+        await task_drain.wait(15)
+    STATUS['state']='drained'
 
 
 @router.post('/api/woocommerce/iban-rule/check')

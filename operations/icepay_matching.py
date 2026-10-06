@@ -4,6 +4,7 @@ Only the verified 36 receipt identities are accepted. Native Exact matching,
 no write-offs, durable save claims, private UI/API evidence, read-only recovery.
 """
 import asyncio
+from operations import worker_write_fence as fence, task_drain
 from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -73,7 +74,10 @@ class Reader:
             self.calls += 1
             token = await self.app._access_token()
             async with httpx.AsyncClient(timeout=45, follow_redirects=False, trust_env=False, verify=TLS_CONTEXT) as client:
-                response = await client.get(url, params=params, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'})
+                from operations.worker_coordination import budgeted_http
+                response = await budgeted_http(self.app, 'icepay', 'GET',
+                    lambda: client.get(url, params=params, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}),
+                    priority='routine', floor=200)
             if response.status_code != 200:
                 raise ValueError('api_http_' + str(response.status_code))
             raw = response.json()
@@ -142,7 +146,7 @@ def claim_save(app, task, receipt, plan):
         if not claimed:
             raise ValueError('prior_save_claim_recovery_only')
         receipt.update(state='match_requested', execution_status='unknown_readback_required')
-        receipt['attempts'].append({'at': now(), 'task': task, 'outcome': 'unknown_readback_required'})
+        receipt['attempts'].append({'at': now(), 'task': task, 'outcome': 'unknown_readback_required',**fence.audit_metadata()})
         conn.execute('UPDATE icepay_order_matching SET data=%s::jsonb,updated_at=now() WHERE job=%s', (json.dumps(plan), JOB))
 
 
@@ -321,8 +325,8 @@ async def verify_saved(context, page, reader, receipt, plan):
     receipt['attempts'][-1]['outcome'] = 'verified'
 
 
-async def run():
-    task = os.environ.get('ICEPAY_MATCH_TASK_ID')
+async def run(task_id=None):
+    task = task_id if task_id is not None else os.environ.get('ICEPAY_MATCH_TASK_ID')
     if task not in TASKS or datetime.now(timezone.utc) >= EXPIRES:
         return
     from app import main
@@ -384,6 +388,7 @@ async def run():
         from operations.strict_order_matching import session, match_rows, toggle, euro
         async with session() as (context, page):
             for receipt in queue:
+                if task_drain.requested(): raise ValueError('worker_draining')
                 summary.update(state='processing', current_order=receipt['source_order'])
                 await persist()
                 if task == RECOVER:
@@ -419,13 +424,7 @@ async def run():
                 opened = await reader.orders([receipt['source_order']])
                 if validate_open(receipt, opened):
                     raise ValueError('last_api_precondition_changed')
-                await asyncio.to_thread(claim_save, main, task, receipt, plan)
-                summary['financial_saves_this_run'] += 1
-                await persist()
-                await frame.locator('#btnSave').click()
-                await asyncio.sleep(2)
-                await verify_saved(context, page, reader, receipt, plan)
-                await persist()
+                await save_receipt(main,task,receipt,plan,summary,persist,frame,context,page,reader)
         summary['state'] = 'group_verified'
     except Exception as error:
         from operations.icepay_transactions import failure_location
@@ -435,3 +434,15 @@ async def run():
             summary['reason'] = reason
     finally:
         await persist()
+
+
+
+@fence.owned_operation('icepay')
+async def save_receipt(main, task, receipt, plan, summary, persist, frame, context, page, reader):
+    await asyncio.to_thread(claim_save, main, task, receipt, plan)
+    summary['financial_saves_this_run'] += 1
+    await persist()
+    await fence.browser_save(main,'icepay',frame.locator('#btnSave').click)
+    await asyncio.sleep(2)
+    await verify_saved(context, page, reader, receipt, plan)
+    await persist()

@@ -72,8 +72,11 @@ class Reader:
             token = await self.app._access_token()
             async with httpx.AsyncClient(timeout=30, follow_redirects=False,
                                          trust_env=False, verify=TLS_CONTEXT) as client:
-                r = await client.get(url, params=params, headers={'Authorization': 'Bearer '+token,
-                                                    'Accept': 'application/json'})
+                from operations.worker_coordination import budgeted_http
+                r = await budgeted_http(self.app, 'icepay', 'GET',
+                    lambda: client.get(url, params=params, headers={'Authorization': 'Bearer '+token,
+                                                    'Accept': 'application/json'}),
+                    priority='routine', floor=200)
             require(r.status_code == 200, 'http_' + str(r.status_code))
             raw = r.json()
             data = raw.get('d')
@@ -204,8 +207,11 @@ class Creator(Reader):
         url = f'{BASE}/api/v1/{DIVISION}/financial/Journals'
         async with httpx.AsyncClient(timeout=45, follow_redirects=False,
                                      trust_env=False, verify=TLS_CONTEXT) as client:
-            response = await client.post(url, json=payload,
-                headers={'Authorization': 'Bearer '+token, 'Accept': 'application/json'})
+            from operations.worker_coordination import budgeted_http
+            response = await budgeted_http(self.app, 'icepay', 'POST',
+                lambda: client.post(url, json=payload,
+                    headers={'Authorization': 'Bearer '+token, 'Accept': 'application/json'}),
+                priority='critical', floor=200)
         require(response.status_code in (200, 201), 'create_http_' + str(response.status_code))
         # Do not expose response bodies. Independent readback proves success.
 
@@ -263,10 +269,12 @@ async def run_create(app):
               error_type=type(exc).__name__, exact_writes='inspect_durable_result')
 
 
-async def run(app):
+async def run(app, task_id=None):
     if datetime.now(timezone.utc) >= EXPIRES:
         return
-    if os.environ.get(CREATE_ENV) == CREATE_ID:
+    if task_id not in (None,TASK_ID):
+        raise ValueError('unsupported_journal_task')
+    if task_id is None and os.environ.get(CREATE_ENV) == CREATE_ID:
         await run_create(app)
         return
     try:

@@ -1,6 +1,6 @@
 """Generate complete, RSIN-checked tax references and reconcile Exact rules.
 
-The only Exact write is POST AllocationRule. It does not book bank lines or
+Exact writes are POST AllocationRule and retirement of one verified legacy rule. It does not book bank lines or
 invoke Automatically. A durable intent is never blindly posted a second time.
 """
 import asyncio
@@ -12,6 +12,8 @@ import time
 from urllib.parse import urlparse
 
 import httpx
+from operations import task_drain
+from operations import tax_write_operations as writes
 from operations import tax_reference as tax
 from operations import bacs_debtor_transfer as transport
 from operations import allocation_connection as allocation
@@ -126,7 +128,7 @@ def match_rule(rules, payload):
 
 class RuleAPI(CollectionAPI):
     def __init__(self, app, allowed, limits):
-        super().__init__(app)
+        super().__init__(app, role='tax', priority='routine', floor=150)
         self.allowed = allowed
         self.limits = dict(limits)
 
@@ -143,8 +145,11 @@ class RuleAPI(CollectionAPI):
         self.last_request = time.monotonic()
         token = await self.app._access_token()
         async with httpx.AsyncClient(timeout=45, follow_redirects=False, trust_env=False, verify=transport.TLS_CONTEXT) as client:
-            response = await client.request(method, url, params=params, json=payload,
-                headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'})
+            from operations.worker_coordination import budgeted_http
+            response = await budgeted_http(self.app, self.role, method,
+                lambda: client.request(method, url, params=params, json=payload,
+                    headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}),
+                priority=self.priority, floor=self.floor)
         self.limits = {name: int(response.headers[header]) for name, header in (
             ('remaining', 'x-ratelimit-remaining'), ('reset_ms', 'x-ratelimit-reset'))
             if response.headers.get(header, '').isdigit()}
@@ -154,6 +159,7 @@ class RuleAPI(CollectionAPI):
 
 
 def initialize(conn):
+    writes.initialize(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS jnp_tax_rules (
         words TEXT PRIMARY KEY, payload JSONB NOT NULL, details JSONB NOT NULL,
         state TEXT NOT NULL DEFAULT 'pending', rule_id UUID, reason TEXT,
@@ -168,7 +174,11 @@ def save_state(conn, words, state, rule_id=None, reason=None):
 async def reconcile(conn, api, proposals):
     rules = await api.rules()
     attempted = []
+    result_state = 'ready'
     for words, item in proposals.items():
+        if task_drain.requested():
+            result_state = 'draining'
+            break
         payload = item['payload']
         conn.execute('''INSERT INTO jnp_tax_rules(words,payload,details) VALUES(%s,%s::jsonb,%s::jsonb)
             ON CONFLICT(words) DO NOTHING''', (words, json.dumps(payload), json.dumps(item)))
@@ -182,23 +192,18 @@ async def reconcile(conn, api, proposals):
             save_state(conn, words, 'uncertain', reason='No blind recreation'); continue
         if len(attempted) >= 40 or api.limits.get('remaining', 1000) <= 155:
             continue
-        # The app connection uses autocommit: persist intent before POST.
-        save_state(conn, words, 'creating')
         attempted.append(words)
         try:
-            await api.request('POST', ROOT, payload=payload)
-        except Exception:
-            save_state(conn, words, 'uncertain', reason='Creation response unconfirmed')
+            # Each owned operation persists its own readback before another POST.
+            rules = await writes.create_confirmed_rule(conn, api, payload)
+        except writes.CreationDeferred:
+            result_state = 'waiting_for_api_budget'
             break
-    if attempted:
-        # Read the complete collection after the bounded batch. A failed read
-        # leaves creating/uncertain intents for read-only reconciliation.
-        rules = await api.rules()
-        for words in attempted:
-            state, rule_id = match_rule(rules, proposals[words]['payload'])
-            save_state(conn, words, state if state != 'missing' else 'uncertain', rule_id)
+        except Exception:
+            result_state = 'review_required'
+            break
     counts = dict(conn.execute('SELECT state,COUNT(*) FROM jnp_tax_rules GROUP BY state').fetchall())
-    return {'state': 'ready', 'counts': counts, 'planned': len(proposals),
+    return {'state': result_state, 'counts': counts, 'planned': len(proposals),
             'by_tax': dict(Counter(item['tax_bucket'] for item in proposals.values())),
             'bank_writes': False, 'automatically_executed': False,
             'last_check': datetime.now(timezone.utc).isoformat()}
@@ -212,17 +217,23 @@ async def sync(app, conn, policy, metadata, limits):
     proposals = plan(policy, metadata, decisions, datetime.now(timezone.utc).year)
     api = RuleAPI(allocation.RoutingApp(app), {w: p['payload'] for w, p in proposals.items()}, limits)
     STATUS.update(await reconcile(conn, api, proposals))
+    if task_drain.requested() or STATUS['state'] != 'ready':
+        return
     # Retire only the verified legacy IBAN->creditor fallback, with a saved
     # payload and a fresh equality check. Unknown conflicting rules are reported.
     from operations import allocation_maintenance as maintenance
     cleanup_api = maintenance.MaintenanceAPI(allocation.RoutingApp(app), api.limits)
-    maintenance.initialize(conn)
+    cleanup_api.role = 'tax'
+    maintenance.initialize_cleanup(conn)
     rules = await cleanup_api.rules()
     retired = {}
     for rule in rules:
+        if task_drain.requested():
+            STATUS['state'] = 'draining'
+            return
         if legacy_creditor_fallback(rule, metadata['tax_account_id']):
             if all(match_rule(rules, p['payload'])[0] == 'confirmed' for p in proposals.values()):
-                retired[rule['ID']] = await maintenance.delete_rule(conn, cleanup_api, rule, 'tax_iban_creditor_fallback')
+                retired[rule['ID']] = await writes.retire_confirmed_rule(conn, cleanup_api, rule, metadata['tax_account_id'])
     current = await cleanup_api.rules() if retired else rules
     conflicts = audit_rules(current, metadata, decisions)
     STATUS.update(legacy_rules_retired=retired, rule_conflicts=conflicts,

@@ -48,7 +48,7 @@ def emit(stage, data):
 
 class ReadAPI(m.Exact):
     def __init__(self,app):
-        super().__init__(allocation.RoutingApp(app))
+        super().__init__(allocation.RoutingApp(app), role='reports', priority='bulk', floor=500)
         self.calls=0
 
     async def request(self,method,url,params=None,payload=None):
@@ -191,7 +191,7 @@ async def run(app):
     # Use the existing audit table only as a one-off execution marker. Do not
     # change queue states, routing switches, balances or source transactions.
     try:
-        await asyncio.wait_for(claim_and_collect(app),timeout=1200)
+        return await asyncio.wait_for(claim_and_collect(app),timeout=1200)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -210,3 +210,4 @@ async def claim_and_collect(app):
                          ('5bb37b58-e49e-4cf3-98e4-c5a688371194',REPORT,'{"read_only_report":true}'))
     event('started')
     await collect(app)
+    return True

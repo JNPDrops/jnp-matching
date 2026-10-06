@@ -38,7 +38,10 @@ class Reader:
             seen.add(url); self.calls+=1
             token=await self.app._access_token()
             async with httpx.AsyncClient(timeout=30,follow_redirects=False,trust_env=False,verify=TLS_CONTEXT) as client:
-                response=await client.get(url,params=params,headers={'Authorization':'Bearer '+token,'Accept':'application/json'})
+                from operations.worker_coordination import budgeted_http
+                response=await budgeted_http(self.app, 'icepay', 'GET',
+                    lambda: client.get(url,params=params,headers={'Authorization':'Bearer '+token,'Accept':'application/json'}),
+                    priority='routine', floor=200)
             if response.status_code!=200:
                 raise PreflightStopped('http_'+str(response.status_code))
             raw=response.json(); data=raw.get('d')

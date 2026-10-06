@@ -61,8 +61,8 @@ async def stop_child(child):
         await child.wait()
 
 
-async def run():
-    if not eligible(os.environ, datetime.now(timezone.utc)):
+async def run(task_id=None):
+    if not eligible(os.environ if task_id is None else {'EXACT_LOGIN_PROBE_ID':task_id}, datetime.now(timezone.utc)):
         return
     missing = [n for n in ENV_NAMES if not os.environ.get(n)]
     if missing:

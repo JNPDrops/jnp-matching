@@ -1,4 +1,7 @@
 import unittest
+import signal
+import subprocess
+import sys
 from unittest.mock import MagicMock
 
 from operations.legacy_cutover import (
@@ -7,6 +10,27 @@ from operations.legacy_cutover import (
 
 
 class LegacyCutoverTests(unittest.TestCase):
+    def test_shutdown_signals_keep_guard_alive_until_explicit_abort(self):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "from unittest.mock import MagicMock; "
+             "from operations.legacy_cutover import hold_connection; "
+             "hold_connection(MagicMock(), 30)"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertIn('guard_ready', child.stdout.readline())
+            child.send_signal(signal.SIGTERM)
+            child.send_signal(signal.SIGHUP)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                child.wait(timeout=0.2)
+            child.send_signal(signal.SIGINT)
+            out, err = child.communicate(timeout=5)
+            self.assertEqual(child.returncode, 0, err)
+            self.assertIn('guard_releasing_locks', out)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate()
+
     def test_unknown_or_enabled_manual_write_state_blocks(self):
         healthy = {"ok": True, "division": 3977752,
                    "order_rule_writes": False, "direct_match_writes": False}

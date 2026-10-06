@@ -104,6 +104,24 @@ def emit(state, **metadata):
                       **metadata}, sort_keys=True), flush=True)
 
 
+def hold_connection(conn, seconds):
+    """Retain locks across the old container's graceful shutdown signals.
+
+    A terminal disconnect or SIGTERM must not reopen admission while uvicorn
+    is still shutting down. Ctrl-C remains an explicit operator abort; expiry
+    is bounded and never evidence that the old service stopped.
+    """
+    stop = threading.Event()
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    emit("guard_ready", seconds=seconds)
+    until = time.monotonic() + seconds
+    while time.monotonic() < until and not stop.wait(min(5, max(0, until - time.monotonic()))):
+        conn.execute("SELECT 1")
+    emit("guard_releasing_locks", cutover_complete=False)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("check", "hold"))
@@ -111,7 +129,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.seconds <= 1800:
         parser.error("seconds must be between 1 and 1800")
-    stop = threading.Event()
     try:
         actual = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True).strip()
@@ -132,12 +149,7 @@ def main(argv=None):
                 if args.action == "check":
                     emit("check_complete_releasing_locks", cutover_complete=False)
                     return 0
-                for sig in (signal.SIGINT, signal.SIGTERM):
-                    signal.signal(sig, lambda *_: stop.set())
-                until = time.monotonic() + args.seconds
-                while time.monotonic() < until and not stop.wait(5):
-                    conn.execute("SELECT 1")
-                emit("guard_releasing_locks", cutover_complete=False)
+                hold_connection(conn, args.seconds)
         return 0
     except Exception as error:
         reason = str(error) if isinstance(error, CutoverBlocked) else type(error).__name__

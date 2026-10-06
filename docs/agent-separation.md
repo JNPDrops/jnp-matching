@@ -914,3 +914,10 @@ Geen ontwijking van de afwijzing of geheimenextractie.
 Werkelijk actief blijft de bestaande webservice op cf75100. Geen rol afgesplitst,
 geen merge/deployment of processtop; bereikbare Shell en geslaagde tests zijn
 nog geen bewezen globale drain. Migratiegates blijven ongewijzigd gesloten.
+
+
+## Blijvende PSP-toestemming — 6 oktober 2026 09:47 CEST
+
+Jasper bevestigde expliciet dat de bestaande in Render opgeslagen Paragon-inloggegevens (e-mail/gebruikersnaam, wachtwoord en TOTP) voor Fibonatix mogen worden gebruikt, bij geplande JNP-runs en op tussentijdse herhaalopdracht. Dezelfde toestemming niet opnieuw vragen zolang account, bestemming, taak en scope gelijk blijven. Geheimen niet uitlezen/tonen of in Git opslaan; credentials uitsluitend intern aan de betreffende bestaande integratie aanbieden. De bestaande ICEPAY/Fibonatix-verwerkingsscope en orderbewijsregels blijven gelden. Dit is geen wijziging van de planning en opent geen migratiegate.
+
+Vastgelegd met bronvoorbereiding in PR #89 commit 10ca3424a1c492930e1f6f24485b660f79aa8ed9. Leesnavigatiediagnose f533d8c931074e3ead12119c246a558b4d23f13d; 29 synthetische tests geslaagd. Geen merge, deployment of financiële mutatie als codeproef. Actuele operationele resultaten staan in docs/psp-catchup-20261005.md op ops/psp-catchup-20261005.

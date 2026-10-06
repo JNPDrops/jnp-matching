@@ -137,7 +137,7 @@ async def run(mode):
                 require(validate_open(r,await orders([r['ref']])) is None,'last_api_precondition_changed')
                 claim_save(conn,task,r,plan);summary['financial_saves_this_run']+=1;persist()
                 await frame.locator('#btnSave').click();await asyncio.sleep(2)
-                frame=await open_match(context,page,r);await search_own_invoice(frame,r);ui=await match_rows(frame);reader.selected_proof(r,ui,saved=True)
+                frame=await open_match(context,page,r);ui=await match_rows(frame);reader.selected_proof(r,ui,saved=True)
                 r['evidence'].append({'at':now(),'phase':'ui_saved_pending_api','rows':ui});saved.append(r);persist()
         if saved:
             after=await api.rows('financialtransaction/TransactionLines',{'$filter':query,'$select':SELECT})

@@ -439,10 +439,6 @@ async def run(task_id=None):
 
 @fence.owned_operation('icepay')
 async def save_receipt(main, task, receipt, plan, summary, persist, frame, context, page, reader):
-    await asyncio.to_thread(claim_save, main, task, receipt, plan)
-    summary['financial_saves_this_run'] += 1
-    await persist()
-    await fence.browser_save(main,'icepay',frame.locator('#btnSave').click)
-    await asyncio.sleep(2)
-    await verify_saved(context, page, reader, receipt, plan)
-    await persist()
+    # Standing instruction of 6 October 2026 supersedes manual per-order saves.
+    # The native Automatically worker is the only ICEPAY matching writer.
+    raise ValueError('icepay_manual_matching_disabled_use_automatically')

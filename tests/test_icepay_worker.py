@@ -53,11 +53,9 @@ class IcepaySaveTests(unittest.IsolatedAsyncioTestCase):
              patch.object(matching,'verify_saved',side_effect=verify), \
              patch.object(matching.asyncio,'sleep',new_callable=AsyncMock),fence.owner_scope(self.lease):
             await matching.save_receipt(self.app,'fixture',{}, {},{'financial_saves_this_run':0},persist,self.frame,None,None,None)
-    async def test_save_is_admitted_and_settled_after_business_checkpoint(self):
-        await self.save()
-        self.assertEqual(self.events,['claim','persist','admit_write','click','verified','persist','settle_write'])
-    async def test_failed_readback_leaves_write_unresolved(self):
-        with self.assertRaises(ValueError):await self.save(True)
-        self.assertTrue(self.lease.lost.is_set())
-        self.assertNotIn('settle_write',self.events)
-        self.frame.locator.return_value.click.assert_awaited_once()
+    async def test_manual_save_is_retired_without_admission_or_click(self):
+        with self.assertRaisesRegex(ValueError, 'icepay_manual_matching_disabled'):
+            await self.save()
+        self.assertEqual(self.events, [])
+        self.frame.locator.return_value.click.assert_not_awaited()
+        self.assertFalse(self.lease.lost.is_set())

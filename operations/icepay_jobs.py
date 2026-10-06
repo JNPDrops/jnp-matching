@@ -32,12 +32,17 @@ def catalog():
     ]
     for task_id in (upload.APPLY,upload.RECONCILE):
         result.append(Task(upload,task_id,'ICEPAY_TRANSACTION_TASK_ID',"SELECT summary->>'state' FROM icepay_receipt_import_runs WHERE task=%s",frozenset({'import_verified'})))
-    for task_id in sorted(match.TASKS):
+    # Historical readback remains available; manual matching is superseded.
+    for task_id in sorted(match.TASKS - match.GROUPS):
         result.append(Task(match,task_id,'ICEPAY_MATCH_TASK_ID',"SELECT summary->>'state' FROM icepay_matching_runs WHERE task=%s",frozenset({'prepared','group_verified','complete','incomplete','no_eligible_items'})))
     return {task.task_id:task for task in result}
 
 
 def validate(job):
+    from operations import icepay_automatic
+    if job['task_key'] == icepay_automatic.TASK:
+        icepay_automatic.validate(job)
+        return icepay_automatic
     task=catalog().get(job['task_key'])
     if task is None or job['action']!='run' or job['params']:
         raise ValueError('unknown_icepay_command')
@@ -54,6 +59,9 @@ def observed_outcome(app, task):
 
 
 async def dispatch(app, job):
+    from operations import icepay_automatic
+    if job['task_key'] == icepay_automatic.TASK:
+        return await icepay_automatic.run(app, job)
     task=validate(job)
     args=(app,) if task.with_app else ()
     # Explicit identity, never an environment override shared by other roles.
@@ -75,6 +83,8 @@ def seed_configured(conn, app):
                 'configured:'+task.task_id,task.expires)
             if result['state'] in {'queued','running','uncertain'}:break
         except jobs.JobConflict:break
+    from operations import icepay_automatic
+    icepay_automatic.seed(conn, app)
 
 
 async def serve(app):

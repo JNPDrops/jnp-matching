@@ -567,6 +567,8 @@ async def serve(app):
     while not task_drain.requested():
         try:
             await cycle(app)
+            from operations.bank_daily_automatic import run_queued
+            await run_queued(app)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

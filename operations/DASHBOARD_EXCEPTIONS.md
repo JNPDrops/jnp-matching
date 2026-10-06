@@ -1,8 +1,23 @@
 # Dashboard: uitzonderingen en beslissingen
 
-Vastgelegde gebruikersinstructies van Jasper, 4 oktober 2026 (CEST).
-Dit document is een blijvende implementatie-eis. Het bestaande dashboardconcept
-is een demonstratie; deze werklijst en de uitvoering zijn daarmee nog niet live.
+Vastgelegde gebruikersinstructies van Jasper, bijgewerkt met het besluit van
+6 oktober 2026. De zeven afzonderlijke workers zijn live; de centrale werklijst
+projecteert hun bestaande dossiers en bewaart menselijke besluiten apart.
+Een live worker of deployment bewijst niet dat een dagtaak financieel klaar is.
+
+## Geldend besluit van 6 oktober 2026
+
+Afletteren gebeurt uitsluitend via de native Exact-actie Automatically, met een
+vastgelegde selectie per bankboek en teruglezing. Geen handmatige matching,
+strict_match/strict_correct, kruisposten of compensatieboekingen tussen orders.
+Wat Automatically niet koppelt, blijft open met bronbewijs en vervolgactie.
+Deze regel vervangt het eerdere verbod op Automatically en oudere instructies
+voor handmatige aflettering. Een scan of aangemaakte regel is geen aflettering.
+
+ICEPAY en Fibonatix verwerken eenmaal per dag de vorige kalenderdag in
+Europe/Amsterdam onder een duurzame dagidentiteit. Een eindrapport volgt pas
+na alle relevante dagtaken; bij een blokkade heet de dagrun expliciet onvolledig.
+De bestaande continue controlefrequenties blijven behouden.
 
 ## Werklijst
 
@@ -100,11 +115,9 @@ saldo. Alleen 'alle betaalde facturen zijn gesloten' of een kloppend totaalsaldo
 is onvoldoende. Het dashboard moet bronorder, werkelijke toewijzing en uitvoering
 naast elkaar kunnen tonen, met 'verkeerde order gekoppeld' als expliciete reden.
 
-Het beleid verbiedt de oude Automatically-actie en afwikkeling met een ontvangst
-van een andere order. De technische blokkade in `source_order_policy.py` is via `app/main.py` aan de
-applicatie gekoppeld. Na een handmatige deployment bevestigt de beveiligde
-`order-policy`-route of de draaiende versie deze blokkade daadwerkelijk gebruikt.
-De gerichte herstelfunctie in `strict_order_matching.py` is geïmplementeerd.
-Het private `strict_order_plan` bewaart voortgang, daadwerkelijke factuurselectie,
-uitzonderingen en bewijs na iedere opslag. Een deployment betekent niet dat de
-historische koppelingen al volledig zijn hersteld. Zie STRICT_ORDER_MATCHING.md.
+De historische `strict_order_plan`-dossiers blijven als auditbewijs bewaard.
+Hun uitvoerinstructies zijn vervangen door het besluit van 6 oktober hierboven;
+het bestaan van oude herstelcode is geen toestemming om die uit te voeren.
+Dagimporten, native Automatically-uitkomsten en nog open uitzonderingen krijgen
+een eigen duurzaam dossier. De werklijst moet de daadwerkelijke bron- en
+uitvoeringsstatus tonen en mag geen gesloten factuur als ontbrekend bestempelen.

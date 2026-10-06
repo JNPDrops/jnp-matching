@@ -54,7 +54,13 @@ def approved(plan,imported):
     for r in plan['receipts']:require(r['trx'] in by and all(r[k]==by[r['trx']][k] for k in ['amount','ref','description','entry','woo_id']) and r['source_order']==r['ref'],'receipt_source_changed')
     require(not any(r['state']=='match_requested' for r in plan['receipts']),'unknown_save_requires_readback')
 
-def save_plan(conn,plan):conn.execute('INSERT INTO fibonatix_import_artifacts(job,name,data) VALUES(%s,%s,%s::jsonb) ON CONFLICT(job,name) DO UPDATE SET data=EXCLUDED.data',(JOB,'window_matching_plan',json.dumps(plan)))
+def save_plan(conn,plan):
+    from operations.fibonatix_import import encode_evidence
+    conn.execute('INSERT INTO fibonatix_import_artifacts(job,name,data) VALUES(%s,%s,%s::jsonb) ON CONFLICT(job,name) DO UPDATE SET data=EXCLUDED.data',(JOB,'window_matching_plan',json.dumps(encode_evidence(plan))))
+
+def load_plan(conn):
+    from operations.fibonatix_import import decode_evidence
+    return decode_evidence(conn.execute('SELECT data FROM fibonatix_import_artifacts WHERE job=%s AND name=%s',(JOB,'window_matching_plan')).fetchone()[0])
 
 def claim_save(conn,task,r,plan):
     with conn.transaction():
@@ -93,7 +99,7 @@ async def run(mode):
                     if reason:set_exception(r,reason)
                 persist();calls+=api.calls;api=API(main)
             summary['state']='prepared';return summary
-        plan=conn.execute('SELECT data FROM fibonatix_import_artifacts WHERE job=%s AND name=%s',(JOB,'window_matching_plan')).fetchone()[0];approved(plan,imported)
+        plan=load_plan(conn);approved(plan,imported)
         queue=[r for r in plan['receipts'] if r['state']=='pending'][:5]
         if not queue:summary['state']='no_pending_items';return summary
         async with session() as (context,page):

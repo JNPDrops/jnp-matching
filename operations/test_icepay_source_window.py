@@ -53,4 +53,13 @@ class WindowTests(unittest.TestCase):
         self.assertIn("'before_login_failure',status",sql)
         self.assertEqual(args,('job',))
 
+    def test_pending_export_recovery_requires_prior_submission_and_keeps_history(self):
+        conn=Mock(); conn.execute.return_value.fetchone.return_value=None
+        self.assertIsNone(w.collect_pending_export(conn,'job'))
+        sql,args=conn.execute.call_args.args
+        self.assertIn("artifacts->>'export_state'='submitted'",sql)
+        self.assertIn("NOT artifacts ? 'export_pending_failure'",sql)
+        self.assertIn("'export_pending_failure',status",sql)
+
+
 if __name__=='__main__': unittest.main()

@@ -50,6 +50,20 @@ def resume_before_login(conn, job):
         RETURNING job''',(job,)).fetchone() is not None
 
 
+def collect_pending_export(conn, job):
+    # Recover the submitted read export without submitting another export.
+    row=conn.execute('''UPDATE icepay_transaction_tasks
+        SET artifacts=artifacts || jsonb_build_object('export_pending_failure',status),
+            status='{"state":"started","stage":"collect_existing_export","financial_writes":false}'::jsonb
+        WHERE job=%s AND status->>'state'='blocked'
+          AND status->>'stage'='payments_export'
+          AND status->>'reason'='export_not_completed'
+          AND artifacts->>'export_state'='submitted'
+          AND artifacts ? 'proof' AND NOT artifacts ? 'export_pending_failure'
+        RETURNING artifacts''',(job,)).fetchone()
+    return row[0] if row else None
+
+
 async def all_evidence(page):
     # Capture every filtered page and independently check row identities.
     combined, seen, headers = [], set(), None
@@ -96,11 +110,11 @@ def validate_source(raw, ids, evidence, start, end):
     return rows,summary,proof
 
 
-async def capture(start,end):
+async def capture(start,end,existing=None):
     from playwright.async_api import async_playwright
     base,_ = environments(os.environ)
     os.environ['PLAYWRIGHT_BROWSERS_PATH'] = base['PLAYWRIGHT_BROWSERS_PATH']
-    artifacts,summary = {},{}
+    artifacts,summary = dict(existing or {}),{}
     stage='configuration'
     try:
         credentials=b.Credentials.from_env(os.environ)
@@ -117,14 +131,21 @@ async def capture(start,end):
                 if not login['account_verified']:
                     raise t.AcquisitionStopped('login_failed')
                 stage='payments_filter'
-                await t.open_account_page(page,'Payments')
-                await t.apply_period(page,start=start,end=end)
-                ids,evidence=await all_evidence(page)
-                artifacts.update(proof={'period_from':start.isoformat(),'period_through':end.isoformat(),
+                if existing:
+                    proof=existing['proof']
+                    if proof['period_from']!=start.isoformat() or proof['period_through']!=end.isoformat():
+                        raise t.AcquisitionStopped('configuration')
+                    ids,evidence=proof['ui_payment_ids'],existing['table_evidence']
+                else:
+                    await t.open_account_page(page,'Payments')
+                    await t.apply_period(page,start=start,end=end)
+                    ids,evidence=await all_evidence(page)
+                    artifacts.update(proof={'period_from':start.isoformat(),'period_through':end.isoformat(),
                                         'ui_payment_ids':ids,'ui_payment_count':len(ids)},table_evidence=evidence)
                 stage='payments_export'
                 if ids:
-                    raw=await t.legacy_payment_export(page,downloads,ids,artifacts)
+                    raw=await (t.resume_payment_export(page,downloads,ids,artifacts) if existing else
+                               t.legacy_payment_export(page,downloads,ids,artifacts))
                     artifacts['payments_csv']=base64.b64encode(raw).decode()
                     rows,summary,proof=validate_source(raw,ids,evidence,start,end)
                     artifacts.update(transactions=rows,timezone_proof=proof)
@@ -147,17 +168,23 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--from-date',required=True,type=date.fromisoformat)
     parser.add_argument('--through-date',required=True,type=date.fromisoformat)
-    parser.add_argument('--resume-before-login',action='store_true')
+    recovery=parser.add_mutually_exclusive_group()
+    recovery.add_argument('--resume-before-login',action='store_true')
+    recovery.add_argument('--collect-existing-export',action='store_true')
     args=parser.parse_args(); job=identity(args.from_date,args.through_date)
     import psycopg
     # Commit claim BEFORE any remote access. A failed or interrupted claim must
     # be investigated; this command never retries it or chooses another ID.
+    existing=None
     with psycopg.connect(os.environ['DATABASE_URL']) as conn:
-        claimed=resume_before_login(conn,job) if args.resume_before_login else claim(conn,job)
+        if args.collect_existing_export:
+            existing=collect_pending_export(conn,job); claimed=existing is not None
+        else:
+            claimed=resume_before_login(conn,job) if args.resume_before_login else claim(conn,job)
     if not claimed:
         print(json.dumps({'job':job,'state':'already_claimed','financial_writes':False})); return
     try:
-        result,artifacts,summary=asyncio.run(asyncio.wait_for(capture(args.from_date,args.through_date),timeout=420))
+        result,artifacts,summary=asyncio.run(asyncio.wait_for(capture(args.from_date,args.through_date,existing),timeout=420))
     except Exception as exc:
         result,artifacts,summary={'state':'blocked','stage':'runtime','reason':type(exc).__name__,'financial_writes':False},{},{}
     with psycopg.connect(os.environ['DATABASE_URL']) as conn:

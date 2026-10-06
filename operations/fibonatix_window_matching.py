@@ -138,7 +138,13 @@ async def run(mode):
                 claim_save(conn,task,r,plan);summary['financial_saves_this_run']+=1;persist()
                 await frame.locator('#btnSave').click()
                 # Do not navigate away while Exact's save request is still in flight.
-                await frame.locator('#btnSave').wait_for(state='hidden',timeout=45000)
+                try:
+                    await frame.locator('#btnSave').wait_for(state='hidden',timeout=45000)
+                except Exception:
+                    # Successful Exact saves close/detach the matching window.
+                    # Closure is only an acknowledgement; UI/API readback below
+                    # still has to prove the saved own-invoice identity.
+                    if not frame.is_detached() and not frame.page.is_closed():raise
                 frame=await open_match(context,page,r);ui=await match_rows(frame);reader.selected_proof(r,ui,saved=True)
                 r['evidence'].append({'at':now(),'phase':'ui_saved_pending_api','rows':ui});saved.append(r);persist()
         if saved:

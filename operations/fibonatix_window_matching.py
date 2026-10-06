@@ -71,11 +71,21 @@ def verify_group_readback(r,lines,opened):
     require(reconcile([r],lines)['complete'],'source_changed_after_save')
     invoices,credits=open_rows(r,opened);require(not invoices and not credits,'saved_match_not_closed')
 
+async def search_own_invoice(frame,receipt):
+    # Exact's default grid shows only 99 entries. Use its observed Search
+    # control, preserving the receipt/account context and all save checks.
+    from operations.strict_order_matching import euro
+    await frame.locator('#Search').fill(receipt['ref'])
+    await frame.locator('#btnSearch').click()
+    await frame.locator('tr[id^=List_row_]').filter(has_text=receipt['ref']).first.wait_for(state='visible',timeout=20000)
+    require(await frame.locator('#Search').input_value()==receipt['ref'],'search_reference_changed')
+    require(await frame.locator('#Account_alt').input_value()=='100100' and await frame.locator('#GLAccount_alt').input_value()=='1100' and euro(await frame.locator('#EntryAmount').input_value())==money(receipt['amount']),'search_context_changed')
+
 async def run(mode):
     from app import main
     from operations import icepay_matching as reader
     from operations.strict_order_matching import session,open_match,match_rows,toggle,euro
-    require(mode=='prepare' or (isinstance(mode,int) and 1<=mode<=50),'invalid_mode')
+    require(mode=='prepare' or (isinstance(mode,int) and 1<=mode<=60),'invalid_mode')
     task='match_prepare' if mode=='prepare' else 'match_group_'+str(mode).zfill(2)
     conn=main._db_connect();locked=claimed=False;plan={};summary={'state':'started','financial_saves_this_run':0,'task':task};api=API(main);calls=0
     def persist():
@@ -118,7 +128,7 @@ async def run(mode):
                 opened=initial_open;reason=classify(r,history,opened)
                 if reason:set_exception(r,reason);persist();continue
                 require(reconcile([r],[x for x in initial_lines if x['ID'] in {r['bank_line_id'],r['offset_id']}])['complete'],'source_entry_changed')
-                frame=await open_match(context,page,r);ui=await match_rows(frame);r['evidence'].append({'at':now(),'phase':'before','rows':ui,'open_items':opened})
+                frame=await open_match(context,page,r);await search_own_invoice(frame,r);ui=await match_rows(frame);r['evidence'].append({'at':now(),'phase':'before','rows':ui,'open_items':opened})
                 if any(x['checked'] for x in ui):set_exception(r,'existing_match_requires_inspection');persist();continue
                 hits=[x for x in ui if len(x['cells'])==10 and x['cells'][4]==r['ref'] and x['cells'][2]==str(r['invoice']['EntryNumber']) and x['cells'][5].startswith('70 -')]
                 if len(hits)!=1 or euro(hits[0]['cells'][6])!=money(r['amount']):set_exception(r,'own_invoice_not_fully_open_in_ui');persist();continue
@@ -127,7 +137,7 @@ async def run(mode):
                 require(validate_open(r,await orders([r['ref']])) is None,'last_api_precondition_changed')
                 claim_save(conn,task,r,plan);summary['financial_saves_this_run']+=1;persist()
                 await frame.locator('#btnSave').click();await asyncio.sleep(2)
-                frame=await open_match(context,page,r);ui=await match_rows(frame);reader.selected_proof(r,ui,saved=True)
+                frame=await open_match(context,page,r);await search_own_invoice(frame,r);ui=await match_rows(frame);reader.selected_proof(r,ui,saved=True)
                 r['evidence'].append({'at':now(),'phase':'ui_saved_pending_api','rows':ui});saved.append(r);persist()
         if saved:
             after=await api.rows('financialtransaction/TransactionLines',{'$filter':query,'$select':SELECT})

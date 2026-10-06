@@ -1,4 +1,5 @@
-import copy,unittest
+import copy,unittest,sys,types
+from unittest.mock import patch
 from operations import fibonatix_window_matching as w
 
 def fixture():
@@ -36,4 +37,24 @@ class Matching(unittest.TestCase):
   p={'manifest':manifest,'receipts':receipts};imp={'summary':{'state':'import_verified','verified_receipts':248},'artifacts':{'manifest':manifest}}
   w.approved(p,imp);p['receipts'][0]['state']='match_requested'
   with self.assertRaisesRegex(ValueError,'unknown_save'):w.approved(p,imp)
+class SearchContext(unittest.IsolatedAsyncioTestCase):
+ async def test_search_never_accepts_changed_debtor_or_receipt_amount(self):
+  class Control:
+   def __init__(self,frame,key):self.frame,self.key=frame,key
+   async def fill(self,value):self.frame.values[self.key]=value
+   async def click(self):pass
+   def filter(self,**kwargs):return self
+   @property
+   def first(self):return self
+   async def wait_for(self,**kwargs):pass
+   async def input_value(self):return self.frame.values[self.key]
+  class Frame:
+   def __init__(self):self.values={'#Account_alt':'100100','#GLAccount_alt':'1100','#EntryAmount':'10,00'}
+   def locator(self,key):return Control(self,key)
+  helper=types.ModuleType('operations.strict_order_matching');helper.euro=lambda v:w.money(v.replace(',','.'))
+  with patch.dict(sys.modules,{'operations.strict_order_matching':helper}):
+   f=Frame();await w.search_own_invoice(f,{'ref':'TD90001','amount':'10.00'});self.assertEqual(f.values['#Search'],'TD90001')
+   for key,value in [('#Account_alt','109419'),('#EntryAmount','11,00'),('#GLAccount_alt','2000')]:
+    f=Frame();f.values[key]=value
+    with self.assertRaisesRegex(ValueError,'search_context_changed'):await w.search_own_invoice(f,{'ref':'TD90001','amount':'10.00'})
 if __name__=='__main__':unittest.main()

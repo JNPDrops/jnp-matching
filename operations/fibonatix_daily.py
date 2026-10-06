@@ -174,10 +174,16 @@ async def upload(app,conn,api,day,data):
     except Exception as exc:
         data['upload_error_type']=type(exc).__name__
     persist(conn,day,'readback_required',data)
-    actual=await ledger(api,data['candidates'],day)
-    check=reconcile(data['candidates'],actual)
-    data.update(after=actual,after_check=check,api_calls=api.calls)
-    complete=not check['missing'] and not check['errors'] and not check['other_receipts_same_order']
+    # The preflight already verifies existing receipts across periods. Verify
+    # the uploaded entry directly: rereading the entire year a second time can
+    # exhaust the bounded read allowance after an otherwise successful upload.
+    actual=await api.rows('financialtransaction/TransactionLines',{
+        '$filter':"JournalCode eq '26' and FinancialYear eq "+str(day.year)+" and EntryNumber eq "+str(data['entry']),
+        '$select':SELECT,'$orderby':'LineNumber'})
+    check=reconcile(data['new_receipts'],actual)
+    data.update(after=actual,after_check=check,after_check_scope='uploaded_entry',api_calls=api.calls)
+    complete=(len(actual)==2*len(data['new_receipts']) and not check['missing']
+              and not check['errors'] and not check['other_receipts_same_order'])
     persist(conn,day,'verified' if complete else 'uncertain',data)
     require(complete,'upload_unverified_no_retry')
     return {'state':'verified','imported':len(data['new_receipts']),'existing':len(data['before_check']['existing']),'exceptions':data['summary']['exceptions'],'financial_writes':True}

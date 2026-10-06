@@ -32,3 +32,9 @@ Een voorgestelde Paragon-login/source-discovery-uitbreiding is door automatische
 2. Voor bewezen brondata opnieuw Exact raadplegen op bestaande imports en menselijke correcties. Alleen ontbrekende ontvangsten importeren; uitsluitend eigen order/factuur/betaling matchen. Payouts apart als bankbeweging behandelen.
 3. Fibonatix: autorisatiegrens oplossen en vervolgens bronselectie 3–5 oktober vastleggen met nieuwe identiteit; oude import/expiry nooit verlengen als vervanging.
 4. De bereikbare Shell is geen bewijs van globale drain. De gates van PR #82 blijven gesloten tot veilige productieoverdracht is bewezen.
+
+## Blijvende toestemming — 6 oktober 2026 09:47 Europe/Amsterdam
+
+Jasper heeft expliciet bevestigd dat voor deze JNP-taak bij Paragon mag worden ingelogd met de al in Render opgeslagen e-mail/gebruikersnaam, wachtwoord en TOTP om Fibonatix-brongegevens op te halen. Deze toestemming geldt voor ingeplande uitvoeringen en tussentijdse herhaalopdrachten; dezelfde toestemming niet opnieuw vragen zolang taak, account, bestemming en scope gelijk blijven. ICEPAY/Fibonatix-operationele verwerking behoudt de eerder geautoriseerde scope en bewijsregels. Geheimen uitsluitend intern gebruiken, nooit tonen of in Git opslaan. Dit wijzigt geen planning of migratiegate.
+
+De eerdere afwijzing is door deze expliciete bevestiging opgevolgd. Eerst alleen-lezen Paragon-bronnavigatie onderzoeken met een eigen duurzame identiteit. 29 synthetische tests slagen vóór uitvoering; geen financiële tests.

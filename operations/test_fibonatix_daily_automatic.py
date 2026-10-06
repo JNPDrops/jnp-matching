@@ -5,7 +5,7 @@ import unittest
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
-from operations.fibonatix_daily_automatic import checked, refunded_ids, refund_selection_start, BANK
+from operations.fibonatix_daily_automatic import checked, refunded_ids, refund_selection_start, amount_groups, BANK
 
 
 class AutomaticScopeTests(unittest.TestCase):
@@ -52,6 +52,16 @@ class AutomaticScopeTests(unittest.TestCase):
         self.assertEqual(refund_selection_start(eligible,[{'date':'2026-10-03'}]),date(2026,10,6))
         with self.assertRaisesRegex(ValueError,'refund_requires_narrower_selection'):
             refund_selection_start(eligible,[{'date':'2026-10-06'}])
+
+    def test_amount_partitions_exclude_review_values(self):
+        rows=[{'payment_id':str(i),'amount':v} for i,v in enumerate(['1.00','257.28','257.29','257.30','467.65','467.66'])]
+        reviews=[rows[2],rows[4]]
+        groups=amount_groups(rows,reviews)
+        self.assertEqual([r['payment_id'] for _,batch in groups for r in batch],['0','1','3','5'])
+        for bounds,batch in groups:
+            for review in reviews:self.assertFalse(Decimal(bounds[0])<=Decimal(review['amount'])<=Decimal(bounds[1]))
+        with self.assertRaisesRegex(ValueError,'shared_review_amount'):
+            amount_groups(rows+[{'payment_id':'other','amount':'257.29'}],reviews)
 
 
 if __name__=='__main__':unittest.main()

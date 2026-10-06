@@ -92,16 +92,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     pass
             runtime.stop.assert_awaited_once()
 
-    async def test_no_split_role_can_accidentally_execute(self):
+    async def test_activated_roles_describe_only_their_assigned_tasks(self):
         for role in ROLES:
             with self.subTest(role=role):
-                self.assertFalse(role_manifest(role)["execution_ready"])
+                self.assertTrue(role_manifest(role)["execution_ready"])
+                runtime = BackgroundTasks(None, role)
+                self.assertTrue(all(spec.role == role for spec in runtime.specs))
+
+    async def test_blocked_role_cannot_execute(self):
+        for role in ROLES:
+            with self.subTest(role=role), patch.dict("app.runtime.ROLE_BLOCKERS", {role: ("test_gate",)}):
                 with self.assertRaises(SeparationNotReady):
                     BackgroundTasks(None, role)
 
     async def test_worker_refuses_before_importing_the_financial_app(self):
         from app.worker import run
-        with patch("app.runtime.import_module", side_effect=AssertionError("unexpected import")):
+        with patch.dict("app.runtime.ROLE_BLOCKERS", {"routing": ("test_gate",)}), \
+                patch("app.runtime.import_module", side_effect=AssertionError("unexpected import")):
             with self.assertRaises(SeparationNotReady):
                 await run("routing")
 
@@ -176,11 +183,14 @@ class CommandTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-S", "-m", "app.worker", "--role", "routing", "--check"],
                                 capture_output=True, text=True, check=True)
         data = json.loads(result.stdout)
-        self.assertFalse(data["execution_ready"])
+        self.assertTrue(data["execution_ready"])
         self.assertEqual(data["tasks"], ["debtor-routing"])
 
     def test_headless_execution_exits_nonzero_before_loading_app(self):
-        result = subprocess.run([sys.executable, "-S", "-m", "app.worker", "--role", "icepay"],
+        result = subprocess.run([sys.executable, "-S", "-c",
+                                "from app import runtime; "
+                                "runtime.ROLE_BLOCKERS['icepay']=('test_gate',); "
+                                "from app.worker import main; main(['--role','icepay'])"],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertIn("role_not_ready:icepay", result.stderr)

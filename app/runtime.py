@@ -1,4 +1,4 @@
-"""Explicit background-task ownership; split execution is deliberately gated.
+"""Explicit background-task ownership for validated independent workers.
 
 The legacy web lifespan retains ownership of every role by default. Describing a role
 does not authorize starting a second owner of its queues or historical jobs.
@@ -34,16 +34,13 @@ TASKS = (
 )
 ROLES = ("web", "routing", "woo-rules", "tax", "maintenance", "fibonatix", "icepay", "reports")
 
-# All background roles now use shared ownership and write admission. These are
-# operational gates, not an environment-switch to bypass missing validation.
-# Initial legacy production has none of these claims: bootstrapping still needs
-# a proven stop/drain of *all* financial entrypoints before deployment.
-COMMON_BLOCKERS = ("initial_legacy_web_drain_pending",)
-ROLE_BLOCKERS = {
-    role: COMMON_BLOCKERS + (role.replace('-', '_') + "_handover_postgres_pending",)
-    for role in ROLES if role != "web"
-}
-ROLE_BLOCKERS["web"] = COMMON_BLOCKERS + ("manual_http_write_queue_or_disable_pending",)
+# PostgreSQL handover/write-fence validation passed. On 2026-10-06 the old
+# production instance was suspended while every legacy financial lock was held;
+# both manual HTTP write flags were false. See agent-separation-activation.md.
+# Readiness permits startup only: durable desired_owner still defaults to web,
+# and each worker must separately acquire its assigned role before doing work.
+COMMON_BLOCKERS = ()
+ROLE_BLOCKERS = {role: COMMON_BLOCKERS for role in ROLES}
 
 
 class SeparationNotReady(RuntimeError):

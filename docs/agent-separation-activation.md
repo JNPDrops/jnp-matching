@@ -89,3 +89,21 @@ service. Gebruik een weggevallen Shell of afgelopen hold daarom nooit als
 overdrachtsbewijs. Er moet een geverifieerde stop van de oude instantie zijn,
 terwijl financiële uitvoering geblokkeerd blijft, vóór nieuwe uitvoerders starten.
 Behoud de bestaande handmatige-deploy- en één-eigenaarvoorwaarden.
+
+## Eerste productiestop 6 oktober 2026
+
+De gebruiker gaf expliciet toestemming voor tijdelijk stilzetten/hervatten en
+alle zeven afzonderlijke workers (samen $103/maand extra compute). Op 11:55 UTC
+verkreeg de gepinde guard 51d6751 alle vijf legacy locks; beide handmatige
+HTTP-schrijfknoppen waren false en alle gecontroleerde taakmetadata was terminaal.
+De guard behield locks bij SIGTERM/SIGHUP. Render bevestigde daarna
+`suspended: suspended`, `suspenders: [user]` voor srv-daun5mt9fdbs739jij7g
+(updatedAt 2026-10-06T11:55:37.358851Z); de oude shell werd onbeschikbaar.
+
+Daarmee kunnen de eenmalige startup-gates worden geopend. De bestaande
+PostgreSQL-tests bewijzen ownership, drain en write-fencing; de volledige suite
+moet ook op deze activeringscommit groen zijn vóór merge/deployment. Geen rol
+wordt door het openen van een gate overgedragen: desired_owner blijft standaard
+legacy tot de expliciete interne handover. Oude PSP-opdrachten worden niet
+heropend. De zeven services mogen volgens deze specifieke gebruikersopdracht
+worden ingericht, ook wanneer een historische catalogus momenteel niets uitvoert.

@@ -33,6 +33,10 @@ def submit(request, action, params=None):
 
 
 async def dispatch(job):
+    if job['action'] in {'daily_prepare','daily_import','daily_reconcile'}:
+        from app import main as app
+        from operations.fibonatix_daily import run
+        return await run(app,job)
     from operations import fibonatix_import as legacy
     from datetime import datetime, timezone
     validate(job['action'],job['params'])

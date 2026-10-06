@@ -135,7 +135,7 @@ class ReservationTests(unittest.TestCase):
         row = tuple(state.get(k) for k in ("daily_limit", "daily_remaining", "daily_reset_ms",
                     "minute_limit", "minute_remaining", "minute_reset_ms", "observed_at",
                     "unknown_window_started_at", "unknown_window_count"))
-        conn.execute.side_effect = [Cursor(), Cursor(), Cursor(row), Cursor((pending,)), Cursor(), Cursor()]
+        conn.execute.side_effect = [Cursor(), Cursor(), Cursor(row), Cursor((pending, pending)), Cursor(), Cursor()]
         return conn
 
     def test_reservation_is_atomic_metadata_only(self):

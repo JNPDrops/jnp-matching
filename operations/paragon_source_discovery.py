@@ -6,8 +6,8 @@ import re
 from urllib.parse import urlsplit
 from operations import paragon_login_probe as login
 
-JOB='paragon-source-discovery-20261003-05-v2'
-PREDECESSOR='paragon-source-discovery-20261003-05-v1'
+JOB='paragon-source-discovery-20261003-05-v3'
+PREDECESSOR='paragon-source-discovery-20261003-05-v2'
 
 
 def safe_links(links):
@@ -28,16 +28,9 @@ async def observe(page, data):
     choices=[r for r in data['navigation'] if re.fullmatch('transactions?',r['label'],re.I)]
     if len(choices)!=1:
         data['state']='transaction_navigation_not_unique'; return
-    data['stage']='transaction_link'
-    links=page.get_by_role('link',name=choices[0]['label'],exact=True)
-    data['link_count']=await links.count()
-    data['link_visible']=[await links.nth(i).is_visible() for i in range(await links.count())]
-    visible=[links.nth(i) for i,shown in enumerate(data['link_visible']) if shown]
-    if len(visible)!=1:
-        data['state']='transaction_link_not_unique_visible'; return
-    await visible[0].click()
     data['stage']='transaction_page'
-    await page.wait_for_load_state('domcontentloaded')
+    # Navigate only to the unique same-origin read link observed above.
+    await page.goto(login.ORIGIN+choices[0]['path'],wait_until='domcontentloaded')
     p=urlsplit(page.url)
     if p.scheme!='https' or p.netloc!='paragon.online':
         raise ValueError('unexpected_origin')

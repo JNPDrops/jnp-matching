@@ -43,6 +43,9 @@ def probe_completed(app,task):
 
 
 async def dispatch(app,job):
+    if job['action']=='daily_report':
+        from operations.nightly_reports import run
+        return await run(app,job)
     task=validate(job)
     if task.query:
         await task.module.run(task_id=task.task_id)

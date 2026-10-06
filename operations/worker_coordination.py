@@ -64,7 +64,7 @@ def parse_headers(headers):
     return result
 
 
-def available(state, pending, *, floor, now_ms, unknown_count=0):
+def available(state, pending, *, floor, now_ms, unknown_count=0, pending_minute=None):
     """Pure conservative decision used under the database lock."""
     if type(floor) is not int or floor < 0:
         raise ValueError("invalid_budget_floor")
@@ -78,7 +78,8 @@ def available(state, pending, *, floor, now_ms, unknown_count=0):
         minute = None
     if type(daily) is int and daily - pending <= floor:
         return False, "daily_reserve"
-    if type(minute) is int and minute - pending <= 0:
+    minute_pending = pending if pending_minute is None else pending_minute
+    if type(minute) is int and minute - minute_pending <= 0:
         return False, "minute_reserve"
     if minute is None and unknown_count >= UNKNOWN_PER_MINUTE:
         return False, "unknown_minute_cap"
@@ -267,11 +268,14 @@ def reserve_request(conn, division, connection, role, method, *, priority="routi
         window_start, unknown_count = state["unknown_window_started_at"], state["unknown_window_count"]
         if now - window_start >= timedelta(minutes=1):
             window_start, unknown_count = now, 0
-        pending = conn.execute("""SELECT COUNT(*) FROM jnp_exact_api_reservations
+        pending, pending_minute = conn.execute("""SELECT COUNT(*),
+            COUNT(*) FILTER (WHERE state='reserved' OR reserved_at>%s)
+            FROM jnp_exact_api_reservations
             WHERE division=%s AND connection=%s AND
               (state='reserved' OR (state='uncertain' AND reserved_at>%s))""",
-            (division, connection, now - timedelta(days=1))).fetchone()[0]
-        allowed, reason = available(state, pending, floor=floor, now_ms=now_ms, unknown_count=unknown_count)
+            (now - timedelta(minutes=1), division, connection, now - timedelta(days=1))).fetchone()
+        allowed, reason = available(state, pending, floor=floor, now_ms=now_ms,
+                                    unknown_count=unknown_count, pending_minute=pending_minute)
         if not allowed:
             raise BudgetDeferred(reason)
         conn.execute("""INSERT INTO jnp_exact_api_reservations

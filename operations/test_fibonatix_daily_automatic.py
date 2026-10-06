@@ -5,7 +5,7 @@ import unittest
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
-from operations.fibonatix_daily_automatic import checked, BANK
+from operations.fibonatix_daily_automatic import checked, refunded_ids, refund_selection_start, amount_groups, BANK
 
 
 class AutomaticScopeTests(unittest.TestCase):
@@ -39,6 +39,29 @@ class AutomaticScopeTests(unittest.TestCase):
     def test_duplicate_blocks(self):
         self.snapshot['rows']*=2
         with self.assertRaisesRegex(ValueError,'duplicate_receipt'):self.run_check()
+
+    def test_refund_excludes_only_its_own_order(self):
+        allowed={'A':{'woo_id':123},'B':{'woo_id':456}}
+        refund={'Type':'RF','Status(approved/declined)':'Approved','Status Code':'20000','Currency':'EUR','Brand TRX ID':'123','Amount':'42.50'}
+        self.assertEqual(refunded_ids(allowed,[refund]),{'A'})
+        refund['Status(approved/declined)']='Pending'
+        self.assertEqual(refunded_ids(allowed,[refund]),set())
+
+    def test_refund_cannot_remain_inside_native_selection(self):
+        eligible=[{'date':'2026-10-06'}]
+        self.assertEqual(refund_selection_start(eligible,[{'date':'2026-10-03'}]),date(2026,10,6))
+        with self.assertRaisesRegex(ValueError,'refund_requires_narrower_selection'):
+            refund_selection_start(eligible,[{'date':'2026-10-06'}])
+
+    def test_amount_partitions_exclude_review_values(self):
+        rows=[{'payment_id':str(i),'amount':v} for i,v in enumerate(['1.00','257.28','257.29','257.30','467.65','467.66'])]
+        reviews=[rows[2],rows[4]]
+        groups=amount_groups(rows,reviews)
+        self.assertEqual([r['payment_id'] for _,batch in groups for r in batch],['0','1','3','5'])
+        for bounds,batch in groups:
+            for review in reviews:self.assertFalse(Decimal(bounds[0])<=Decimal(review['amount'])<=Decimal(bounds[1]))
+        with self.assertRaisesRegex(ValueError,'shared_review_amount'):
+            amount_groups(rows+[{'payment_id':'other','amount':'257.29'}],reviews)
 
 
 if __name__=='__main__':unittest.main()

@@ -66,3 +66,26 @@ maar geen echte worker aanmaken, Blueprint toepassen of shellcommando uitvoeren.
 Die activeringshandelingen vragen de Render Dashboard/CLI-capability met bestaande
 toegang. De dev-webservice is geen shell. Browserfallback is hier niet geautoriseerd.
 Daarom zijn deze stappen voorbereid, niet uitgevoerd of als live aangemerkt.
+
+## Aanvulling 6 oktober: toegankelijke Shell en eerste lockcontrole
+
+De gebruiker heeft browserfallback en Render Web Shell inmiddels toegestaan.
+In de hervatte migratiesessie is de bestaande webservice opnieuw aangemeld en
+intern alleen-lezen gecontroleerd. Main is b7fd86c3; productie blijft cf75100f.
+Beide handmatige HTTP-schrijfknoppen zijn false. De oorspronkelijke 439 CI-tests
+zijn geslaagd; de latere vier PR82-commits wijzigen alleen documentatie.
+
+`operations/legacy_cutover.py` is een afzonderlijke eerste-overdrachtscontrole
+voor uitsluitend de gepinde bestaande productieversie. `check` verkrijgt alle
+bestaande locks of stopt, controleert uitsluitend taakmetadata en geeft de locks
+weer vrij. Een geslaagde check is nadrukkelijk geen voltooide drain en opent geen
+runtimegate. `hold --seconds 600` kan dezelfde locks tijdelijk vasthouden. Het
+commando verandert geen boekingen, wachtrijen, taakclaims, tokens of instellingen.
+Zeven synthetische tests bewijzen onder meer weigering bij bezette locks,
+onbekende taakstatus of actieve schrijfknoppen en vrijgave van gedeeltelijke locks.
+
+Een hold in de Shell van de oude webservice leeft niet onafhankelijk van die
+service. Gebruik een weggevallen Shell of afgelopen hold daarom nooit als
+overdrachtsbewijs. Er moet een geverifieerde stop van de oude instantie zijn,
+terwijl financiële uitvoering geblokkeerd blijft, vóór nieuwe uitvoerders starten.
+Behoud de bestaande handmatige-deploy- en één-eigenaarvoorwaarden.

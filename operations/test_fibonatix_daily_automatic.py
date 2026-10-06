@@ -5,7 +5,7 @@ import unittest
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
-from operations.fibonatix_daily_automatic import checked, BANK
+from operations.fibonatix_daily_automatic import checked, refunded_ids, refund_selection_start, BANK
 
 
 class AutomaticScopeTests(unittest.TestCase):
@@ -39,6 +39,19 @@ class AutomaticScopeTests(unittest.TestCase):
     def test_duplicate_blocks(self):
         self.snapshot['rows']*=2
         with self.assertRaisesRegex(ValueError,'duplicate_receipt'):self.run_check()
+
+    def test_refund_excludes_only_its_own_order(self):
+        allowed={'A':{'woo_id':123},'B':{'woo_id':456}}
+        refund={'Type':'RF','Status(approved/declined)':'Approved','Status Code':'20000','Currency':'EUR','Brand TRX ID':'123','Amount':'42.50'}
+        self.assertEqual(refunded_ids(allowed,[refund]),{'A'})
+        refund['Status(approved/declined)']='Pending'
+        self.assertEqual(refunded_ids(allowed,[refund]),set())
+
+    def test_refund_cannot_remain_inside_native_selection(self):
+        eligible=[{'date':'2026-10-06'}]
+        self.assertEqual(refund_selection_start(eligible,[{'date':'2026-10-03'}]),date(2026,10,6))
+        with self.assertRaisesRegex(ValueError,'refund_requires_narrower_selection'):
+            refund_selection_start(eligible,[{'date':'2026-10-06'}])
 
 
 if __name__=='__main__':unittest.main()

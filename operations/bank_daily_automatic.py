@@ -130,6 +130,6 @@ async def run_queued(app):
             except Exception as exc:
                 prior=conn.execute('SELECT state FROM jnp_bank_automatic_runs WHERE division=%s AND processing_date=%s',(n.DIVISION,day)).fetchone()[0]
                 data['error_type']=type(exc).__name__
-                save(app,day,'uncertain' if prior=='click_requested' else 'blocked',data)
+                save(app,day,'uncertain' if prior in ('click_requested','completed') else 'blocked',data)
         finally:
             conn.execute('SELECT pg_advisory_unlock(%s)',(LOCK,))

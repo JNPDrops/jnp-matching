@@ -132,7 +132,7 @@ def bank_case(key, raw, observed, source="bank"):
     category = str(raw.get("status") or "bank_identity_review")
     action = string(raw.get("next_action")) or "Controleer de bronbetaling en de specifieke bijbehorende factuur."
     if "automatically" in action.lower():
-        action = "Controleer de specifieke tegenboeking en pas uitsluitend de onderbouwde toewijzing toe; bevestig daarna het resultaat."
+        action = "Controleer de eigen order en factuur; laat uitsluitend Exact Automatically afletteren en lees het resultaat terug."
     item = case(source, key, category, raw.get("observed_at") or observed,
         psp=provider(raw), reference=string(raw.get("reference"), 120),
         transaction_id=string(raw.get("payment_transaction_id"), 150),
@@ -311,8 +311,23 @@ class PostgresWorklist:
                     if len(data.get("receipts", [])) > LIMIT:
                         raise ValueError("source_limit_exceeded")
                     items += strict_cases(job, data, updated)
+                daily = []
+                if self.exists(conn, "jnp_fibonatix_daily_imports"):
+                    daily = conn.execute("""SELECT processing_date,data,updated_at
+                        FROM jnp_fibonatix_daily_imports WHERE division=%s
+                        ORDER BY processing_date DESC LIMIT 21""", (int(DIVISION),)).fetchall()
+                    if len(daily) > 20:
+                        raise ValueError("source_limit_exceeded")
+                    for day, data, updated in daily:
+                        exceptions = data.get("dashboard_exceptions", [])
+                        if len(exceptions) > LIMIT:
+                            raise ValueError("source_limit_exceeded")
+                        for raw in exceptions:
+                            item = bank_case(str(day) + ":" + raw["case_key"], raw, updated, source="fibonatix")
+                            if item:
+                                items.append(item)
                 observed = max((i["observed_at"] for i in items), key=epoch, default=None)
-                return items, {"status": "ready" if rows else "not_scanned", "observed_at": observed}
+                return items, {"status": "ready" if rows or daily else "not_scanned", "observed_at": observed}
             if source == "routing":
                 if not self.exists(conn, "jnp_debtor_route_queue"):
                     return [], {"status": "unavailable"}

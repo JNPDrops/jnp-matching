@@ -315,8 +315,8 @@ class PostgresWorklist:
                 if self.exists(conn, "jnp_fibonatix_daily_imports"):
                     daily = conn.execute("""SELECT processing_date,data,updated_at
                         FROM jnp_fibonatix_daily_imports WHERE division=%s
-                        ORDER BY processing_date DESC LIMIT 21""", (int(DIVISION),)).fetchall()
-                    if len(daily) > 20:
+                        ORDER BY processing_date DESC LIMIT %s""", (int(DIVISION), LIMIT+1)).fetchall()
+                    if len(daily) > LIMIT:
                         raise ValueError("source_limit_exceeded")
                     for day, data, updated in daily:
                         exceptions = data.get("dashboard_exceptions", [])

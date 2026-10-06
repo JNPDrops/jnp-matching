@@ -116,7 +116,10 @@ async def select_october_day(calendar, number):
     await cells[0].click()
 
 
-async def select_period(page, field_id):
+async def select_period(page, field_id, *, start=START, end=END):
+    if start.year != 2026 or end.year != 2026 or start.month != 10 or end.month != 10 or end < start:
+        raise AcquisitionStopped('configuration')
+    period = start.strftime('%d/%m/%Y') + ' - ' + end.strftime('%d/%m/%Y')
     field = await date_field(page,field_id)
     await field.click()
     locator = page.locator('.daterangepicker:visible')
@@ -125,23 +128,24 @@ async def select_period(page, field_id):
     if len(calendars)!=1:
         raise AcquisitionStopped('calendar_missing')
     calendar = calendars[0]
-    await select_october_day(calendar,1)
-    await select_october_day(calendar,3)
+    await select_october_day(calendar,start.day)
+    await select_october_day(calendar,end.day)
     apply = await b.visible(calendar.get_by_role('button',name='Apply',exact=True))
     if len(apply)!=1:
         raise AcquisitionStopped('calendar_missing')
     await apply[0].click()
-    if await field.input_value()!=RANGE:
+    if await field.input_value()!=period:
         raise AcquisitionStopped('date_not_verified')
 
 
-async def apply_period(page, *, refunds=False):
+async def apply_period(page, *, refunds=False, start=START, end=END):
+    period = start.strftime('%d/%m/%Y') + ' - ' + end.strftime('%d/%m/%Y')
     await b.click_unique_read_control(page,re.compile(r'^Filter(?:\s+\d+)?$'))
     if not refunds:
         await clear_date(page,'tableFiltersForm.OrderTime.OrderTime')
     field_id = ('tableFiltersForm.DateCreated.DateCreated' if refunds
                 else 'tableFiltersForm.PaymentTime.PaymentTime')
-    await select_period(page,field_id)
+    await select_period(page,field_id,start=start,end=end)
     if refunds:
         await page.locator('select[id="tableFiltersForm.Enabled.value"]').select_option(label='All')
     await b.click_unique_read_control(page,re.compile(r'^Apply filters$'))
@@ -149,7 +153,7 @@ async def apply_period(page, *, refunds=False):
     await b.wait_verified_account(page)
     # Read back the exact selection after the server-driven filter update.
     await b.click_unique_read_control(page,re.compile(r'^Filter(?:\s+\d+)?$'))
-    if await (await date_field(page,field_id)).input_value()!=RANGE:
+    if await (await date_field(page,field_id)).input_value()!=period:
         raise AcquisitionStopped('date_not_verified')
     if not refunds and await (await date_field(page,'tableFiltersForm.OrderTime.OrderTime')).input_value():
         raise AcquisitionStopped('date_not_verified')
@@ -523,10 +527,10 @@ async def read_download(download):
     return Path(path).read_bytes()
 
 
-async def read_refunds(page):
+async def read_refunds(page, *, start=START, end=END):
     await close_notifications(page)
     await open_account_page(page,'Refunds')
-    await apply_period(page,refunds=True)
+    await apply_period(page,refunds=True,start=start,end=end)
     combined, seen, headers, total = [], set(), None, None
     for _ in range(50):
         snapshot = await table_snapshot(page)
@@ -542,7 +546,7 @@ async def read_refunds(page):
         if not snapshot['next']:
             if len(combined)!=total:
                 raise AcquisitionStopped('count_mismatch')
-            return {'headers':headers,'rows':combined,'total':total,'period':RANGE}
+            return {'headers':headers,'rows':combined,'total':total,'period':start.strftime('%d/%m/%Y')+' - '+end.strftime('%d/%m/%Y')}
         await b.click_unique_read_control(page,re.compile(r'^Next$'))
         await page.wait_for_load_state('networkidle',timeout=20000)
     raise AcquisitionStopped('artifact_too_large')
@@ -622,7 +626,7 @@ def verify_csv_timezone(content, evidence, expected_ids):
     return report
 
 
-def parse_payments(content, expected_count, expected_ids=None, *, utc_to_amsterdam=False):
+def parse_payments(content, expected_count, expected_ids=None, *, utc_to_amsterdam=False, start=START, end=END):
     try:
         text = content.decode('utf-8-sig')
         dialect = csv.Sniffer().sniff(text[:16000],delimiters=',;\t')
@@ -653,7 +657,7 @@ def parse_payments(content, expected_count, expected_ids=None, *, utc_to_amsterd
             raise AcquisitionStopped('duplicate_payment')
         seen.add(key)
         paid = payment_date(row['paymenttime'],utc_to_amsterdam=utc_to_amsterdam)
-        if not START<=paid<=END:
+        if not start<=paid<=end:
             raise AcquisitionStopped('out_of_period')
         if row['merchantid']!=b.MERCHANT:
             continue
@@ -681,7 +685,7 @@ def parse_payments(content, expected_count, expected_ids=None, *, utc_to_amsterd
         'nonpositive_ok_count':sum(Decimal(r['amount'])<=0 for r in ok),
         'per_day':{d: {'count':sum(r['date']==d for r in ok),
             'total':str(sum((Decimal(r['amount']) for r in ok if r['date']==d),Decimal('0.00')))}
-            for d in ('2026-10-01','2026-10-02','2026-10-03')}}
+            for d in sorted({r['date'] for r in selected})}}
 
 
 async def worker(resume):

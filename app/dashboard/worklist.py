@@ -163,6 +163,13 @@ def bank_case(key, raw, observed, source="bank"):
     if raw.get('order_check') in {'observed', 'verified'}:
         order = {'order_number': '#' + str(raw.get('reference') or '')[2:],
                  'order_id': raw.get('woo_order_id'), 'status': raw.get('order_status')}
+    proof = raw.get("native_automatically") or {}
+    if (raw.get("status") == "resolved" and raw.get("match_executed") is True
+            and proof.get("state") == "completed" and proof.get("outcome") == "matched"
+            and proof.get("bank_line_id") == str(key) and proof.get("reference") == raw.get("reference")):
+        item.update(status="resolved", execution_status="verified",
+                    execution_label="Exact Automatically: aflettering teruggelezen",
+                    title="Aflettering bevestigd", next_action="")
     return annotate(item, order=order, checked_at=raw.get('observed_at') or timestamp(observed),
                     lookup_state='not_found' if raw.get('order_check') == 'order_not_found' else None,
                     invoice_absent=raw.get('invoice_presence') == 'not_found' and not raw.get('existing_sales_entries'))

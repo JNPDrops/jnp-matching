@@ -4,7 +4,7 @@ Runs only on the assigned Fibonatix worker. No matching and no automatic replay
 after an uncertain write. Historical task constants and fixtures are untouched.
 """
 import asyncio,base64,copy,hashlib,json,re,time
-from datetime import date,datetime,timezone
+from datetime import date,datetime,timedelta,timezone
 from decimal import Decimal
 from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
@@ -137,6 +137,11 @@ def source(conn,day):
     src=row[0]
     raw=base64.b64decode(src['source_csv'],validate=True)
     require(hashlib.sha256(raw).hexdigest()==src['source_sha256'],'source_changed')
+    from operations.fibonatix_daily_source import bounds
+    lo,hi=bounds(day)
+    require(src['dates']==[lo.strftime('%d/%m/%Y'),(hi-timedelta(microseconds=1)).strftime('%d/%m/%Y')],'source_filter_does_not_cover_day')
+    counts=re.findall(r'Showing [0-9,]+[^0-9]+[0-9,]+ of ([0-9,]+) results',src['table_snapshot'])
+    require(len(counts)==1 and int(counts[0].replace(',',''))==src['source_rows'],'source_export_count_mismatch')
     orders=conn.execute('SELECT result FROM paragon_login_probes WHERE probe_id=%s',(key+':orders',)).fetchone()
     require(orders and orders[0]['state']=='read_complete' and not orders[0]['missing_ids'],'order_evidence_incomplete')
     require((datetime.now(timezone.utc)-datetime.fromisoformat(orders[0]['captured_at'])).total_seconds()<3600,'order_evidence_stale')
@@ -239,4 +244,3 @@ async def run(app,job):
     finally:
         if locked:conn.execute('SELECT pg_advisory_unlock(397775226)')
         conn.close()
-

@@ -31,8 +31,6 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
       - key: EXACT_ALLOCATION_CLIENT_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
-      - key: EXACT_ALLOCATION_REDIRECT_URI
-        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
       - key: SESSION_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
 
@@ -91,8 +89,6 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
       - key: EXACT_ALLOCATION_CLIENT_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
-      - key: EXACT_ALLOCATION_REDIRECT_URI
-        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
       - key: SESSION_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
   - type: worker
@@ -120,8 +116,6 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
       - key: EXACT_ALLOCATION_CLIENT_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
-      - key: EXACT_ALLOCATION_REDIRECT_URI
-        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
       - key: SESSION_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
       - key: METORIK_API_KEY
@@ -198,8 +192,6 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_USERNAME}
       - key: ICEPAY_WEB_PASSWORD
         fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_PASSWORD}
-      - key: ICEPAY_WEB_TOTP_SECRET
-        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_TOTP_SECRET}
       - key: ICEPAY_FETCH_PROBE_ID
         fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_FETCH_PROBE_ID}
       - key: ICEPAY_TRANSACTION_TASK_ID
@@ -257,5 +249,3 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_LOGIN_PROBE_ID}
       - key: PARAGON_EMAIL
         fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_EMAIL}
-      - key: EXACT_ALLOCATION_REDIRECT_URI
-        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}

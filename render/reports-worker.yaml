@@ -51,5 +51,3 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_LOGIN_PROBE_ID}
       - key: PARAGON_EMAIL
         fromService: {name: jnp-matching, type: web, envVarKey: PARAGON_EMAIL}
-      - key: EXACT_ALLOCATION_REDIRECT_URI
-        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}

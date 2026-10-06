@@ -37,8 +37,6 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_USERNAME}
       - key: ICEPAY_WEB_PASSWORD
         fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_PASSWORD}
-      - key: ICEPAY_WEB_TOTP_SECRET
-        fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_WEB_TOTP_SECRET}
       - key: ICEPAY_FETCH_PROBE_ID
         fromService: {name: jnp-matching, type: web, envVarKey: ICEPAY_FETCH_PROBE_ID}
       - key: ICEPAY_TRANSACTION_TASK_ID

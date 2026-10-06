@@ -29,8 +29,6 @@ services:
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_ID}
       - key: EXACT_ALLOCATION_CLIENT_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_CLIENT_SECRET}
-      - key: EXACT_ALLOCATION_REDIRECT_URI
-        fromService: {name: jnp-matching, type: web, envVarKey: EXACT_ALLOCATION_REDIRECT_URI}
       - key: SESSION_SECRET
         fromService: {name: jnp-matching, type: web, envVarKey: SESSION_SECRET}
 

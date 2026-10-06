@@ -67,6 +67,10 @@ def claim_save(conn,task,r,plan):
         require(conn.execute('INSERT INTO fibonatix_import_attempts(job,action) VALUES(%s,%s) ON CONFLICT DO NOTHING RETURNING action',(JOB,'match:'+r['bank_line_id'])).fetchone(),'previous_save_reconcile_only')
         r.update(state='match_requested',execution_status='unknown_readback_required');r['attempts'].append({'at':now(),'task':task,'outcome':'unknown_readback_required'});save_plan(conn,plan)
 
+def verify_group_readback(r,lines,opened):
+    require(reconcile([r],lines)['complete'],'source_changed_after_save')
+    invoices,credits=open_rows(r,opened);require(not invoices and not credits,'saved_match_not_closed')
+
 async def run(mode):
     from app import main
     from operations import icepay_matching as reader
@@ -102,12 +106,18 @@ async def run(mode):
         plan=load_plan(conn);approved(plan,imported)
         queue=[r for r in plan['receipts'] if r['state']=='pending'][:5]
         if not queue:summary['state']='no_pending_items';return summary
+        refs=[r['ref'] for r in queue]
+        history=await orders(refs,True);initial_open=await orders(refs)
+        ids=[r[k] for r in queue for k in ['bank_line_id','offset_id']]
+        query=' or '.join("ID eq guid'"+v+"'" for v in ids)
+        initial_lines=await api.rows('financialtransaction/TransactionLines',{'$filter':query,'$select':SELECT})
+        saved=[]
         async with session() as (context,page):
             for r in queue:
                 summary['state']='processing';persist()
-                history=await orders([r['ref']],True);opened=await orders([r['ref']]);reason=classify(r,history,opened)
+                opened=initial_open;reason=classify(r,history,opened)
                 if reason:set_exception(r,reason);persist();continue
-                require(reconcile([r],await lines(r))['complete'],'source_entry_changed')
+                require(reconcile([r],[x for x in initial_lines if x['ID'] in {r['bank_line_id'],r['offset_id']}])['complete'],'source_entry_changed')
                 frame=await open_match(context,page,r);ui=await match_rows(frame);r['evidence'].append({'at':now(),'phase':'before','rows':ui,'open_items':opened})
                 if any(x['checked'] for x in ui):set_exception(r,'existing_match_requires_inspection');persist();continue
                 hits=[x for x in ui if len(x['cells'])==10 and x['cells'][4]==r['ref'] and x['cells'][2]==str(r['invoice']['EntryNumber']) and x['cells'][5].startswith('70 -')]
@@ -118,9 +128,15 @@ async def run(mode):
                 claim_save(conn,task,r,plan);summary['financial_saves_this_run']+=1;persist()
                 await frame.locator('#btnSave').click();await asyncio.sleep(2)
                 frame=await open_match(context,page,r);ui=await match_rows(frame);reader.selected_proof(r,ui,saved=True)
-                after=await lines(r);require(reconcile([r],after)['complete'],'source_changed_after_save')
-                opened=await orders([r['ref']]);invoices,credits=open_rows(r,opened);require(not invoices and not credits,'saved_match_not_closed')
-                r['evidence'].append({'at':now(),'phase':'readback','rows':ui,'open_items':opened,'source_lines':after});r.update(state='matched_verified',workflow_status='decided',execution_status='verified');r['attempts'][-1]['outcome']='verified';persist()
+                r['evidence'].append({'at':now(),'phase':'ui_saved_pending_api','rows':ui});saved.append(r);persist()
+        if saved:
+            after=await api.rows('financialtransaction/TransactionLines',{'$filter':query,'$select':SELECT})
+            opened=await orders([r['ref'] for r in saved])
+            for r in saved:
+                own=[x for x in after if x['ID'] in {r['bank_line_id'],r['offset_id']}]
+                verify_group_readback(r,own,opened)
+                r['evidence'].append({'at':now(),'phase':'readback','rows':r['evidence'][-1]['rows'],'open_items':[x for x in opened if x.get('YourRef')==r['ref']],'source_lines':own})
+                r.update(state='matched_verified',workflow_status='decided',execution_status='verified');r['attempts'][-1]['outcome']='verified';persist()
         summary['state']='group_verified'
     except Exception as exc:summary.update(state='blocked',reason=str(exc) if isinstance(exc,ValueError) and re.fullmatch(r'[a-z0-9_]+',str(exc)) else type(exc).__name__)
     finally:

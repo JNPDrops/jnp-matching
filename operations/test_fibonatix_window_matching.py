@@ -23,6 +23,13 @@ class Matching(unittest.TestCase):
   r,h,o=fixture();r['order_status']='cancelled';self.assertEqual(w.classify(r,h,o),'cancelled_order_requires_review')
  def test_duplicate_invoice_holds(self):
   r,h,o=fixture();self.assertEqual(w.classify(r,h+h,o),'multiple_invoices_for_order')
+ def test_group_readback_requires_own_source_and_closed_invoice(self):
+  from operations.test_fibonatix_window_import import build,ledger
+  _,manifest=build();r=manifest[0];r.update(source_order=r['ref'],invoice={'EntryNumber':26799901})
+  lines=ledger([r]);w.verify_group_readback(r,lines,[])
+  with self.assertRaisesRegex(ValueError,'source_changed'):w.verify_group_readback(r,lines[:1],[])
+  opened=[{'JournalCode':'70','YourRef':r['ref'],'InvoiceNumber':26799901}]
+  with self.assertRaisesRegex(ValueError,'saved_match_not_closed'):w.verify_group_readback(r,lines,opened)
  def test_unknown_save_blocks_later_groups(self):
   manifest=[{'trx':str(i),'amount':'1.00','ref':'TD'+str(i),'description':'test','entry':26260020,'woo_id':i} for i in range(248)]
   receipts=[{**r,'source_order':r['ref'],'bank_line_id':str(i),'state':'pending'} for i,r in enumerate(manifest)]

@@ -49,7 +49,14 @@ class DailySourceTests(unittest.TestCase):
     def test_refund_and_failed_never_positive_receipts(self):
         rows=self.fixture();rows[1]['Type']='RF';rows[2]['Status(approved/declined)']='Declined'
         got,exc,_=prepare(self.encoded(rows),[],date(2026,10,6),utc_ui_proof=self.proof(rows))
-        self.assertFalse(got);self.assertEqual({x['reason'] for x in exc},{'separate_policy_RF','source_declined'})
+        self.assertFalse(got);self.assertEqual({x['reason'] for x in exc},{'own_order_missing','source_declined'})
+
+    def test_confirmed_refund_is_negative_and_keeps_own_order(self):
+        rows=self.fixture();rows[1]['Type']='RF'
+        orders=[{'order_id':11,'order_number':9001,'payment_method':'wc_fibonatix','currency':'EUR','status':'cancelled','total':'25.00','total_refunds':0}]
+        got,_,_=prepare(self.encoded(rows),orders,date(2026,10,6),utc_ui_proof=self.proof(rows))
+        self.assertEqual(got[0]['amount'],'-25.00');self.assertEqual(got[0]['source_kind'],'RF')
+        self.assertEqual(got[0]['ref'],'TD9001')
 
     def test_duplicate_psp_id_rejected(self):
         rows=self.fixture();rows[1]['TRX ID']=rows[0]['TRX ID']

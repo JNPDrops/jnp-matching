@@ -19,6 +19,7 @@ TEMPLATE_SHA='18574a6b7fd6cad2fc9144c1d8c0a1c279830d92739cd70f5410db89b9de94f2'
 DEBTOR='ec2af99c-809c-40e3-9057-8a31962ae1cf'
 JOURNAL='60f578ce-eb38-43c0-955a-5ab464f84ce3'
 BANK_GL='8edb713c-cc61-4f75-a519-67a7a79d2b0e'
+REFUND_GL='406a6362-59ee-4d29-822b-65669520b624'  # existing refund clearing, never cross-order matching
 SELECT='ID,EntryID,EntryNumber,LineNumber,Date,Description,AmountDC,Currency,Account,AccountCode,GLAccount,GLAccountCode,JournalCode,YourRef,PaymentReference,FinancialYear,FinancialPeriod'
 
 def exact_date(value):
@@ -42,7 +43,7 @@ def initialize(conn):
         PRIMARY KEY(division,processing_date))""")
 
 def description(r):
-    return 'Fibonatix '+r['ref']+' | Woo '+str(r['woo_id'])+' | Betaling '+r['payment_id']
+    return 'Fibonatix '+r['ref']+' | Woo '+str(r['woo_id'])+(' | Terugbetaling ' if r.get('source_kind')=='RF' else ' | Betaling ')+r['payment_id']
 
 def reconcile(rows,ledger):
     existing=[];missing=[];errors=[]
@@ -52,13 +53,13 @@ def reconcile(rows,ledger):
         if not hits:
             missing.append(pid);continue
         bank=[l for l in hits if str(l.get('GLAccountCode','')).strip()=='1316']
-        offset=[l for l in hits if str(l.get('GLAccountCode','')).strip()=='1100']
+        refund=r.get('source_kind')=='RF'
+        offset=[l for l in hits if str(l.get('GLAccountCode','')).strip()==('1350' if refund else '1100')]
         ok=len(hits)==2 and len(bank)==len(offset)==1
         if ok:
             ok=(Decimal(str(bank[0]['AmountDC']))==Decimal(r['amount'])
                 and Decimal(str(offset[0]['AmountDC']))==-Decimal(r['amount'])
-                and offset[0].get('Account')==DEBTOR
-                and str(offset[0].get('AccountCode','')).strip()=='100100'
+                and ((offset[0].get('Account') is None and not str(offset[0].get('AccountCode') or '').strip()) if refund else (offset[0].get('Account')==DEBTOR and str(offset[0].get('AccountCode','')).strip()=='100100'))
                 and bank[0]['EntryID']==offset[0]['EntryID']
                 and offset[0].get('YourRef')==r['ref']
                 and all(str(l.get('JournalCode','')).strip()=='26' and l.get('Currency')=='EUR'
@@ -68,9 +69,30 @@ def reconcile(rows,ledger):
     for r in rows:
         if any(str(l.get('GLAccountCode','')).strip()=='1316'
                and re.search(r'\b'+re.escape(r['ref'])+r'\b',str(l.get('Description') or '')+' '+str(l.get('YourRef') or ''))
+               and Decimal(str(l['AmountDC']))*Decimal(r['amount'])>0
                and r['payment_id'] not in set(re.findall(r'\b[A-Za-z0-9]+\b',str(l.get('Description') or '')+' '+str(l.get('PaymentReference') or ''))) for l in ledger):
             duplicate_orders.append(r['payment_id'])
     return dict(existing=existing,missing=missing,errors=errors,other_receipts_same_order=duplicate_orders)
+
+def validate_refund_origins(rows,ledger):
+    for refund in [r for r in rows if r.get('source_kind')=='RF']:
+        originals=[l for l in ledger if str(l.get('JournalCode','')).strip()=='26'
+            and str(l.get('GLAccountCode','')).strip()=='1316' and Decimal(str(l['AmountDC']))>0
+            and l.get('YourRef')==refund['ref']
+            and re.search(r'\bWoo '+str(refund['woo_id'])+r'\b',str(l.get('Description') or ''))]
+        require(len(originals)==1,'refund_original_missing_or_ambiguous')
+        original=originals[0]
+        offsets=[l for l in ledger if l.get('EntryID')==original.get('EntryID')
+            and l.get('PaymentReference')==original.get('PaymentReference')
+            and str(l.get('GLAccountCode','')).strip()=='1100' and l.get('Account')==DEBTOR
+            and Decimal(str(l['AmountDC']))==-Decimal(str(original['AmountDC']))]
+        require(len(offsets)==1,'refund_original_debtor_unverified')
+        previous=[l for l in ledger if str(l.get('GLAccountCode','')).strip()=='1316'
+            and l.get('YourRef')==refund['ref'] and Decimal(str(l['AmountDC']))<0
+            and l.get('PaymentReference')!=refund['payment_id']]
+        total=-Decimal(refund['amount'])-sum((Decimal(str(l['AmountDC'])) for l in previous),Decimal(0))
+        require(total<=Decimal(str(original['AmountDC'])),'refund_exceeds_original_receipt')
+
 
 def build_xml(rows,template,day,entry):
     require(hashlib.sha256(template).hexdigest()==TEMPLATE_SHA,'template_changed')
@@ -87,10 +109,14 @@ def build_xml(rows,template,day,entry):
     e.find('FinYear').set('number',str(day.year));e.find('FinPeriod').set('number',str(day.month))
     e.find('Description').text=nightly.identity(day,'fibonatix')
     for number,r in enumerate(sorted(rows,key=lambda x:x['payment_id']),1):
-        require(r['date']==day.isoformat() and r['order_status']=='completed' and re.fullmatch('[A-Za-z0-9]{6,32}',r['payment_id']) and re.fullmatch('TD[0-9]+',r['ref']) and type(r['woo_id']) is int and Decimal(r['amount'])>0,'invalid_receipt')
+        require(r['date']==day.isoformat() and r.get('source_status')=='Approved' and r.get('source_kind') in {'SL','RF'} and r.get('source_status_code')=='20000' and re.fullmatch('[A-Za-z0-9]{6,32}',r['payment_id']) and re.fullmatch('TD[0-9]+',r['ref']) and type(r['woo_id']) is int and ((r['source_kind']=='SL' and Decimal(r['amount'])>0) or (r['source_kind']=='RF' and Decimal(r['amount'])<0)),'invalid_receipt')
         l=copy.deepcopy(lt);l.set('line',str(number));l.find('Date').text=day.isoformat()
         l.find('FinYear').set('number',str(day.year));l.find('FinPeriod').set('number',str(day.month))
-        l.find('GLAccount').set('code','1100');l.find('Account').set('code','100100');l.find('Description').text=description(r)
+        if r['source_kind']=='RF':
+            l.find('GLAccount').set('code','1350');l.remove(l.find('Account'))
+        else:
+            l.find('GLAccount').set('code','1100');l.find('Account').set('code','100100')
+        l.find('Description').text=description(r)
         l.find('Amount/Currency').set('code','EUR');l.find('Amount/Value').text=r['amount']
         l.find('References/PaymentReference').text=r['payment_id'];l.find('References/YourRef').text=r['ref']
         l.find('Note').text=nightly.identity(day,'fibonatix')+' | '+description(r);e.append(l)
@@ -262,7 +288,11 @@ async def run(app,job):
         require(len(journals)==1 and journals[0]['ID']==JOURNAL and journals[0]['GLAccount']==BANK_GL and journals[0]['Type']==12 and journals[0]['Currency']=='EUR' and journals[0]['IsBlocked'] is False,'journal_changed')
         accounts=await api.rows('crm/Accounts',{'$filter':"Code eq '            100100'",'$select':'ID,Code,IsSales,Status'})
         require(len(accounts)==1 and accounts[0]['ID']==DEBTOR and accounts[0]['IsSales'] is True and accounts[0]['Status']=='C','debtor_changed')
+        if any(r.get('source_kind')=='RF' for r in candidates):
+            refund_gl=await api.rows('financial/GLAccounts',{'$filter':"Code eq '1350'",'$select':'ID,Code,Description,BalanceType,Type'})
+            require(len(refund_gl)==1 and refund_gl[0]['ID']==REFUND_GL and refund_gl[0]['BalanceType']=='B' and refund_gl[0]['Type']==90,'refund_clearing_changed')
         actual=await ledger(api,candidates,day)
+        validate_refund_origins(candidates,actual)
         check=reconcile(candidates,actual)
         data.update(latest_check=check,api_calls=api.calls)
         if not check['missing'] and not check['errors'] and not check['other_receipts_same_order']:

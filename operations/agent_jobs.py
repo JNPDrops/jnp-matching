@@ -138,6 +138,11 @@ async def consume(app, role, dispatch, *, seed=None):
             if seed: await seed()
             job=await asyncio.to_thread(database_call,app,claim_next,lease)
         except c.LeaseUnavailable:
+            # claim_next can observe a durable drain before the heartbeat does.
+            # Tell the supervisor ownership ended before returning normally;
+            # otherwise an intentional handover is reported as a process crash.
+            # This admits no new work and does not resolve/replay any old job.
+            lease.lost.set()
             return
         if job:
             # If handover races claim, finish the claimed command; every write

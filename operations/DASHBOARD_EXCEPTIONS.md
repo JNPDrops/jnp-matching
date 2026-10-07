@@ -48,6 +48,18 @@ Een eerdere afgeronde import of native opdracht wordt niet gereset.
 
 Jasper heeft de eerdere completed/verzonden-voorwaarde voor **ICEPAY en Fibonatix** ingetrokken. Importeer alle aantoonbaar geslaagde oorspronkelijke betalingen, ongeacht de huidige webshoporderstatus (ook processing, pending, on-hold, cancelled, refunded of failed). Een later terugbetaalde order wist de oorspronkelijke ontvangst niet: boek de echte ontvangst en verwerk de afzonderlijke refund volgens het refundbeleid. Een mislukte of wachtende PSP-transactie is geen geslaagde ontvangst; een refund, fee of payout wordt nooit als positieve klantbetaling behandeld. Deduplicatie op PSP-transactie-ID, eigen orderbewijs, juiste administratie/bankboek/valuta en Exact-readback blijven verplicht. Deze wijziging betreft import; aflettering blijft uitsluitend via Exact Automatically met eigen order/factuurbewijs.
 
+## Bevestigde PSP-refunds — controle 7 oktober 2026
+
+Een echte, bevestigde Paragon RF blijft een afzonderlijke negatieve bankmutatie.
+De bestaande Fibonatix-refundboekingen gebruiken bankboek 26, bankrekening 1316
+en tegenrekening 1350 zonder debiteur. De dagadapter behoudt dat bestaande
+boekingsbeleid; dit is geen aflettering of compensatie tussen orders. Controleer
+vooraf de oorspronkelijke ontvangst op dezelfde Woo-/TD-order en debiteur
+100100, begrens cumulatieve refunds op die ontvangst en dedupliceer op PSP-ID.
+Bewaar de refund met eigen orderreferenties. Houd de eigen creditnota en
+uiteindelijke afwikkeling als dashboarduitzondering open; creëer daarvoor geen
+nieuwe tegenboeking en rapporteer de import niet als aflettering.
+
 ## Werklijst
 
 Vragen over betalingsverschillen, ontbrekende facturen, onduidelijke betalingen

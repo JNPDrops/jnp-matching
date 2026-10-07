@@ -37,3 +37,4 @@ jobs:
       - run: python -m pytest operations/test_woo_iban_rules.py operations/test_tax_ledger_routing.py operations/test_tax_reference.py operations/test_tax_allocation.py operations/test_allocation_maintenance.py operations/test_bank_resolution.py -q
       - run: python -m pytest operations/test_fibonatix_import.py operations/test_strict_order_matching.py -q
       - run: python -m pytest operations/test_icepay_booking.py operations/test_icepay_matching.py operations/test_icepay_transactions.py -q
+      - run: python -m unittest discover -s operations -p 'test_fibonatix_daily*.py' -q

@@ -43,6 +43,11 @@ Automatically niet verwerkt blijft open met een concrete vervolgactie.
 Bewaar akkoord, order/factuuridentiteit, bedrag met teken en uitvoering apart.
 Een eerdere afgeronde import of native opdracht wordt niet gereset.
 
+
+## PSP-import onafhankelijk van orderstatus — 7 oktober 2026, 14:23 CEST
+
+Jasper heeft de eerdere completed/verzonden-voorwaarde voor **ICEPAY en Fibonatix** ingetrokken. Importeer alle aantoonbaar geslaagde oorspronkelijke betalingen, ongeacht de huidige webshoporderstatus (ook processing, pending, on-hold, cancelled, refunded of failed). Een later terugbetaalde order wist de oorspronkelijke ontvangst niet: boek de echte ontvangst en verwerk de afzonderlijke refund volgens het refundbeleid. Een mislukte of wachtende PSP-transactie is geen geslaagde ontvangst; een refund, fee of payout wordt nooit als positieve klantbetaling behandeld. Deduplicatie op PSP-transactie-ID, eigen orderbewijs, juiste administratie/bankboek/valuta en Exact-readback blijven verplicht. Deze wijziging betreft import; aflettering blijft uitsluitend via Exact Automatically met eigen order/factuurbewijs.
+
 ## Werklijst
 
 Vragen over betalingsverschillen, ontbrekende facturen, onduidelijke betalingen

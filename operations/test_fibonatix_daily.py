@@ -8,7 +8,7 @@ from operations import fibonatix_daily as d
 
 class DailyImportTests(unittest.TestCase):
     def receipt(self):
-        return dict(payment_id='TEST0001',woo_id=123,ref='TD901',date='2026-10-06',amount='42.50',order_status='completed')
+        return dict(payment_id='TEST0001',woo_id=123,ref='TD901',date='2026-10-06',amount='42.50',order_status='completed',source_status='Approved',source_kind='SL',source_status_code='20000')
 
     def lines(self):
         r=self.receipt();common=dict(EntryID='entry',EntryNumber=26260023,JournalCode='26',Currency='EUR',Date=r['date'],Description=d.description(r),PaymentReference=r['payment_id'],YourRef=r['ref'])
@@ -38,7 +38,10 @@ class DailyImportTests(unittest.TestCase):
             root=ET.fromstring(xml);line=root.find('.//GLTransactionLine')
             self.assertEqual(line.findtext('References/YourRef'),'TD901');self.assertEqual(line.findtext('References/PaymentReference'),'TEST0001')
             self.assertEqual(line.find('FinPeriod').get('number'),'10');self.assertEqual(line.find('Account').get('code'),'100100')
-            bad=self.receipt();bad['order_status']='processing'
+            for status in ['processing','pending','on-hold','cancelled','refunded','failed']:
+                paid=self.receipt();paid['order_status']=status
+                self.assertTrue(d.build_xml([paid],template,date(2026,10,6),26260023))
+            bad=self.receipt();bad['source_status']='Declined'
             with self.assertRaisesRegex(ValueError,'invalid_receipt'):d.build_xml([bad],template,date(2026,10,6),26260023)
 
 

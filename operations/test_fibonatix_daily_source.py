@@ -34,10 +34,17 @@ class DailySourceTests(unittest.TestCase):
         rows=self.fixture();proof=self.proof(rows);proof[0]['amsterdam']='2026-10-06T01:59:59+02:00'
         with self.assertRaisesRegex(ValueError,'timezone_proof_disagrees'):read_source(self.encoded(rows),date(2026,10,6),utc_ui_proof=proof)
 
-    def test_completed_only_and_own_order_number(self):
+    def test_paid_processing_order_and_own_order_number(self):
         rows=self.fixture();orders=[{'order_id':11,'order_number':9001,'payment_method':'wc_fibonatix','currency':'EUR','status':'completed','total':'25.00','total_refunds':'0'}, {'order_id':12,'order_number':9002,'payment_method':'wc_fibonatix','currency':'EUR','status':'processing','total':'25.00','total_refunds':'0'}]
         got,exc,_=prepare(self.encoded(rows),orders,date(2026,10,6),utc_ui_proof=self.proof(rows))
-        self.assertEqual(got[0]['ref'],'TD9001');self.assertEqual(len(got),1);self.assertEqual(exc[0]['reason'],'order_not_completed')
+        self.assertEqual(got[0]['ref'],'TD9001');self.assertEqual(len(got),2);self.assertEqual(exc,[])
+
+    def test_later_order_refund_does_not_erase_successful_original_payment(self):
+        rows=self.fixture()
+        for status in ['processing','pending','on-hold','cancelled','refunded','failed']:
+            orders=[{'order_id':11,'order_number':9001,'payment_method':'wc_fibonatix','currency':'EUR','status':status,'total':'25.00','total_refunds':'25.00'}, {'order_id':12,'order_number':9002,'payment_method':'wc_fibonatix','currency':'EUR','status':status,'total':'25.00','total_refunds':'0'}]
+            got,exc,_=prepare(self.encoded(rows),orders,date(2026,10,6),utc_ui_proof=self.proof(rows))
+            self.assertEqual(len(got),2,status);self.assertEqual(exc,[])
 
     def test_refund_and_failed_never_positive_receipts(self):
         rows=self.fixture();rows[1]['Type']='RF';rows[2]['Status(approved/declined)']='Declined'

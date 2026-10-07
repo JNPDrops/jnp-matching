@@ -1,5 +1,9 @@
 """Pure validation of a dated Paragon source and its own Woo order evidence.
 
+Import eligibility follows PSP success, not the current webshop order status.
+A later refund does not erase the original receipt; refund transactions retain
+their separate booking policy (Jasper, 2026-10-07 14:23 Europe/Amsterdam).
+
 No network or bookkeeping writes. A display timezone is not a filter timezone:
 Paragon resets its display timezone when applying a date filter. Require an
 explicit UTC-to-Amsterdam comparison and filter aware instants, including DST.
@@ -69,10 +73,6 @@ def prepare(raw, orders, day, *, utc_ui_proof):
                 reason = 'own_order_missing'
             elif o['payment_method'] != 'wc_fibonatix' or o['currency'] != 'EUR':
                 reason = 'order_scope_mismatch'
-            elif o['status'] != 'completed':
-                reason = 'order_not_completed'
-            elif Decimal(str(o.get('total_refunds') or 0)) != 0:
-                reason = 'order_refund_review'
         if reason is not None:
             exceptions.append({'payment_id': r['TRX ID'], 'woo_id': oid, 'reason': reason,
                                'order_status': o.get('status') if o else None})
@@ -86,7 +86,8 @@ def prepare(raw, orders, day, *, utc_ui_proof):
             continue
         candidates.append({'payment_id': r['TRX ID'], 'woo_id': int(oid), 'ref': 'TD' + number,
                            'date': day.isoformat(), 'amount': str(amount.quantize(Decimal('.01'))),
-                           'order_status': o['status'], 'source_time_utc': r['Display Time']})
+                           'order_status': o['status'], 'source_status': r[STATUS], 'source_kind': r['Type'],
+                           'source_status_code': r['Status Code'], 'source_time_utc': r['Display Time']})
     duplicate_orders = {r['woo_id'] for r in candidates if sum(x['woo_id'] == r['woo_id'] for x in candidates) > 1}
     for r in candidates:
         if r['woo_id'] in duplicate_orders:

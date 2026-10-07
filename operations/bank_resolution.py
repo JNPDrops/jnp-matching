@@ -6,13 +6,14 @@ currency come from Exact, not from the merchant description.
 """
 from collections import defaultdict
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import re
 from zoneinfo import ZoneInfo
 from uuid import UUID, uuid5
 
 from operations import bacs_debtor_transfer as m, tax_reference as tax
 
-VERSION = 'bank-resolution-v2'
+VERSION = 'bank-resolution-v3-eur1'
 REFUND = re.compile(r'refund|double payment|duplicate payment|overpayment|terugbetaling|teruggestort|cancell?ation|cancelled|canceled|annulering', re.I)
 PROVIDER = re.compile(r'icepay|paynetics|fibon[a-z]*|stripe|plisio|ninja|suap|myco', re.I)
 SOURCE = re.compile(r'(?<![a-z0-9_])(?:bosci|decao)_[a-f0-9]{29}(?:[a-f0-9]{3})?(?![a-z0-9_])', re.I)
@@ -196,6 +197,36 @@ def review(bank, old, receivables, payables, journals, peers):
     return finish(item, old['status'], 'Controleer leverancier en inkoopfactuur of bon; pas daarna toewijzen', old['reason'])
 
 
+PAYMENT_DIFFERENCE_POLICY = 'same-order-eur-1-20261007'
+PAYMENT_DIFFERENCE_LIMIT = Decimal('1.00')
+
+
+def approved_sales_difference(item):
+    """A decision for one proven sales order; never a posting or a match."""
+    if (item.get('status') != 'amount_review' or item.get('gl_account') != '1100'
+            or item.get('currency') != 'EUR'
+            or not re.fullmatch(r'TD[0-9]{4,10}', str(item.get('reference') or ''))
+            or item.get('reference') != item.get('invoice_reference')
+            or not item.get('invoice_entry') or item.get('invoice_hid') is None):
+        return None
+    try:
+        paid = Decimal(str(item['remaining_bank_amount']))
+        due = Decimal(str(item['invoice_open_amount_signed']))
+        if not all(v.is_finite() and v > 0 and v == v.quantize(Decimal('.01')) for v in (paid, due)):
+            return None
+        difference = paid - due
+        if not Decimal('0') < abs(difference) <= PAYMENT_DIFFERENCE_LIMIT:
+            return None
+    except (KeyError, ValueError, InvalidOperation):
+        return None
+    return {'policy': PAYMENT_DIFFERENCE_POLICY, 'approved': True,
+            'currency': 'EUR', 'limit': str(PAYMENT_DIFFERENCE_LIMIT),
+            'difference': str(difference), 'source_order': item['reference'],
+            'invoice_reference': item['invoice_reference'],
+            'invoice_entry': item['invoice_entry'], 'invoice_hid': item['invoice_hid'],
+            'matching': 'Exact Automatically', 'executed': False}
+
+
 def order_evidence(item, order):
     if not item.get('reference') or item['status'] in ('psp_deferred', 'duplicate_review', 'refund_review'):
         return item
@@ -223,8 +254,15 @@ def order_evidence(item, order):
         return finish(item, 'date_review', 'Besteldatum verifiëren', 'Geen geldige besteldatum beschikbaar')
     if order.get('status') not in ('completed', 'processing', 'on-hold', 'pending'):
         return finish(item, 'order_status_review', 'Controleer annulering en terugbetaling', 'Orderstatus staat gewone matching niet toe')
-    if m.amount(order.get('total')) != m.amount(item.get('original_bank_amount', item['amount'])):
+    approval = approved_sales_difference(item)
+    order_difference = abs(m.amount(order.get('total')) - m.amount(item.get('original_bank_amount', item['amount'])))
+    if order_difference and not (approval and order_difference <= PAYMENT_DIFFERENCE_LIMIT):
         return finish(item, 'order_amount_review', 'Vergelijk order, oorspronkelijke bankbetaling en factuurregels', 'Oorspronkelijke betaling wijkt af van webshopordertotaal')
+    if approval:
+        item['payment_difference_approval'] = approval
+        return finish(item, 'psp_match_candidate' if item.get('expected_methods') else 'bacs_match_candidate',
+            'Voer uitsluitend Exact Automatically uit voor deze eigen order/factuur; lees het resultaat terug en laat niet-gekoppelde posten open',
+            'Eigen order en verkoopfactuur bewezen; betalingsverschil binnen het akkoord van maximaal EUR 1,00')
     if item['status'] == 'psp_order_evidence_needed':
         return finish(item, 'psp_match_candidate', 'Letter uitsluitend af tegen de genoemde factuur van dezelfde bronorder; controleer de actuele Exact-identiteiten',
             'Bronorder, PSP, debiteur, datum, valuta en openstaand bedrag passen exact')

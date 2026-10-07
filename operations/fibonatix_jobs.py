@@ -33,11 +33,15 @@ def submit(request, action, params=None):
 
 
 async def dispatch(job):
+    if job['action']=='daily_review':
+        from app import main as app
+        from operations.fibonatix_daily_review import run
+        return await run(app,job)
     if job['action']=='daily_automatically':
         from app import main as app
         from operations.fibonatix_daily_automatic import run
         return await run(app,job)
-    if job['action'] in {'daily_prepare','daily_import','daily_reconcile'}:
+    if job['action'] in {'daily_prepare','daily_import','daily_reconcile','daily_followup_prepare','daily_followup_import','daily_followup_reconcile'}:
         from app import main as app
         from operations.fibonatix_daily import run
         return await run(app,job)
@@ -57,7 +61,18 @@ async def dispatch(job):
 
 
 async def serve(app):
-    await jobs.consume(app,'fibonatix',dispatch)
+    import asyncio,time
+    from operations.fibonatix_daily_review import seed
+    next_seed=0
+    async def daily_seed():
+        nonlocal next_seed
+        if time.monotonic()<next_seed:return
+        next_seed=time.monotonic()+60
+        try:
+            await asyncio.to_thread(seed,app)
+        except jobs.JobConflict:
+            pass  # another command won the role queue; retry the audit later
+    await jobs.consume(app,'fibonatix',dispatch,seed=daily_seed)
 
 
 def status():

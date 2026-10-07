@@ -62,7 +62,7 @@ def prepare(raw, orders, day, *, utc_ui_proof):
         reason = None
         if r[STATUS] != 'Approved':
             reason = 'source_' + r[STATUS].lower()
-        elif r['Type'] != 'SL':
+        elif r['Type'] not in {'SL','RF'}:
             reason = 'separate_policy_' + r['Type']
         elif r['Status Code'] != '20000':
             reason = 'unconfirmed_approval'
@@ -81,18 +81,18 @@ def prepare(raw, orders, day, *, utc_ui_proof):
         require(amount.is_finite() and amount > 0 and amount == amount.quantize(Decimal('.01')), 'invalid_amount')
         number = str(o['order_number']).lstrip('#')
         require(re.fullmatch('[0-9]+', number), 'invalid_order_number')
-        if amount != Decimal(str(o['total'])):
+        if (r['Type']=='SL' and amount != Decimal(str(o['total']))) or (r['Type']=='RF' and amount>Decimal(str(o['total']))):
             exceptions.append({'payment_id': r['TRX ID'], 'woo_id': oid, 'reason': 'order_amount_review'})
             continue
         candidates.append({'payment_id': r['TRX ID'], 'woo_id': int(oid), 'ref': 'TD' + number,
-                           'date': day.isoformat(), 'amount': str(amount.quantize(Decimal('.01'))),
+                           'date': day.isoformat(), 'amount': str((amount if r['Type']=='SL' else -amount).quantize(Decimal('.01'))),
                            'order_status': o['status'], 'source_status': r[STATUS], 'source_kind': r['Type'],
                            'source_status_code': r['Status Code'], 'source_time_utc': r['Display Time']})
-    duplicate_orders = {r['woo_id'] for r in candidates if sum(x['woo_id'] == r['woo_id'] for x in candidates) > 1}
+    duplicate_orders = {(r['woo_id'],r['source_kind']) for r in candidates if sum((x['woo_id'],x['source_kind']) == (r['woo_id'],r['source_kind']) for x in candidates) > 1}
     for r in candidates:
-        if r['woo_id'] in duplicate_orders:
+        if (r['woo_id'],r['source_kind']) in duplicate_orders:
             exceptions.append({'payment_id': r['payment_id'], 'woo_id': r['woo_id'], 'reason': 'multiple_receipts_same_order'})
-    candidates = [r for r in candidates if r['woo_id'] not in duplicate_orders]
+    candidates = [r for r in candidates if (r['woo_id'],r['source_kind']) not in duplicate_orders]
     summary.update(candidates=len(candidates), candidate_total=str(sum((Decimal(r['amount']) for r in candidates), Decimal('0.00'))),
                    exceptions=dict(Counter(e['reason'] for e in exceptions)))
     return candidates, exceptions, summary

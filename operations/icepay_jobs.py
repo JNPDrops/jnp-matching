@@ -63,6 +63,9 @@ def observed_outcome(app, task):
 
 
 async def dispatch(app, job):
+    if job['action'] in {'daily_source','daily_prepare','daily_import','daily_reconcile'}:
+        from operations.icepay_daily import run
+        return await run(app,job)
     from operations import icepay_oct06
     if job['task_key']==icepay_oct06.TASK:
         return await icepay_oct06.run_task(app,job)
@@ -98,3 +101,4 @@ async def serve(app):
     async def run(job): await dispatch(app,job)
     async def seed(): await asyncio.to_thread(jobs.database_call,app,seed_configured,app)
     await jobs.consume(app,'icepay',run,seed=seed)
+

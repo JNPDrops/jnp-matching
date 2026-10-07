@@ -26,9 +26,11 @@ def exact_date(value):
     return datetime.fromtimestamp(int(re.search(r'-?\d+',value).group())/1000,timezone.utc).date().isoformat() if value.startswith('/Date(') else value[:10]
 
 def validate(job):
-    require(set(job['params'])=={'date'},'invalid_daily_params')
+    followup=job['action'].startswith('daily_followup_')
+    require(set(job['params'])==({'date','revision'} if followup else {'date'}),'invalid_daily_params')
+    if followup:require(re.fullmatch('[0-9a-f]{64}',job['params']['revision']) is not None,'invalid_followup_revision')
     day=date.fromisoformat(job['params']['date'])
-    require(job['task_key']==nightly.identity(day,'fibonatix') and job['action'] in {'daily_prepare','daily_import','daily_reconcile'},'invalid_daily_job')
+    require(job['task_key']==nightly.identity(day,'fibonatix') and job['action'] in {'daily_prepare','daily_import','daily_reconcile','daily_followup_prepare','daily_followup_import','daily_followup_reconcile'},'invalid_daily_job')
     require(day<datetime.now(nightly.ZONE).date(),'day_not_closed')
     return day
 
@@ -100,7 +102,7 @@ class API:
     async def get(self,resource,params=None,url=None):
         import httpx
         from operations.bacs_debtor_transfer import TLS_CONTEXT
-        require(resource in {'financial/Journals','crm/Accounts','financial/GLAccounts','financialtransaction/TransactionLines','read/financial/ReceivablesList'},'invalid_read_resource')
+        require(resource in {'salesentry/SalesEntries','financial/Journals','crm/Accounts','financial/GLAccounts','financialtransaction/TransactionLines','read/financial/ReceivablesList'},'invalid_read_resource')
         url=url or f'{BASE}/api/v1/{DIVISION}/{resource}';u=urlsplit(url)
         require(u.scheme=='https' and u.netloc=='start.exactonline.nl' and u.path==f'/api/v1/{DIVISION}/{resource}' and not u.fragment and self.calls<90,'read_scope_or_budget')
         await asyncio.sleep(max(0,2-(time.monotonic()-self.last)))
@@ -127,10 +129,37 @@ async def ledger(api,rows,day):
         actual+=await api.rows('financialtransaction/TransactionLines',{'$filter':query,'$select':SELECT})
     return list({r['ID']:r for r in actual}.values())
 
-def persist(conn,day,state,data):
-    conn.execute('UPDATE jnp_fibonatix_daily_imports SET state=%s,data=%s::jsonb,updated_at=now() WHERE division=%s AND processing_date=%s',(state,json.dumps(data),DIVISION,day))
+class ImportStore:
+    def __init__(self, conn, day, revision=None):
+        self.conn,self.day,self.revision=conn,day,revision
+        self.table='jnp_fibonatix_daily_followups' if revision else 'jnp_fibonatix_daily_imports'
+        self.where='division=%s AND processing_date=%s'+(' AND revision=%s' if revision else '')
+        self.keys=(DIVISION,day)+((revision,) if revision else ())
+        if revision:
+            conn.execute('''CREATE TABLE IF NOT EXISTS jnp_fibonatix_daily_followups(
+                division integer NOT NULL,processing_date date NOT NULL,revision text NOT NULL,
+                state text NOT NULL,write_requested boolean NOT NULL DEFAULT false,data jsonb NOT NULL,
+                updated_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(division,processing_date,revision))''')
 
-def source(conn,day):
+    def prior(self):
+        return self.conn.execute('SELECT state,write_requested,data FROM '+self.table+' WHERE '+self.where,self.keys).fetchone()
+
+    def persist(self,state,data):
+        self.conn.execute('UPDATE '+self.table+' SET state=%s,data=%s::jsonb,updated_at=now() WHERE '+self.where,(state,json.dumps(data),*self.keys))
+
+    def insert(self,data):
+        cols='division,processing_date'+(',revision' if self.revision else '')
+        placeholders=','.join(['%s']*len(self.keys))
+        self.conn.execute('INSERT INTO '+self.table+'('+cols+",state,data) VALUES("+placeholders+",'preparing',%s::jsonb)",(*self.keys,json.dumps(data)))
+
+    def claim(self):
+        return self.conn.execute('UPDATE '+self.table+" SET write_requested=true,state='upload_requested',updated_at=now() WHERE "+self.where+" AND state='prepared' AND write_requested=false RETURNING processing_date",self.keys).fetchone()
+
+
+def persist(conn,day,state,data):
+    ImportStore(conn,day).persist(state,data)
+
+def source(conn,day,revision=None):
     key=nightly.identity(day,'fibonatix')+':source'
     row=conn.execute('SELECT result FROM paragon_login_probes WHERE probe_id=%s',(key,)).fetchone()
     require(row and row[0].get('source_window_verified') and row[0]['source_timestamp_timezone']=='UTC','source_not_verified')
@@ -142,24 +171,28 @@ def source(conn,day):
     require(src['dates']==[lo.strftime('%d/%m/%Y'),(hi-timedelta(microseconds=1)).strftime('%d/%m/%Y')],'source_filter_does_not_cover_day')
     counts=re.findall(r'Showing [0-9,]+[^0-9]+[0-9,]+ of ([0-9,]+) results',src['table_snapshot'])
     require(len(counts)==1 and int(counts[0].replace(',',''))==src['source_rows'],'source_export_count_mismatch')
-    orders=conn.execute('SELECT result FROM paragon_login_probes WHERE probe_id=%s',(key+':orders',)).fetchone()
+    orders_key=(nightly.identity(day,'fibonatix')+':review:'+revision) if revision else key+':orders'
+    orders=conn.execute('SELECT result FROM paragon_login_probes WHERE probe_id=%s',(orders_key,)).fetchone()
+    if revision:
+        require(orders and orders[0].get('source_sha256')==src['source_sha256'],'followup_source_changed')
+        require(hashlib.sha256(json.dumps(orders[0],sort_keys=True,separators=(',',':')).encode()).hexdigest()==revision,'followup_revision_mismatch')
     require(orders and orders[0]['state']=='read_complete' and not orders[0]['missing_ids'],'order_evidence_incomplete')
-    require((datetime.now(timezone.utc)-datetime.fromisoformat(orders[0]['captured_at'])).total_seconds()<3600,'order_evidence_stale')
+    require(0<=(datetime.now(timezone.utc)-datetime.fromisoformat(orders[0]['captured_at'])).total_seconds()<3600,'order_evidence_stale')
     rows,exceptions,summary=prepare(raw,orders[0]['orders'],day,utc_ui_proof=src['utc_ui_proof'])
     return rows,exceptions,summary,src['source_sha256']
 
 @fence.owned_operation('fibonatix')
-async def upload(app,conn,api,day,data):
+async def upload(app,conn,api,day,data,store=None):
+    store=store or ImportStore(conn,day)
     from operations import task_drain
     require(not task_drain.requested(),'worker_draining')
     xml=base64.b64decode(data['xml'],validate=True)
     require(hashlib.sha256(xml).hexdigest()==data['xml_sha256'],'xml_changed')
     token=await app._access_token()
-    claimed=conn.execute("""UPDATE jnp_fibonatix_daily_imports SET write_requested=true,state='upload_requested',updated_at=now()
-        WHERE division=%s AND processing_date=%s AND state='prepared' AND write_requested=false RETURNING processing_date""",(DIVISION,day)).fetchone()
+    claimed=store.claim()
     require(bool(claimed),'previous_write_reconcile_only')
     data['write_audit']=fence.audit_metadata()
-    persist(conn,day,'upload_requested',data)
+    store.persist('upload_requested',data)
     import httpx
     from operations.bacs_debtor_transfer import TLS_CONTEXT
     try:
@@ -173,7 +206,7 @@ async def upload(app,conn,api,day,data):
             data['response']='unparsed_response'
     except Exception as exc:
         data['upload_error_type']=type(exc).__name__
-    persist(conn,day,'readback_required',data)
+    store.persist('readback_required',data)
     # The preflight already verifies existing receipts across periods. Verify
     # the uploaded entry directly: rereading the entire year a second time can
     # exhaust the bounded read allowance after an otherwise successful upload.
@@ -184,12 +217,14 @@ async def upload(app,conn,api,day,data):
     data.update(after=actual,after_check=check,after_check_scope='uploaded_entry',api_calls=api.calls)
     complete=(len(actual)==2*len(data['new_receipts']) and not check['missing']
               and not check['errors'] and not check['other_receipts_same_order'])
-    persist(conn,day,'verified' if complete else 'uncertain',data)
+    store.persist('verified' if complete else 'uncertain',data)
     require(complete,'upload_unverified_no_retry')
     return {'state':'verified','imported':len(data['new_receipts']),'existing':len(data['before_check']['existing']),'exceptions':data['summary']['exceptions'],'financial_writes':True}
 
 async def run(app,job):
     day=validate(job)
+    revision=job['params'].get('revision')
+    action=job['action'].replace('daily_followup_','daily_')
     require(fence.current_owner() is not None and fence.current_owner().role=='fibonatix','assigned_fibonatix_worker_required')
     require(app.DIVISION==DIVISION and app.BASE_URL==BASE,'wrong_administration')
     conn=app._db_connect();locked=False
@@ -200,20 +235,27 @@ async def run(app,job):
         registered=conn.execute('SELECT window_start,window_end FROM jnp_nightly_runs WHERE division=%s AND processing_date=%s',(DIVISION,day)).fetchone()
         from operations.fibonatix_daily_source import bounds
         require(registered and tuple(registered)==bounds(day),'day_not_registered')
-        prior=conn.execute('SELECT state,write_requested,data FROM jnp_fibonatix_daily_imports WHERE division=%s AND processing_date=%s',(DIVISION,day)).fetchone()
+        store=ImportStore(conn,day,revision)
+        if revision:
+            original=ImportStore(conn,day).prior()
+            require(original and original[0]=='verified','original_import_unfinished')
+            unresolved=conn.execute('''SELECT 1 FROM jnp_fibonatix_daily_followups
+                WHERE division=%s AND processing_date=%s AND revision<>%s AND state<>'verified' LIMIT 1''',(DIVISION,day,revision)).fetchone()
+            require(not unresolved,'prior_followup_requires_review')
+        prior=store.prior()
         if prior and prior[0]=='verified':
             return {'state':'verified','already_completed':True,'financial_writes':False}
-        if prior and prior[1] and job['action']!='daily_reconcile':
+        if prior and prior[1] and action!='daily_reconcile':
             raise ValueError('previous_write_reconcile_only')
-        candidates,exceptions,summary,sha=source(conn,day)
+        candidates,exceptions,summary,sha=source(conn,day,revision)
         if not prior:
-            require(job['action']=='daily_prepare','prepare_required')
+            require(action=='daily_prepare','prepare_required')
             data=dict(candidates=candidates,exceptions=exceptions,summary=summary,source_sha256=sha)
-            conn.execute("INSERT INTO jnp_fibonatix_daily_imports(division,processing_date,state,data) VALUES(%s,%s,'preparing',%s::jsonb)",(DIVISION,day,json.dumps(data)))
+            store.insert(data)
         else:
             data=prior[2]
             require(data['candidates']==candidates and data['source_sha256']==sha,'prepared_evidence_changed')
-            if prior[0]=='prepared' and job['action']=='daily_prepare':
+            if prior[0]=='prepared' and action=='daily_prepare':
                 return {'state':'prepared','already_prepared':True,'financial_writes':False}
         api=API(app)
         journals=await api.rows('financial/Journals',{'$filter':"Code eq '26'"})
@@ -225,14 +267,14 @@ async def run(app,job):
         data.update(latest_check=check,api_calls=api.calls)
         if not check['missing'] and not check['errors'] and not check['other_receipts_same_order']:
             data['verified_ledger']=actual
-            persist(conn,day,'verified',data)
+            store.persist('verified',data)
             return {'state':'verified','imported':0,'existing':len(check['existing']),'exceptions':summary['exceptions'],'financial_writes':False}
         require(not check['errors'] and not check['other_receipts_same_order'],'existing_or_ambiguous_receipt')
-        if job['action']=='daily_reconcile':
+        if action=='daily_reconcile':
             data['reconciliation']=actual
-            persist(conn,day,'uncertain' if prior and prior[1] else 'blocked',data)
+            store.persist('uncertain' if prior and prior[1] else 'blocked',data)
             return {'state':'requires_review','financial_writes':False}
-        if job['action']=='daily_prepare':
+        if action=='daily_prepare':
             # Sequence is derived from the current, fully read existing journal.
             entries={int(l['EntryNumber']) for l in actual if str(l.get('JournalCode','')).strip()=='26' and l.get('FinancialYear')==day.year}
             require(bool(entries),'entry_sequence_missing')
@@ -242,11 +284,11 @@ async def run(app,job):
             template=bytes(conn.execute('SELECT xml FROM fibonatix_import_jobs WHERE job=%s',('FIBO-20260922-20261002',)).fetchone()[0])
             xml=build_xml(new,template,day,entry)
             data.update(before=actual,before_check=check,new_receipts=new,entry=entry,xml=base64.b64encode(xml).decode(),xml_sha256=hashlib.sha256(xml).hexdigest())
-            persist(conn,day,'prepared',data)
+            store.persist('prepared',data)
             return {'state':'prepared','receipts':len(new),'existing':len(check['existing']),'summary':summary,'financial_writes':False}
         require(prior and prior[0]=='prepared' and check==data['before_check'],'preflight_changed')
         require(not any(l['EntryNumber']==data['entry'] and str(l.get('JournalCode','')).strip()=='26' for l in actual),'entry_now_occupied')
-        return await upload(app,conn,api,day,data)
+        return await upload(app,conn,api,day,data,store)
     finally:
         if locked:conn.execute('SELECT pg_advisory_unlock(397775226)')
         conn.close()

@@ -29,7 +29,17 @@ async def run(app, job):
         prior = conn.execute('SELECT state FROM jnp_daily_reports WHERE division=%s AND processing_date=%s',(n.DIVISION,day)).fetchone()
         if prior:
             return {'state':prior[0],'already_reported':True,'financial_writes':False}
+        from operations.fibonatix_daily_review import initialize
+        initialize(conn)
+        coverage=conn.execute('''SELECT state,data FROM jnp_fibonatix_daily_reviews
+            WHERE division=%s AND processing_date=%s ORDER BY review_date DESC LIMIT 1''',(n.DIVISION,day)).fetchone()
+        if conn.execute('''SELECT 1 FROM jnp_agent_jobs WHERE division=%s AND task_key=%s
+            AND state IN ('queued','running','uncertain') LIMIT 1''',(n.DIVISION,n.identity(day,'fibonatix'))).fetchone():
+            raise ValueError('fibonatix_day_work_not_terminal')
+        if coverage is None or coverage[0]!='complete':
+            outcome='incomplete'
         report = {'processing_date':day.isoformat(),'state':outcome,
+                  'fibonatix_coverage':coverage[1] if coverage else {'state':'missing','reason':'daily_receipt_audit_missing'},
                   'window_start':batch[0].isoformat(),'window_end':batch[1].isoformat(),
                   'generated_at':datetime.now(timezone.utc).isoformat(),
                   'workers':{stage:{'state':state,'evidence':evidence} for stage,state,evidence in stages if stage!='reports'},

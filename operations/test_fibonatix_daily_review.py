@@ -21,16 +21,20 @@ class CoverageTests(unittest.TestCase):
 
     def test_waiting_payment_prevents_false_completion(self):
         c=self.coverage()
-        self.assertFalse(c['complete']);self.assertEqual(c['receipts'][0]['state'],'waiting_for_completed_order')
+        self.assertFalse(c['complete']);self.assertEqual(c['receipts'][0]['state'],'source_order_review')
         self.assertEqual(c['receipts'][0]['open_sales'],[26720001])
 
     def test_later_completed_order_becomes_missing_import(self):
         c=self.coverage('completed',eligible=True)
         self.assertEqual(c['ready_ids'],['TEST0001']);self.assertFalse(c['complete'])
 
-    def test_refunded_order_never_becomes_ready(self):
+    def test_unvalidated_receipt_does_not_become_ready(self):
         c=self.coverage('refunded')
-        self.assertEqual(c['ready_ids'],[]);self.assertEqual(c['receipts'][0]['state'],'refund_or_cancel_review')
+        self.assertEqual(c['ready_ids'],[]);self.assertEqual(c['receipts'][0]['state'],'source_order_review')
+
+    def test_validated_payment_is_ready_regardless_of_order_status(self):
+        for status in ['processing','refunded','cancelled']:
+            self.assertEqual(self.coverage(status,eligible=True)['ready_ids'],['TEST0001'])
 
     def test_imported_payment_not_imported_again(self):
         c=self.coverage('completed',imported=True,eligible=True)

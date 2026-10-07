@@ -43,8 +43,6 @@ def classify(source, orders, eligible, ledger, sales, opened, day):
         if check['errors'] or check['other_receipts_same_order']:state='receipt_conflict'
         elif check['existing']:state='imported'
         elif row['payment_id'] in valid:state='ready_for_import'
-        elif Decimal(str(o.get('total_refunds') or 0))!=0 or o['status'] in {'refunded','cancelled','failed'}:state='refund_or_cancel_review'
-        elif o['status']!='completed':state='waiting_for_completed_order'
         else:state='source_order_review'
         row.update(state=state,open_sales=[s['EntryNumber'] for s in sales if s['YourRef']==ref and any(x['EntryNumber']==s['EntryNumber'] and Decimal(str(x['Amount']))>0 for x in opened)])
         rows.append(row)
@@ -62,14 +60,20 @@ def classify(source, orders, eligible, ledger, sales, opened, day):
 
 
 async def run(app,job):
-    require(job['action']=='daily_review' and set(job['params'])=={'date','review_date'},'invalid_review_job')
+    after=job['params'].get('after_revision')
+    require(job['action']=='daily_review' and set(job['params'])==({'date','review_date','after_revision'} if after else {'date','review_date'}),'invalid_review_job')
+    if after:require(re.fullmatch('[0-9a-f]{64}',after) is not None,'invalid_after_revision')
     day=date.fromisoformat(job['params']['date']);review_day=date.fromisoformat(job['params']['review_date'])
     require(job['task_key']==n.identity(day,'fibonatix') and day<review_day<=datetime.now(n.ZONE).date(),'invalid_review_day')
     require(fence.current_owner() is not None and fence.current_owner().role=='fibonatix','assigned_worker_required')
     with app._db_connect() as conn:
         initialize(conn)
-        prior=conn.execute('SELECT state FROM jnp_fibonatix_daily_reviews WHERE division=%s AND processing_date=%s AND review_date=%s',(n.DIVISION,day,review_day)).fetchone()
-        if prior:return {'state':prior[0],'already_reviewed':True,'financial_writes':False}
+        prior=conn.execute('SELECT state,data FROM jnp_fibonatix_daily_reviews WHERE division=%s AND processing_date=%s AND review_date=%s',(n.DIVISION,day,review_day)).fetchone()
+        if prior and not after:return {'state':prior[0],'already_reviewed':True,'financial_writes':False}
+        if after:
+            require(prior and prior[1].get('revision')==after,'prior_review_changed')
+            followup=conn.execute('SELECT state FROM jnp_fibonatix_daily_followups WHERE division=%s AND processing_date=%s AND revision=%s',(n.DIVISION,day,after)).fetchone()
+            require(followup and followup[0]=='verified','followup_not_verified')
         key=n.identity(day,'fibonatix')+':source'
         src=conn.execute('SELECT result FROM paragon_login_probes WHERE probe_id=%s',(key,)).fetchone()[0]
         old=conn.execute('SELECT result FROM paragon_login_probes WHERE probe_id=%s',(key+':orders',)).fetchone()[0]
@@ -134,7 +138,12 @@ async def run(app,job):
         data['dashboard_exceptions']=display
         conn.execute("UPDATE jnp_fibonatix_daily_imports SET data=jsonb_set(data,'{dashboard_exceptions}',%s::jsonb) WHERE division=%s AND processing_date=%s",(json.dumps(display),n.DIVISION,day))
         conn.execute('INSERT INTO paragon_login_probes(probe_id,result) VALUES(%s,%s::jsonb)',(n.identity(day,'fibonatix')+':review:'+revision,json.dumps(snapshot)))
-        conn.execute('INSERT INTO jnp_fibonatix_daily_reviews(division,processing_date,review_date,state,data) VALUES(%s,%s,%s,%s,%s::jsonb)',(n.DIVISION,day,review_day,state,json.dumps(data)))
+        if after:
+            conn.execute('INSERT INTO paragon_login_probes(probe_id,result) VALUES(%s,%s::jsonb) ON CONFLICT DO NOTHING',(n.identity(day,'fibonatix')+':audit:'+after,json.dumps(prior[1])))
+            saved=conn.execute("UPDATE jnp_fibonatix_daily_reviews SET state=%s,data=%s::jsonb,updated_at=now() WHERE division=%s AND processing_date=%s AND review_date=%s AND data->>'revision'=%s RETURNING division",(state,json.dumps(data),n.DIVISION,day,review_day,after)).fetchone()
+            require(saved,'review_changed_during_readback')
+        else:
+            conn.execute('INSERT INTO jnp_fibonatix_daily_reviews(division,processing_date,review_date,state,data) VALUES(%s,%s,%s,%s,%s::jsonb)',(n.DIVISION,day,review_day,state,json.dumps(data)))
     return {'state':state,'ready_for_import':len(coverage['ready_ids']),'financial_writes':False}
 
 

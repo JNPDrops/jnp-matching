@@ -68,6 +68,10 @@ if __name__=='__main__':unittest.main()
 
 
 class Pipeline(unittest.IsolatedAsyncioTestCase):
+ def setUp(self):
+  from datetime import datetime, timezone
+  clock=patch.object(w,'datetime'); mocked=clock.start(); self.addCleanup(clock.stop)
+  mocked.now.return_value=datetime(2026,10,6,21,tzinfo=timezone.utc)
  async def test_matching_only_follows_verified_import(self):
   from types import SimpleNamespace
   from unittest.mock import AsyncMock

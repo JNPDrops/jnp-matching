@@ -1,7 +1,7 @@
 # Dashboard: uitzonderingen en beslissingen
 
 Vastgelegde gebruikersinstructies van Jasper, bijgewerkt met het besluit van
-6 oktober 2026. De zeven afzonderlijke workers zijn live; de centrale werklijst
+7 oktober 2026. De zeven afzonderlijke workers zijn live; de centrale werklijst
 projecteert hun bestaande dossiers en bewaart menselijke besluiten apart.
 Een live worker of deployment bewijst niet dat een dagtaak financieel klaar is.
 
@@ -18,6 +18,30 @@ ICEPAY en Fibonatix verwerken eenmaal per dag de vorige kalenderdag in
 Europe/Amsterdam onder een duurzame dagidentiteit. Een eindrapport volgt pas
 na alle relevante dagtaken; bij een blokkade heet de dagrun expliciet onvolledig.
 De bestaande continue controlefrequenties blijven behouden.
+
+## Betalingsverschillen — besluit 7 oktober 2026, 13:34 CEST
+
+Jasper geeft blijvend akkoord voor een betalingsverschil met absolute waarde
+**maximaal EUR 1,00, inclusief EUR 1,00**, zowel onder- als overbetaling, wanneer
+het bronordernummer overeenstemt met de eigen Sales Entry. Dit geldt voor alle
+verkoopontvangsten, ongeacht PSP/bankboek. Bewijs de eigen order/factuur,
+administratie, debiteur, EUR-valuta en actuele resterende bedragen; een gelijk
+bedrag zonder orderbewijs is onvoldoende. Behoud de bestaande controles op
+dubbele betalingen, refunds/creditnota's, orderstatus en eerdere afletteringen.
+
+Pas de grens toe op het werkelijke resterende verschil van dezelfde order/factuur,
+niet per losse regel om grotere verschillen op te knippen. Verschillen boven EUR
+1,00 en onzekere of ontbrekende order/factuurkoppelingen blijven ter beoordeling.
+Leveranciersbetalingen, belastingen, fees en payouts vallen niet onder deze
+Sales Entry-regel.
+
+De uitvoering blijft uitsluitend via Exact Automatically en de bestaande
+betalingsverschilrekening. Dit akkoord op zichzelf wijzigt geen globale
+Exact-instelling en rechtvaardigt geen handmatige match, kruispost of
+compensatieboeking. Bevestig de native verwerking door teruglezing; wat
+Automatically niet verwerkt blijft open met een concrete vervolgactie.
+Bewaar akkoord, order/factuuridentiteit, bedrag met teken en uitvoering apart.
+Een eerdere afgeronde import of native opdracht wordt niet gereset.
 
 ## Werklijst
 
@@ -44,8 +68,8 @@ Elke uitzondering toont minimaal:
   corrigeren, voor zover passend bij de concrete uitzondering.
 - Vastgelegde beslissing en afzonderlijk uitvoeringsresultaat met Exact-bewijs.
 
-Geen algemene automatische afboekgrens is afgesproken. Toekomstige verschillen
-komen in de werklijst totdat een expliciete passende beslisregel is vastgesteld.
+Voor bewezen eigen verkooporders geldt de EUR 1,00-regel hierboven. Alle andere
+verschillen komen in de werklijst totdat een passende beslissing is vastgelegd.
 Ontbreekt een bronreferentie, dan geldt de eerder afgesproken boeking op
 vraagposten (2000); registreer die zichtbaar, zonder de hele import te blokkeren.
 Bewaar ordernummers en transactiereferenties zichtbaar in omschrijving/notitie.

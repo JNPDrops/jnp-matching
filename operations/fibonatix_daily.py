@@ -87,7 +87,7 @@ def build_xml(rows,template,day,entry):
     e.find('FinYear').set('number',str(day.year));e.find('FinPeriod').set('number',str(day.month))
     e.find('Description').text=nightly.identity(day,'fibonatix')
     for number,r in enumerate(sorted(rows,key=lambda x:x['payment_id']),1):
-        require(r['date']==day.isoformat() and r['order_status']=='completed' and re.fullmatch('[A-Za-z0-9]{6,32}',r['payment_id']) and re.fullmatch('TD[0-9]+',r['ref']) and type(r['woo_id']) is int and Decimal(r['amount'])>0,'invalid_receipt')
+        require(r['date']==day.isoformat() and r.get('source_status')=='Approved' and r.get('source_kind')=='SL' and r.get('source_status_code')=='20000' and re.fullmatch('[A-Za-z0-9]{6,32}',r['payment_id']) and re.fullmatch('TD[0-9]+',r['ref']) and type(r['woo_id']) is int and Decimal(r['amount'])>0,'invalid_receipt')
         l=copy.deepcopy(lt);l.set('line',str(number));l.find('Date').text=day.isoformat()
         l.find('FinYear').set('number',str(day.year));l.find('FinPeriod').set('number',str(day.month))
         l.find('GLAccount').set('code','1100');l.find('Account').set('code','100100');l.find('Description').text=description(r)

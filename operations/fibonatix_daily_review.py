@@ -105,6 +105,34 @@ async def run(app,job):
     # Missing source receipts remain explicit, even if every uploaded line verified.
     state='complete' if coverage['complete'] else 'incomplete'
     with app._db_connect() as conn,conn.transaction():
+        previous=conn.execute('SELECT data FROM jnp_fibonatix_daily_imports WHERE division=%s AND processing_date=%s FOR UPDATE',(n.DIVISION,day)).fetchone()[0].get('dashboard_exceptions',[])
+        by_payment={r.get('payment_transaction_id'):r for r in previous}
+        covered={r['payment_id'] for r in coverage['receipts']}
+        display=[r for r in previous if r.get('payment_transaction_id') not in covered]
+        for receipt in coverage['receipts']:
+            if receipt['state']=='imported':continue
+            item=dict(by_payment.get(receipt['payment_id'],{}))
+            status=receipt['state']
+            labels={'waiting_for_completed_order':'Betaald; order nog niet afgerond',
+                    'refund_or_cancel_review':'Refund of annulering beoordelen',
+                    'ready_for_import':'Betaling ontbreekt; gereed voor aanvullende import'}
+            actions={'waiting_for_completed_order':'Controleer verzending/afronding van de eigen order; dagelijkse hercontrole blijft actief.',
+                     'refund_or_cancel_review':'Controleer eigen ontvangst, PSP-refund en creditnota volgens refundbeleid.',
+                     'ready_for_import':'Gebruik de verse review-revisie voor een afzonderlijke aanvullende import; herhaal de originele import niet.'}
+            item.update(case_key=receipt['payment_id'],payment_transaction_id=receipt['payment_id'],
+                        reference=receipt.get('ref'),amount=receipt.get('amount'),woo_order_id=receipt.get('woo_id'),
+                        order_status=receipt.get('order_status'),receipt_imported=False,
+                        division=n.DIVISION,journal='Fibonatix',journal_code='26',account_code='100100',
+                        currency='EUR',bank_date=day.isoformat(),reason=status,
+                        status='order_status_review' if status=='waiting_for_completed_order' else 'source_review',
+                        status_label=labels.get(status,'Betaling nader beoordelen'),
+                        work_group='waiting' if status=='waiting_for_completed_order' else 'review',
+                        next_action=actions.get(status,'Controleer bronbetaling en eigen verkoopboeking; niet blind herhalen.'),
+                        observed_at=captured,review_revision=revision)
+            display.append(item)
+        data['previous_dashboard_exceptions']=previous
+        data['dashboard_exceptions']=display
+        conn.execute("UPDATE jnp_fibonatix_daily_imports SET data=jsonb_set(data,'{dashboard_exceptions}',%s::jsonb) WHERE division=%s AND processing_date=%s",(json.dumps(display),n.DIVISION,day))
         conn.execute('INSERT INTO paragon_login_probes(probe_id,result) VALUES(%s,%s::jsonb)',(n.identity(day,'fibonatix')+':review:'+revision,json.dumps(snapshot)))
         conn.execute('INSERT INTO jnp_fibonatix_daily_reviews(division,processing_date,review_date,state,data) VALUES(%s,%s,%s,%s,%s::jsonb)',(n.DIVISION,day,review_day,state,json.dumps(data)))
     return {'state':state,'ready_for_import':len(coverage['ready_ids']),'financial_writes':False}

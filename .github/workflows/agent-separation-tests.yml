@@ -38,3 +38,4 @@ jobs:
       - run: python -m pytest operations/test_fibonatix_import.py operations/test_strict_order_matching.py -q
       - run: python -m pytest operations/test_icepay_booking.py operations/test_icepay_matching.py operations/test_icepay_transactions.py -q
       - run: python -m unittest discover -s operations -p 'test_fibonatix_daily*.py' -q
+      - run: python -m unittest operations.test_icepay_daily -q

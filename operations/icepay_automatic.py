@@ -38,10 +38,30 @@ def initialize(conn):
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
 
 
+def automatic_blocked(conn):
+    """Keep native matching paused after a proven cross-order match.
+
+    Import jobs and the 900-second cadence are unaffected. Clearing the block
+    requires an explicit reviewed resolution in the original durable evidence.
+    """
+    return conn.execute("""SELECT 1 FROM jnp_icepay_automatic_runs
+        WHERE evidence->>'order_mismatch_confirmed'='true'
+          AND COALESCE(evidence->>'order_mismatch_resolved','false')<>'true'
+        LIMIT 1""").fetchone() is not None
+
+
+def require_native_allowed(app):
+    with app._db_connect() as conn:
+        initialize(conn)
+        require(not automatic_blocked(conn), 'native_order_mismatch_requires_review')
+
+
 def seed(conn, app):
     """Runs on the existing assigned ICEPAY worker, including after restarts."""
     require(app.DIVISION == DIVISION, 'wrong_administration')
     initialize(conn)
+    if automatic_blocked(conn):
+        return
     # An unfinished native action must be reviewed, even after a restart.
     if conn.execute("SELECT 1 FROM jnp_icepay_automatic_runs WHERE state='click_requested' LIMIT 1").fetchone():
         return
@@ -130,6 +150,7 @@ async def open_receipts(page):
 @fence.owned_operation('icepay')
 async def automatic_click(app, job, page, before, summary):
     require(not task_drain.requested(), 'worker_draining')
+    require_native_allowed(app)
     evidence = {'before': before}
     summary.update(automatic_attempted=True)
     await asyncio.to_thread(persist, app, job['job_id'], 'click_requested', summary, evidence)
@@ -149,6 +170,7 @@ async def automatic_click(app, job, page, before, summary):
 
 async def run(app, job):
     validate(job)
+    require_native_allowed(app)
     require(app.DIVISION == DIVISION and app.BASE_URL == BASE, 'wrong_administration')
     require(fence.current_owner() is not None and fence.current_owner().role == 'icepay',
             'assigned_icepay_worker_required')

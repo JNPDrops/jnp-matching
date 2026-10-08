@@ -16,7 +16,7 @@ import sys
 
 from operations import icepay_transactions as t
 from operations import icepay_browser as b
-from operations.icepay_fetch_probe import environments
+from operations.icepay_fetch_probe import environments, stop_child
 
 
 def identity(start, end):
@@ -110,6 +110,20 @@ def validate_source(raw, ids, evidence, start, end):
     return rows,summary,proof
 
 
+async def ensure_browser(base):
+    """Install the pinned Playwright browser after an ephemeral instance changes."""
+    child = None
+    try:
+        child = await asyncio.create_subprocess_exec(
+            sys.executable, '-m', 'playwright', 'install', 'chromium', '--only-shell',
+            env=base, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+        if await asyncio.wait_for(child.wait(),150) != 0:
+            raise t.AcquisitionStopped('browser_install')
+    finally:
+        await stop_child(child)
+
+
 async def capture(start,end,existing=None):
     from playwright.async_api import async_playwright
     base,_ = environments(os.environ)
@@ -117,6 +131,9 @@ async def capture(start,end,existing=None):
     artifacts,summary = dict(existing or {}),{}
     stage='configuration'
     try:
+        stage='browser_install'
+        await ensure_browser(base)
+        stage='configuration'
         credentials=b.Credentials.from_env(os.environ)
         async with async_playwright() as playwright:
             stage='browser_launch'

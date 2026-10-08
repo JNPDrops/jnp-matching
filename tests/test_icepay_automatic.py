@@ -43,14 +43,14 @@ class ReceiptScopeTests(unittest.TestCase):
                 icepay_jobs.validate({'task_key': automatic.TASK, 'action': action, 'params': params})
 
     def test_seed_respects_unknown_click(self):
-        conn = MagicMock(); conn.execute.return_value.fetchone.return_value = (True,)
+        conn = MagicMock(); conn.execute.return_value.fetchone.side_effect = [None, (True,)]
         with patch.object(automatic.agent_jobs, 'submit') as submit:
             automatic.seed(conn, SimpleNamespace(DIVISION=3977752))
         submit.assert_not_called()
 
     def test_seed_waits_between_completed_rounds(self):
         conn = MagicMock()
-        conn.execute.return_value.fetchone.side_effect = [None, (datetime.now(timezone.utc),)]
+        conn.execute.return_value.fetchone.side_effect = [None, None, (datetime.now(timezone.utc),)]
         with patch.object(automatic.agent_jobs, 'submit') as submit:
             automatic.seed(conn, SimpleNamespace(DIVISION=3977752))
         submit.assert_not_called()
@@ -72,6 +72,7 @@ class NativeActionTests(unittest.IsolatedAsyncioTestCase):
             return snapshot(), [{'order': 'TD123'}]
         def persist(app, job, state, summary, evidence): events.append(state)
         with fence.owner_scope(lease), \
+             patch.object(automatic, 'require_native_allowed'), \
              patch.object(automatic, 'persist', side_effect=persist), \
              patch.object(automatic, 'open_receipts', side_effect=readback), \
              patch.object(coordination, '_budget_database_call', side_effect=lambda url, fn, *a: events.append(fn.__name__)):

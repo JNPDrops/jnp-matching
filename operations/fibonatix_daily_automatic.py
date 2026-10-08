@@ -11,7 +11,9 @@ from operations import nightly_batches as n, worker_write_fence as fence, task_d
 from operations.fibonatix_daily_source import require
 
 BANK='63305e6f-827d-4884-9df1-6ebbb5858a76'
-NOTES='Fibonatix TD'
+# Select the receipt marker, so separately imported RF refunds are excluded.
+# checked() still validates the full Fibonatix/order/PSP identity before clicking.
+NOTES=' | Betaling '
 
 
 def refunded_ids(allowed, source_rows):

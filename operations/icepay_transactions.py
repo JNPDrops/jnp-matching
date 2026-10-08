@@ -465,11 +465,12 @@ async def resume_payment_export(page, downloads, expected_ids, artifacts):
     artifacts['export_notices'] = await export_notifications(page)
     artifacts['download_controls'] = await download_control_metadata(page)
     links = await csv_links(page)
-    if not links or len(links)>5:
+    if not links:
         raise AcquisitionStopped('export_ambiguous')
     artifacts['candidate_csvs'] = []
     total_bytes = 0
-    for link in links.values():
+    # The portal accumulates old notices. Bound downloads, not total notice count.
+    for link in list(links.values())[:5]:
         await b.guard_page(page)
         await link.click()
         try:
@@ -506,8 +507,9 @@ async def legacy_payment_export(page, downloads, expected_ids, artifacts):
     try:
         download = await asyncio.wait_for(downloads.get(),timeout=60)
     except asyncio.TimeoutError:
-        # A legacy configuration dialog, if any, is retained as form metadata.
-        raise AcquisitionStopped('export_not_completed') from None
+        # Legacy exports may finish asynchronously as a portal notification.
+        # Reuse that export; do not submit a second request.
+        return await resume_payment_export(page,downloads,expected_ids,artifacts)
     content = await read_download(download)
     artifacts['export_state'] = 'submitted'
     artifacts['source_export_csv'] = base64.b64encode(content).decode()

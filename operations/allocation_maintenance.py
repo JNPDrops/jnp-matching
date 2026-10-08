@@ -43,6 +43,20 @@ class MaintenanceDrained(Exception):
     pass
 
 
+async def read_budget_retry(method, send):
+    """Retry only a read whose shared quota reservation was denied before send."""
+    for attempt in range(3):
+        try:
+            return await send()
+        except BudgetDeferred as exc:
+            if method != 'GET' or str(exc) not in {'minute_reserve', 'unknown_minute_cap'} or attempt == 2:
+                raise
+            STATUS['state'] = 'waiting_for_minute_budget'
+            if await task_drain.wait(60):
+                raise MaintenanceDrained()
+            STATUS['state'] = 'scanning'
+
+
 class MaintenanceAPI(woo.ExactAPI):
     def __init__(self, app, limits):
         super().__init__(app, role='maintenance', priority='routine', floor=200)
@@ -77,10 +91,10 @@ class MaintenanceAPI(woo.ExactAPI):
             self.post_count += 1
         async with httpx.AsyncClient(timeout=45, follow_redirects=False, trust_env=False, verify=m.TLS_CONTEXT) as client:
             from operations.worker_coordination import budgeted_http
-            r = await budgeted_http(self.app, self.role, method,
+            r = await read_budget_retry(method, lambda: budgeted_http(self.app, self.role, method,
                 lambda: client.request(method, url, params=params, json=payload,
                     headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}),
-                priority=self.priority, floor=self.floor)
+                priority=self.priority, floor=self.floor))
         self.limits = {name: int(r.headers[h]) for name, h in (
             ('remaining', 'x-ratelimit-remaining'), ('reset_ms', 'x-ratelimit-reset')) if r.headers.get(h, '').isdigit()}
         expected = (200,) if method == 'GET' else ((200, 201, 204) if method == 'POST' else (200, 204))

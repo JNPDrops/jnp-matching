@@ -1,8 +1,9 @@
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
-from operations.processing_imports import bounded_rows,digest
+from operations.processing_imports import bounded_rows,digest,latest_entry
 
 
 class CutoffTests(unittest.TestCase):
@@ -43,3 +44,19 @@ class CutoffTests(unittest.TestCase):
     def test_evidence_digest_is_stable_but_detects_amount_change(self):
         self.assertEqual(digest({'id':1,'amount':'2.00'}),digest({'amount':'2.00','id':1}))
         self.assertNotEqual(digest({'id':1,'amount':'2.00'}),digest({'id':1,'amount':'2.01'}))
+
+
+class EntrySequenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_maximum_entry_read_is_one_call_even_with_next_link(self):
+        api=AsyncMock()
+        api.get.return_value={'d':{'results':[{'EntryNumber':26260025}],'__next':'https://example.test/must-not-follow'}}
+        self.assertEqual(await latest_entry(api,date(2026,10,9),'26'),26260026)
+        self.assertEqual(api.get.await_count,1)
+        api.rows.assert_not_awaited()
+
+    async def test_unknown_or_wrong_journal_sequence_is_blocked(self):
+        api=AsyncMock()
+        for result in ([],[{'EntryNumber':26270025}],[{'EntryNumber':'26260025'}]):
+            with self.subTest(result=result):
+                api.get.return_value={'d':{'results':result}}
+                with self.assertRaises(ValueError):await latest_entry(api,date(2026,10,9),'26')

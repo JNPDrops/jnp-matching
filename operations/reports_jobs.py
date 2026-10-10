@@ -43,6 +43,9 @@ def probe_completed(app,task):
 
 
 async def dispatch(app,job):
+    if job['action']=='processing_stage':
+        from operations.processing_dispatch import run
+        return await run(app,job)
     if job['action']=='daily_report':
         from operations.nightly_reports import run
         return await run(app,job)
@@ -70,4 +73,11 @@ def seed_configured(conn,app):
 async def serve(app):
     async def run(job):await dispatch(app,job)
     async def seed():await asyncio.to_thread(jobs.database_call,app,seed_configured,app)
-    await jobs.consume(app,'reports',run,seed=seed)
+    from operations.processing_orchestrator import coordinator_loop
+    coordinator=asyncio.create_task(coordinator_loop(app),name='jnp:processing-coordinator')
+    try:
+        await jobs.consume(app,'reports',run,seed=seed)
+    finally:
+        coordinator.cancel()
+        await asyncio.gather(coordinator,return_exceptions=True)
+

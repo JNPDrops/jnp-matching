@@ -306,6 +306,7 @@ async def cycle(app):
         try:
             rows=conn.execute("SELECT event_id,body,state FROM jnp_woo_iban_events WHERE state IN ('pending','creating','uncertain') AND next_check<=NOW() ORDER BY created_at LIMIT 5").fetchall()
             api=ExactAPI(app)
+            boundary=conn.execute('SELECT clock_timestamp()').fetchone()[0]
             for event_id,body,state in rows:
                 if task_drain.requested(): break
                 conn.execute("UPDATE jnp_woo_iban_events SET attempts=attempts+1,next_check=NOW()+INTERVAL '5 minutes' WHERE event_id=%s",(event_id,))
@@ -313,6 +314,10 @@ async def cycle(app):
                 except Exception:
                     conn.execute("UPDATE jnp_woo_iban_events SET reason='Exact tijdelijk niet beschikbaar; nieuwe poging gepland',updated_at=NOW() WHERE event_id=%s",(event_id,))
             STATUS['state']='ready'
+            if not task_drain.requested() and not conn.execute('''SELECT 1 FROM jnp_woo_iban_events
+                WHERE created_at<=%s AND state IN ('pending','creating','uncertain') LIMIT 1''',(boundary,)).fetchone():
+                from operations.processing_completion import record
+                record(conn,'woo-rules',boundary,{'queue_drained':True,'bank_writes':False})
         finally: conn.execute('SELECT pg_advisory_unlock(%s)',(LOCK,))
 
 
@@ -345,3 +350,4 @@ async def check_connection(request: Request):
                 result['recent']=[dict(zip(('event_id','order_number','bank_reference','state','reason','rule_id'),row)) for row in rows]
         return result
     except Exception: raise HTTPException(503,'Exact-verbinding of toewijzingsregels niet beschikbaar') from None
+

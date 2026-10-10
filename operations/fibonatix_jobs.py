@@ -33,6 +33,10 @@ def submit(request, action, params=None):
 
 
 async def dispatch(job):
+    if job['action']=='processing_stage':
+        from app import main as app
+        from operations.processing_dispatch import run
+        return await run(app,job)
     if job['action']=='daily_review':
         from app import main as app
         from operations.fibonatix_daily_review import run
@@ -80,3 +84,4 @@ def status():
     with legacy.database() as conn:
         conn.execute('SET default_transaction_read_only=on')
         return jobs.snapshot(conn,legacy.DIVISION,'fibonatix')
+

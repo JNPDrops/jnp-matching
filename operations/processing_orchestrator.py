@@ -28,7 +28,7 @@ DEPENDENCIES = {
 TERMINAL = frozenset({'verified', 'blocked', 'uncertain'})
 
 
-def initialize(conn):
+def _initialize(conn):
     schedule.initialize(conn)
     alerts.initialize(conn)
     conn.execute('''CREATE TABLE IF NOT EXISTS jnp_processing_control (
@@ -42,6 +42,13 @@ def initialize(conn):
         updated_at timestamptz NOT NULL DEFAULT now(),
         PRIMARY KEY(batch_key,stage),
         CHECK(state IN ('pending','queued','verified','blocked','uncertain')))''')
+
+
+def initialize(conn):
+    # Reports and the independent watchdog may start simultaneously.
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('jnp:processing-schema',0))")
+        _initialize(conn)
 
 
 def choose_stage(states):
@@ -100,14 +107,20 @@ def tick(conn, app, now=None):
         schedule.register_due(conn,control[1],now)
         conn.execute('''UPDATE jnp_processing_control SET heartbeat_at=%s,code_commit=%s
             WHERE division=%s''', (now,os.environ.get('RENDER_GIT_COMMIT','unknown'),app.DIVISION))
-        if conn.execute("SELECT 1 FROM jnp_processing_stages WHERE state='uncertain' LIMIT 1").fetchone():
-            return 'uncertain_chain_requires_review'
         batch = conn.execute('''SELECT batch_key FROM jnp_processing_batches
             WHERE division=%s AND state IN ('pending','running')
             ORDER BY planned_at LIMIT 1 FOR UPDATE''', (app.DIVISION,)).fetchone()
         if not batch:
             return 'idle'
         key = batch[0]
+        # Finish independent work and the incomplete report in the active chain.
+        # Only a later chain is held behind an unresolved earlier write.
+        if conn.execute('''SELECT 1 FROM jnp_processing_stages s
+            JOIN jnp_processing_batches b ON b.batch_key=s.batch_key
+            WHERE b.division=%s AND s.state='uncertain' AND b.batch_key<>%s
+              AND b.planned_at<(SELECT planned_at FROM jnp_processing_batches WHERE batch_key=%s)
+            LIMIT 1''',(app.DIVISION,key,key)).fetchone():
+            return 'uncertain_previous_chain_requires_review'
         conn.execute("UPDATE jnp_processing_batches SET state='running' WHERE batch_key=%s",(key,))
         for stage,_ in STAGES:
             conn.execute('''INSERT INTO jnp_processing_stages(batch_key,stage)
@@ -137,6 +150,10 @@ def tick(conn, app, now=None):
             command = jobs.submit(conn,app.DIVISION,role,key,'processing_stage',
                                   {'stage':stage},key+':'+stage)
         except jobs.JobConflict:
+            if conn.execute('''SELECT 1 FROM jnp_agent_jobs WHERE division=%s AND role=%s
+                AND state='uncertain' LIMIT 1''',(app.DIVISION,role)).fetchone():
+                outcome(conn,key,stage,'blocked',{'reason':'assigned_role_has_unresolved_command'})
+                return 'unresolved_role_blocked'
             return 'worker_busy'
         conn.execute("UPDATE jnp_processing_stages SET state='queued',job_id=%s,updated_at=now() WHERE batch_key=%s AND stage=%s",
                      (command['job_id'],key,stage))
@@ -169,3 +186,30 @@ async def pulse(app, *, monitor=False):
             # Outbox remains pending and watchdog stays alive. No provider text in logs.
             import logging
             logging.getLogger('uvicorn.error').warning('processing_notification_delivery_unavailable')
+
+
+async def monitor_loop(app):
+    """Independent of the coordinator and long provider jobs, on ICEPAY's owner."""
+    from operations import task_drain
+    import logging
+    while not task_drain.requested():
+        try:
+            await pulse(app,monitor=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger('uvicorn.error').warning('processing_watchdog_unavailable')
+        await task_drain.wait(60)
+
+
+async def coordinator_loop(app):
+    from operations import task_drain
+    import logging
+    while not task_drain.requested():
+        try:
+            await pulse(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger('uvicorn.error').warning('processing_coordinator_unavailable')
+        await task_drain.wait(5)

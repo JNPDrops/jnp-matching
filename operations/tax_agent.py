@@ -240,6 +240,10 @@ async def cycle(app):
                     ('state','counts','planned','by_tax','last_check','bank_writes','automatically_executed')
                     if key in tax_allocation.STATUS}
                 conn.execute('UPDATE jnp_tax_control SET rule_summary=%s::jsonb', (json.dumps(summary),))
+            if tax_allocation.STATUS.get('state')=='ready' and not task_drain.requested():
+                from operations.processing_completion import record
+                record(conn,'tax',now,{'scan':STATUS.get('classifications',{}),
+                    'rules':summary,'bank_writes':False,'automatically_executed':False})
         except ScanDrained:
             STATUS['state'] = 'draining'
         except (BudgetDeferred, SharedBudgetDeferred):
@@ -321,3 +325,4 @@ async def report(request: Request):
                 {'bank_line_id': row[0], 'bank_date': row[1], 'description': row[2],
                  'tax': tax.add_account_proposal(row[3], accounts, POLICY['gl_accounts'])}
                 for row in rows]}
+

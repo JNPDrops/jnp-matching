@@ -93,3 +93,28 @@ async def verify(api, receipts, debtor_code):
     return {'checked_at': datetime.now(timezone.utc).isoformat(),
             'division': 3977752, 'debtor_code': debtor_code,
             'invoices': assess(receipts, sales, opened, debtor)}
+
+
+def partition(receipts,sales,opened,debtor_id):
+    """Scope an exception to its own receipt instead of suppressing good orders.
+
+    This function is read-only eligibility evidence. It neither changes the
+    historical mismatch dossier nor permits a broad native selection. A native
+    adapter must select only the returned eligible IDs and prove the readback.
+    """
+    from collections import Counter
+    refs=Counter(r.get('ref') or r.get('order') for r in receipts)
+    ids=Counter(r.get('payment_id') for r in receipts)
+    eligible,exceptions=[],[]
+    for row in receipts:
+        ref=row.get('ref') or row.get('order')
+        pid=row.get('payment_id')
+        try:
+            require(refs[ref]==1,'multiple_selected_receipts_for_order')
+            require(ids[pid]==1,'duplicate_or_missing_payment_id')
+            require(row.get('refund_review') is not True,'own_order_refund_requires_review')
+            proof=assess([row],sales,opened,debtor_id)[0]
+            eligible.append({'receipt':row,'invoice':proof})
+        except InvoiceNotReady as exc:
+            exceptions.append({'reference':ref,'payment_id':pid,'reason':str(exc)})
+    return eligible,exceptions

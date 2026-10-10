@@ -35,7 +35,7 @@ def read_source(raw, day, *, utc_ui_proof):
     require(0 < len(rows) <= 10000, 'source_size')
     byid = {r['TRX ID']: r for r in rows}
     require(len(byid) == len(rows), 'duplicate_psp_id')
-    require(len(utc_ui_proof) >= 3 and len({p['trx'] for p in utc_ui_proof}) == len(utc_ui_proof), 'timezone_proof_missing')
+    require(len(utc_ui_proof) >= min(3,len(rows)) and len({p['trx'] for p in utc_ui_proof}) == len(utc_ui_proof), 'timezone_proof_missing')
     for p in utc_ui_proof:
         require(p['trx'] in byid, 'timezone_proof_id_missing')
         stamp = datetime.strptime(byid[p['trx']]['Display Time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
@@ -81,14 +81,19 @@ def prepare(raw, orders, day, *, utc_ui_proof):
         require(amount.is_finite() and amount > 0 and amount == amount.quantize(Decimal('.01')), 'invalid_amount')
         number = str(o['order_number']).lstrip('#')
         require(re.fullmatch('[0-9]+', number), 'invalid_order_number')
-        if (r['Type']=='SL' and amount != Decimal(str(o['total']))) or (r['Type']=='RF' and amount>Decimal(str(o['total']))):
+        if r['Type']=='RF' and amount>Decimal(str(o['total'])):
             exceptions.append({'payment_id': r['TRX ID'], 'woo_id': oid, 'reason': 'order_amount_review'})
             continue
         candidates.append({'payment_id': r['TRX ID'], 'woo_id': int(oid), 'ref': 'TD' + number,
                            'date': day.isoformat(), 'amount': str((amount if r['Type']=='SL' else -amount).quantize(Decimal('.01'))),
                            'order_status': o['status'], 'source_status': r[STATUS], 'source_kind': r['Type'],
-                           'source_status_code': r['Status Code'], 'source_time_utc': r['Display Time']})
-    duplicate_orders = {(r['woo_id'],r['source_kind']) for r in candidates if sum((x['woo_id'],x['source_kind']) == (r['woo_id'],r['source_kind']) for x in candidates) > 1}
+                           'source_status_code': r['Status Code'],
+                           'source_time_utc':datetime.strptime(r['Display Time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc).isoformat(),
+                           'order_total_refunds':str(o.get('total_refunds','0'))})
+    # A second successful PSP ID is another real receipt, even on the same
+    # order. Import it; invoice allocation remains a separate native action.
+    # Multiple refunds require cumulative original-receipt review first.
+    duplicate_orders = {(r['woo_id'],r['source_kind']) for r in candidates if r['source_kind']=='RF' and sum((x['woo_id'],x['source_kind']) == (r['woo_id'],r['source_kind']) for x in candidates) > 1}
     for r in candidates:
         if (r['woo_id'],r['source_kind']) in duplicate_orders:
             exceptions.append({'payment_id': r['payment_id'], 'woo_id': r['woo_id'], 'reason': 'multiple_receipts_same_order'})
@@ -96,3 +101,4 @@ def prepare(raw, orders, day, *, utc_ui_proof):
     summary.update(candidates=len(candidates), candidate_total=str(sum((Decimal(r['amount']) for r in candidates), Decimal('0.00'))),
                    exceptions=dict(Counter(e['reason'] for e in exceptions)))
     return candidates, exceptions, summary
+

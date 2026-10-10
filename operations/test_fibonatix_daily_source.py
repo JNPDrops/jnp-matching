@@ -62,5 +62,33 @@ class DailySourceTests(unittest.TestCase):
         rows=self.fixture();rows[1]['TRX ID']=rows[0]['TRX ID']
         with self.assertRaisesRegex(ValueError,'duplicate_psp_id'):read_source(self.encoded(rows),date(2026,10,6),utc_ui_proof=self.proof(rows))
 
+    def test_small_source_still_needs_independent_timezone_evidence(self):
+        rows=self.fixture()[1:2]
+        got,_=read_source(self.encoded(rows),date(2026,10,6),utc_ui_proof=self.proof(rows))
+        self.assertEqual(len(got),1)
+        with self.assertRaisesRegex(ValueError,'timezone_proof_missing'):
+            read_source(self.encoded(rows),date(2026,10,6),utc_ui_proof=[])
+
+    def test_successful_partial_and_second_receipts_are_not_order_total_filtered(self):
+        rows=self.fixture()[1:3]
+        rows[0]['Amount']='10.00'
+        rows[1].update({'Brand TRX ID':'11','Order Description':'Order #11','Amount':'15.00'})
+        order={'order_id':11,'order_number':9001,'payment_method':'wc_fibonatix',
+            'currency':'EUR','status':'pending','total':'25.00','total_refunds':'0'}
+        got,exc,_=prepare(self.encoded(rows),[order],date(2026,10,6),utc_ui_proof=self.proof(rows))
+        self.assertEqual([r['amount'] for r in got],['10.00','15.00'])
+        self.assertEqual(exc,[])
+        self.assertTrue(all(datetime.fromisoformat(r['source_time_utc']).tzinfo is not None for r in got))
+
+    def test_multiple_refunds_still_require_cumulative_review(self):
+        rows=self.fixture()[1:3]
+        for r in rows:r.update({'Type':'RF','Brand TRX ID':'11','Order Description':'Order #11','Amount':'15.00'})
+        order={'order_id':11,'order_number':9001,'payment_method':'wc_fibonatix',
+            'currency':'EUR','status':'refunded','total':'25.00','total_refunds':'25.00'}
+        got,exc,_=prepare(self.encoded(rows),[order],date(2026,10,6),utc_ui_proof=self.proof(rows))
+        self.assertEqual(got,[])
+        self.assertEqual(len(exc),2)
+
 
 if __name__=='__main__':unittest.main()
+

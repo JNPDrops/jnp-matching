@@ -137,3 +137,32 @@ class ProcessingPostgresTests(unittest.TestCase):
         c.watchdog(self.conn,app,now+timedelta(hours=4))
         reasons={r[0] for r in self.conn.execute('SELECT reason FROM jnp_processing_alerts').fetchall()}
         self.assertEqual(reasons,{'scheduled_run_not_started','scheduled_run_overdue','coordinator_heartbeat_missing'})
+
+    def test_uncertain_source_does_not_prevent_independent_current_chain_work(self):
+        c,owner,app,now=self.coordinator_fixture()
+        with patch('operations.worker_write_fence.current_owner',return_value=owner):
+            c.tick(self.conn,app,now)
+            key,job=self.conn.execute("SELECT batch_key,job_id FROM jnp_processing_stages WHERE stage='fibonatix_source'").fetchone()
+            c.outcome(self.conn,key,'fibonatix_source','uncertain',{'reason':'synthetic_interruption'},job)
+            self.conn.execute("UPDATE jnp_agent_jobs SET state='uncertain'")
+            self.assertEqual(c.tick(self.conn,app,now),'dependency_blocked')
+            self.assertEqual(c.tick(self.conn,app,now),'queued')
+        self.assertEqual(self.conn.execute("SELECT state FROM jnp_processing_stages WHERE stage='icepay_source'").fetchone()[0],'queued')
+
+    def test_continuous_completion_requires_actual_lease_and_queue_drain(self):
+        from operations import processing_completion as completion
+        c=self.conn;lease=uuid4()
+        c.execute('CREATE TABLE jnp_worker_roles(division int,role text,lease_id uuid,active_owner text,draining boolean,lease_until timestamptz)')
+        c.execute('CREATE TABLE jnp_woo_iban_events(created_at timestamptz,state text)')
+        c.execute("INSERT INTO jnp_worker_roles VALUES(3977752,'woo-rules',%s,'worker-woo-rules',false,now()+interval '2 minutes')",(lease,))
+        owner=SimpleNamespace(role='woo-rules',division=3977752,lease_id=lease,owner='worker-woo-rules')
+        boundary=datetime.now(timezone.utc)-timedelta(seconds=1)
+        with patch('operations.worker_write_fence.current_owner',return_value=owner):
+            completion.record(c,'woo-rules',boundary,{'queue_drained':True})
+            self.assertIsNotNone(completion.proof(c,'woo-rules',boundary))
+            c.execute("INSERT INTO jnp_woo_iban_events VALUES(now()-interval '1 minute','uncertain')")
+            self.assertIsNone(completion.proof(c,'woo-rules',boundary))
+            c.execute("UPDATE jnp_worker_roles SET draining=true")
+            with self.assertRaisesRegex(ValueError,'lease_unavailable'):
+                completion.record(c,'woo-rules',boundary,{'queue_drained':True})
+        self.assertEqual(c.execute('SELECT count(*) FROM jnp_processing_completions').fetchone()[0],1)

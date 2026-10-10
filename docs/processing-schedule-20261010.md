@@ -112,7 +112,9 @@ and mail test set contains 20 passing tests. Full CI must pass on the final head
 `processing_orchestrator.py` now implements durable stage dispatch, explicit
 adapter evidence, independent progress after a blocked dependency, a separate
 watchdog, and a wait until the prior worker command has actually ended. It is
-not activated or connected to the worker entrypoints yet.
+connected to the reports entrypoint in this branch, with a separate coordinator
+task so a long command cannot stop its heartbeat. ICEPAY hosts an independent
+watchdog task. It remains disabled by default and has not been deployed.
 
 `processing_imports.py` adds a separate immutable cutoff import store and
 reuses the established journal/XML and readback checks. It deduplicates by PSP
@@ -130,3 +132,52 @@ automatic approval review because the release is incomplete. It was not
 retried or deployed through another route. Complete the source acquisition,
 worker wiring, scoped native actions, notification configuration and execution
 checks before requesting a full release again.
+
+## Continued implementation checkpoint
+
+- The continuous Woo, tax and maintenance workers now record successful
+  completion watermarks from their own live role leases. A Woo completion
+  does not pass the boundary while relevant pending/creating/uncertain events
+  remain. The observer never runs another financial rule writer.
+- The strict processing dispatcher is connected to the three queue roles in
+  this branch. Imports, continuous completion observation and terminal report
+  storage have adapters. `missing_adapters()` still identifies four essential
+  gaps: both fresh PSP source adapters and both scoped native Automatically
+  adapters. This is not an activatable full release.
+- An uncertain current-stage command no longer suppresses independent work and
+  its incomplete report. A later batch still waits behind an unresolved prior
+  chain. An unresolved role command is recorded as a concrete stage block.
+- The new report gate rejects pending/running relevant commands. Its new store
+  has one final report per administration/day. Linkage to the authoritative
+  existing daily report and dashboard exception refresh remains release work.
+- Fibonatix source validation now retains all independently successful original
+  receipts, including partial/extra PSP payments for the same order, without
+  treating an order-total difference as an import-status failure. PSP-ID
+  duplicates remain errors; multiple RF refunds still require cumulative review.
+  Candidate timestamps are aware UTC values. Existing stored exports and
+  completed imports are not changed by this parser update.
+- ICEPAY timestamp normalization likewise preserves proven aware UTC instants.
+- The own-invoice gate can partition bad orders from independent good ones.
+  Partitioning is read-only eligibility evidence, not a native selection or a
+  repair. The historical global ICEPAY safeguard is unchanged until the scoped
+  native selection and invoice-pair readback are implemented and verified.
+- Cutoff import deduplication includes the bounded booking day as well as global
+  PSP-ID lookups. Reading the highest entry number uses one descending/top-1
+  request and does not follow pagination through the whole journal.
+
+Local focused validation: 62 synthetic tests passed. The prior committed
+coordinator/import revision ab4e97f43ed4eb855421906424005e339c514e9f passed the full
+isolated PostgreSQL CI suite (574 tests and 12 pytest subtests). The final head
+must pass its own full CI; these tests do not prove live financial execution.
+
+The Render Web Shell browser controller subsequently returned infrastructure
+timeouts, including its diagnostic and reset calls. This does not establish an
+expired Render account session or a Paragon authentication failure. The plugin
+still supports read-only Render/GitHub operations, but has no shell action; it
+cannot replace the unavailable shell for private durable state/preflight checks.
+
+No production environment change, role drain, merge, deployment, financial
+write, native matching action or email transmission was performed during this
+continuation. Restore the shell capability, finish/prove the source and scoped
+native adapters, complete report integration, configure mailbox-scoped mail
+authorization, and verify an actual bounded batch before calling this live.

@@ -1,7 +1,7 @@
 import copy
 import unittest
 from unittest.mock import AsyncMock
-from operations.automatic_invoice_gate import assess, verify, InvoiceNotReady
+from operations.automatic_invoice_gate import assess, verify, partition, InvoiceNotReady
 
 DEBTOR='00000000-0000-0000-0000-000000000001'
 
@@ -45,6 +45,22 @@ class InvoiceGateTests(unittest.TestCase):
         duplicate=self.receipts+[self.receipts[0]|{'payment_id':'another-payment'}]
         with self.assertRaisesRegex(InvoiceNotReady,'multiple_selected'):
             assess(duplicate,self.sales,self.opened,DEBTOR)
+
+    def test_bad_order_does_not_remove_an_independent_good_order(self):
+        receipts=self.receipts+[dict(ref='TD12346',payment_id='bad-payment',amount='100.00')]
+        sales=self.sales+[self.sales[0]|{'YourRef':'TD12346','EntryNumber':12346,'Customer':'wrong-debtor'}]
+        eligible,exceptions=partition(receipts,sales,self.opened,DEBTOR)
+        self.assertEqual([r['receipt']['payment_id'] for r in eligible],['synthetic-payment'])
+        self.assertEqual(exceptions,[{'reference':'TD12346','payment_id':'bad-payment','reason':'own_sale_on_wrong_debtor'}])
+
+    def test_multiple_receipts_and_refunds_stay_scoped_exceptions(self):
+        for receipt in (self.receipts[0]|{'refund_review':True},):
+            eligible,exceptions=partition([receipt],self.sales,self.opened,DEBTOR)
+            self.assertEqual(eligible,[])
+            self.assertEqual(exceptions[0]['reason'],'own_order_refund_requires_review')
+        eligible,exceptions=partition(self.receipts+[self.receipts[0]|{'payment_id':'second'}],self.sales,self.opened,DEBTOR)
+        self.assertEqual(eligible,[])
+        self.assertEqual(len(exceptions),2)
 
 
 class ReadbackTests(unittest.IsolatedAsyncioTestCase):

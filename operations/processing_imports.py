@@ -7,7 +7,7 @@ import asyncio
 import base64
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from operations import worker_write_fence as fence, routing_completion
@@ -80,12 +80,31 @@ class Store:
 
 async def existing(api,module,rows,day,journal):
     # Do not repeatedly scan the whole growing journal year.
-    ledger=[]
+    # Native matching may alter reference fields. Also inspect the bounded
+    # booking day so an existing described PSP ID cannot be mistaken for new.
+    tomorrow=day+timedelta(days=1)
+    ledger=await api.rows('financialtransaction/TransactionLines',{
+        '$filter':f"JournalCode eq '{journal}' and Date ge datetime'{day.isoformat()}T00:00:00' and Date lt datetime'{tomorrow.isoformat()}T00:00:00'",
+        '$select':module.SELECT})
     for index in range(0,len(rows),12):
         ids=rows[index:index+12]
         query=' or '.join("PaymentReference eq '"+r['payment_id']+"'" for r in ids)
         ledger+=await api.rows('financialtransaction/TransactionLines',{'$filter':query,'$select':module.SELECT})
     return list({line['ID']:line for line in ledger}.values())
+
+
+async def latest_entry(api,day,journal):
+    # $orderby descending establishes the maximum in the first row. Do not
+    # follow a server-supplied next link and walk the growing whole journal.
+    raw=await api.get('financialtransaction/TransactionLines',{
+        '$filter':f"JournalCode eq '{journal}' and FinancialYear eq {day.year}",
+        '$select':'EntryNumber','$orderby':'EntryNumber desc','$top':'1'})
+    data=raw.get('d',{})
+    rows=data.get('results') if isinstance(data,dict) else data
+    require(isinstance(rows,list) and len(rows)==1 and type(rows[0].get('EntryNumber')) is int,'entry_sequence_missing')
+    entry=rows[0]['EntryNumber']+1
+    require(str(entry).startswith(str(day.year)[-2:]+journal),'entry_sequence_unexpected')
+    return entry
 
 
 def check(module,psp,rows,ledger):
@@ -167,10 +186,7 @@ async def _run(app,key,psp,part,reconcile_only=False):
         if psp=='icepay' and any(r.get('kind')=='fee' for r in missing):
             gl=await api.rows('financial/GLAccounts',{'$filter':"Code eq '5570'",'$select':'ID,Code,BalanceType,Description'})
             require(len(gl)==1 and gl[0]['ID']==module.FEE_GL and gl[0]['BalanceType']=='W' and gl[0]['Description']=='Payment service provider','fee_ledger_changed')
-        last=await api.rows('financialtransaction/TransactionLines',{'$filter':f"JournalCode eq '{journal}' and FinancialYear eq {day.year}",'$select':'EntryNumber','$orderby':'EntryNumber desc','$top':'1'})
-        require(last,'entry_sequence_missing')
-        entry=int(last[0]['EntryNumber'])+1
-        require(str(entry).startswith(str(day.year)[-2:]+journal),'entry_sequence_unexpected')
+        entry=await latest_entry(api,day,journal)
         built=module.build_xml(missing,template,day,entry)
         xml,manifest=(built,missing) if psp=='fibonatix' else built
         evidence.update(entry=entry,new_receipts=manifest,xml_sha256=hashlib.sha256(xml).hexdigest(),xml=base64.b64encode(xml).decode())

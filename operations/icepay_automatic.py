@@ -151,7 +151,10 @@ async def open_receipts(page):
 async def automatic_click(app, job, page, before, summary):
     require(not task_drain.requested(), 'worker_draining')
     require_native_allowed(app)
-    evidence = {'before': before}
+    from operations import routing_completion
+    routing_proof=await asyncio.to_thread(routing_completion.check_app,app,None,
+        [r['order'] for r in checked_rows(before)])
+    evidence = {'before': before, 'routing_before_automatically': routing_proof}
     summary.update(automatic_attempted=True)
     await asyncio.to_thread(persist, app, job['job_id'], 'click_requested', summary, evidence)
     async def submit_native():
@@ -197,3 +200,4 @@ async def run(app, job):
         LOG.warning('ICEPAY_AUTOMATIC blocked error_type=%s automatic_attempted=%s',
                     type(exc).__name__, summary['automatic_attempted'])
         raise
+

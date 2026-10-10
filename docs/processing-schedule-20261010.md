@@ -29,9 +29,11 @@ claiming a new financial upload. The PSP native Automatically paths check recent
 routing and pending/uncertain queue entries for their selected references.
 The global ICEPAY wrong-order safeguard remains unchanged.
 
-This does not yet prove the current Exact debtor for every selected invoice.
-That readback and trustworthy exclusion of affected invoice/payment chains are
-still required before replacing the global safeguard. Merely excluding a bank
+The native PSP paths now read the actual own Sales Entry and remaining open item
+across all debtors before the click. The guard rejects wrong debtors, missing or
+ambiguous invoices, credits/reversals, non-EUR amounts and differences above EUR 1.
+Trustworthy exclusion of affected invoice/payment chains is still required before
+replacing the global safeguard. Merely excluding a bank
 receipt can leave its invoice available as a wrong counterparty to another receipt.
 
 ## Notification component
@@ -74,7 +76,7 @@ Microsoft documentation:
    dependency progression using verified adapter results, not queued/completed
    job labels alone. Respect the existing global chain lock and role write fences.
 4. Add completion boundaries for continuous Woo, tax and maintenance work;
-   perform current own-invoice debtor readback before native matching. Preserve
+   validate the new own-invoice readback against a production read-only scope. Preserve
    the user's allowance for a fully settled swap as an auditable exception,
    never infer settlement from an empty UI list.
 5. Wire failure/missing-start/deadline alerts to the outbox and poll its sender.

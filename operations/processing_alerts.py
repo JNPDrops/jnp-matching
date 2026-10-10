@@ -1,6 +1,6 @@
 """Durable failure notifications. No provider errors or financial payloads in mail.
 
-The sender uses an existing SMTP account configured in the worker environment.
+The default sender uses app-only Microsoft Graph; SMTP is an explicit fallback.
 Delivery with an unknown outcome is retained for review, not blindly resent.
 """
 from email.message import EmailMessage
@@ -16,7 +16,7 @@ def initialize(conn):
         alert_key text PRIMARY KEY,batch_key text NOT NULL,stage text NOT NULL,
         reason text NOT NULL,state text NOT NULL DEFAULT 'pending',
         created_at timestamptz NOT NULL DEFAULT now(),sent_at timestamptz,
-        CHECK(state IN ('pending','sending','sent','uncertain')))''')
+        CHECK(state IN ('pending','sending','sent','accepted','uncertain')))''')
 
 
 def enqueue(conn,batch_key,stage,reason):
@@ -60,6 +60,11 @@ def message(cfg,key,batch,stage,reason):
 
 def deliver_one(app,environ,smtp_factory=smtplib.SMTP_SSL):
     """One sender, TLS, bounded connection timeout, durable delivery intent."""
+    provider=environ.get('JNP_MAIL_PROVIDER','graph')
+    if provider=='graph':
+        return deliver_graph_one(app,environ)
+    if provider!='smtp':
+        raise ValueError('unknown_notification_provider')
     cfg=config(environ)
     with app._db_connect() as conn:
         initialize(conn)
@@ -88,5 +93,39 @@ def deliver_one(app,environ,smtp_factory=smtplib.SMTP_SSL):
                 conn.execute("UPDATE jnp_processing_alerts SET state='sent',sent_at=now() WHERE alert_key=%s",(row[0],))
                 conn.commit()
                 return 'sent'
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(hashtextextended('jnp:alert-sender',0))")
+
+
+def deliver_graph_one(app,environ,transport_factory=None):
+    from operations.processing_graph_mail import GraphMail,Settings
+    settings=Settings.from_env(environ)
+    transport=(transport_factory or GraphMail)(settings)
+    cfg={'JNP_ALERT_FROM':settings.sender,'JNP_ALERT_TO':settings.recipient}
+    with app._db_connect() as conn:
+        initialize(conn)
+        if not conn.execute("SELECT pg_try_advisory_lock(hashtextextended('jnp:alert-sender',0))").fetchone()[0]:
+            return 'busy'
+        try:
+            conn.execute("UPDATE jnp_processing_alerts SET state='uncertain' WHERE state='sending'")
+            conn.commit()
+            row=conn.execute('''SELECT alert_key,batch_key,stage,reason FROM jnp_processing_alerts
+                WHERE state='pending' ORDER BY created_at,alert_key LIMIT 1''').fetchone()
+            if not row:return 'idle'
+            transport.authenticate()
+            mail=message(cfg,*row)
+            conn.execute("UPDATE jnp_processing_alerts SET state='sending' WHERE alert_key=%s",(row[0],))
+            conn.commit()
+            try:
+                result=transport.submit(mail)
+                if result!='accepted':raise ValueError('unexpected_delivery_result')
+            except Exception:
+                conn.execute("UPDATE jnp_processing_alerts SET state='uncertain' WHERE alert_key=%s",(row[0],))
+                conn.commit()
+                return 'uncertain'
+            # Graph accepts asynchronously; never claim verified recipient delivery.
+            conn.execute("UPDATE jnp_processing_alerts SET state='accepted',sent_at=now() WHERE alert_key=%s",(row[0],))
+            conn.commit()
+            return 'accepted'
         finally:
             conn.execute("SELECT pg_advisory_unlock(hashtextextended('jnp:alert-sender',0))")

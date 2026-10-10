@@ -36,13 +36,30 @@ receipt can leave its invoice available as a wrong counterparty to another recei
 
 ## Notification component
 
-`processing_alerts.py` provides a deduplicated durable outbox, TLS SMTP sending,
-and explicit uncertain-delivery state. It never sends provider errors, tokens or
-transaction payloads. It requires an existing sender account configured through
-JNP_SMTP_HOST, JNP_SMTP_PORT (default TLS 465), JNP_SMTP_USER,
-JNP_SMTP_PASSWORD, JNP_ALERT_FROM and JNP_ALERT_TO. Set the recipient to the
-address authorized by the user in the conversation. Do not commit credentials.
-No email has been sent. Sender wiring/configuration is not complete.
+`processing_alerts.py` provides a deduplicated durable outbox and explicit
+uncertain-delivery state. Microsoft Graph is the default transport, using
+`processing_graph_mail.py` with app-only tokens. No browser or dashboard session
+is used. `202 Accepted` is recorded as `accepted`, never verified delivery.
+An ambiguous response is not retried automatically. No email has been sent.
+Sender wiring/configuration is not complete.
+
+An administrator must authorize Application Mail.Send through Exchange Online
+RBAC, limited to the selected sender mailbox. Do not grant tenant-wide sending
+or reuse/expand the dashboard application without explicit review and consent.
+Configure JNP_GRAPH_TENANT_ID, JNP_GRAPH_CLIENT_ID, JNP_ALERT_FROM, JNP_ALERT_TO
+and exactly one of JNP_GRAPH_CERTIFICATE_PATH or JNP_GRAPH_CLIENT_SECRET.
+For PFX certificates, JNP_GRAPH_CERTIFICATE_PASSWORD is optional. Prefer a
+managed certificate rotation procedure; no credential is permanent. The mail
+recipient is the address authorized in the conversation, not stored in Git.
+
+An existing SMTP account remains an explicit `JNP_MAIL_PROVIDER=smtp` fallback
+with JNP_SMTP_HOST, JNP_SMTP_PORT (TLS 465), JNP_SMTP_USER and JNP_SMTP_PASSWORD.
+Do not assume Outlook supports basic SMTP authentication.
+
+Microsoft documentation:
+- https://learn.microsoft.com/en-us/graph/api/user-sendmail?view=graph-rest-1.0
+- https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac
+- https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow
 
 ## Blocking work before activation
 
@@ -72,12 +89,17 @@ No email has been sent. Sender wiring/configuration is not complete.
    completeness, Exact readback, downstream gates and final report. Retire the
    paused chat executor only after autonomous processing is proven.
 
-Current execution access blocker: Render Web Shell requires authentication and
-the MCP PostgreSQL query route cannot reach the private-only database. Keep its
-external allowlist closed. Never deploy merely to force a restart or drain.
+Render Web Shell authentication was restored on 2026-10-10. Internal read-only
+database access works. Keep the database external allowlist closed. This removes
+the management-access blocker, not the remaining implementation blockers above.
+Never deploy merely to force a restart or drain.
 
 ## Validation performed
 
 Synthetic tests cover local cutoffs, daylight-saving transitions, delayed slots,
 timezone-equivalent identity, routing freshness and cutoff coverage, and safe
 notification construction. These tests do not establish production readiness.
+App-only mail tests additionally cover bounded single submission, authentication
+failure before durable send intent, committed intent before network submission,
+sanitized errors, and preservation of uncertain delivery. The local processing
+and mail test set contains 20 passing tests. Full CI must pass on the final head.

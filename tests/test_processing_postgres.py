@@ -4,6 +4,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
+from unittest.mock import patch
 
 from operations import routing_completion as routing, processing_schedule as schedule
 from operations import processing_alerts as alerts
@@ -85,3 +86,54 @@ class ProcessingPostgresTests(unittest.TestCase):
         self.assertEqual(alerts.deliver_graph_one(app,env,Transport),'idle')
         self.assertEqual(calls,['submit'])
         self.assertEqual(self.conn.execute('SELECT state FROM jnp_processing_alerts WHERE alert_key=%s',(key,)).fetchone()[0],'uncertain')
+
+    def coordinator_fixture(self):
+        from operations import processing_orchestrator as coordinator, agent_jobs
+        coordinator.initialize(self.conn)
+        agent_jobs.initialize(self.conn)
+        lease=uuid4()
+        self.conn.execute('CREATE TABLE jnp_worker_roles(division int,role text,lease_id uuid,active_owner text,draining boolean,lease_until timestamptz)')
+        self.conn.execute("INSERT INTO jnp_worker_roles VALUES(3977752,'reports',%s,'worker-reports',false,now()+interval '2 minutes')",(lease,))
+        self.conn.execute("INSERT INTO jnp_processing_control(division,enabled,first_planned_date) VALUES(3977752,true,'2026-10-10')")
+        owner=SimpleNamespace(role='reports',division=3977752,lease_id=lease,owner='worker-reports')
+        app=SimpleNamespace(DIVISION=3977752)
+        now=datetime(2026,10,10,1,tzinfo=schedule.ZONE)
+        return coordinator,owner,app,now
+
+    def test_coordinator_does_not_repeat_a_queued_job(self):
+        c,owner,app,now=self.coordinator_fixture()
+        with patch('operations.worker_write_fence.current_owner',return_value=owner):
+            self.assertEqual(c.tick(self.conn,app,now),'queued')
+            self.assertEqual(c.tick(self.conn,app,now),'worker_still_running')
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM jnp_agent_jobs').fetchone()[0],1)
+
+    def test_job_completion_without_adapter_proof_is_not_success(self):
+        c,owner,app,now=self.coordinator_fixture()
+        with patch('operations.worker_write_fence.current_owner',return_value=owner):
+            c.tick(self.conn,app,now)
+            self.conn.execute("UPDATE jnp_agent_jobs SET state='completed'")
+            self.assertEqual(c.tick(self.conn,app,now),'dependency_blocked')
+            self.assertEqual(c.tick(self.conn,app,now),'queued')
+        states=dict(self.conn.execute('SELECT stage,state FROM jnp_processing_stages').fetchall())
+        self.assertEqual(states['fibonatix_source'],'blocked')
+        self.assertEqual(states['fibonatix_import'],'blocked')
+        self.assertEqual(states['icepay_source'],'queued')
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM jnp_processing_alerts').fetchone()[0],2)
+
+    def test_adapter_proof_does_not_allow_overlap_before_worker_finishes(self):
+        c,owner,app,now=self.coordinator_fixture()
+        with patch('operations.worker_write_fence.current_owner',return_value=owner):
+            c.tick(self.conn,app,now)
+            key,job=self.conn.execute("SELECT batch_key,job_id FROM jnp_processing_stages WHERE stage='fibonatix_source'").fetchone()
+            c.outcome(self.conn,key,'fibonatix_source','verified',{'source_verified':True},job)
+            self.assertEqual(c.tick(self.conn,app,now),'worker_still_running')
+            self.conn.execute("UPDATE jnp_agent_jobs SET state='completed'")
+            self.assertEqual(c.tick(self.conn,app,now),'queued')
+        with self.assertRaisesRegex(ValueError,'immutable'):
+            c.outcome(self.conn,key,'fibonatix_source','blocked',{'reason':'changed'})
+
+    def test_watchdog_detects_unstarted_run_without_coordinator(self):
+        c,owner,app,now=self.coordinator_fixture()
+        c.watchdog(self.conn,app,now+timedelta(hours=4))
+        reasons={r[0] for r in self.conn.execute('SELECT reason FROM jnp_processing_alerts').fetchall()}
+        self.assertEqual(reasons,{'scheduled_run_not_started','scheduled_run_overdue','coordinator_heartbeat_missing'})

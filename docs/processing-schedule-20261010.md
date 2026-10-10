@@ -105,3 +105,28 @@ App-only mail tests additionally cover bounded single submission, authentication
 failure before durable send intent, committed intent before network submission,
 sanitized errors, and preservation of uncertain delivery. The local processing
 and mail test set contains 20 passing tests. Full CI must pass on the final head.
+
+
+## Further execution work (not deployed)
+
+`processing_orchestrator.py` now implements durable stage dispatch, explicit
+adapter evidence, independent progress after a blocked dependency, a separate
+watchdog, and a wait until the prior worker command has actually ended. It is
+not activated or connected to the worker entrypoints yet.
+
+`processing_imports.py` adds a separate immutable cutoff import store and
+reuses the established journal/XML and readback checks. It deduplicates by PSP
+ID, commits write intent before POST, and never retries an uncertain import.
+It has not been exercised against production and is not release evidence.
+
+Read-only deployment investigation confirmed that the Paragon configuration
+is present on the existing web service but absent from the Fibonatix worker.
+A fresh login using the existing web integration succeeded. No credential
+values are included here. The inspected services have no configured dedicated
+Graph or SMTP notification credentials. No environment edit was saved.
+
+The attempted merge of the earlier component-only revision was rejected by
+automatic approval review because the release is incomplete. It was not
+retried or deployed through another route. Complete the source acquisition,
+worker wiring, scoped native actions, notification configuration and execution
+checks before requesting a full release again.

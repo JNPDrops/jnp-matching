@@ -110,6 +110,12 @@ def persist(app,key,state,data):
 @fence.owned_operation('fibonatix')
 async def click(app,key,page,allowed,first,last,data):
     require(not task_drain.requested(),'worker_draining')
+    from operations.automatic_invoice_gate import verify
+    from operations.fibonatix_daily import API
+    data['own_invoice_before_automatically']=await verify(API(app),data['before_receipts'],'100100')
+    from operations import routing_completion
+    data['routing_before_automatically']=await asyncio.to_thread(
+        routing_completion.check_app,app,None,[r['ref'] for r in data['before_receipts']])
     await asyncio.to_thread(persist,app,key,'click_requested',data)
     async def native():
         async with page.expect_navigation(wait_until='load',timeout=90000):await page.locator('#btnAutomatic').click()
@@ -125,6 +131,12 @@ async def click(app,key,page,allowed,first,last,data):
 @fence.owned_operation('fibonatix')
 async def click_group(app,key,page,allowed,first,last,data,batch):
     require(not task_drain.requested(),'worker_draining')
+    from operations.automatic_invoice_gate import verify
+    from operations.fibonatix_daily import API
+    batch['own_invoice_before_automatically']=await verify(API(app),batch['receipts'],'100100')
+    from operations import routing_completion
+    data['routing_before_automatically']=await asyncio.to_thread(
+        routing_completion.check_app,app,None,[r['ref'] for r in batch['receipts']])
     batch['state']='click_requested'
     await asyncio.to_thread(persist,app,key,'click_requested',data)
     async def native():
@@ -209,3 +221,4 @@ async def run(app,job):
             await asyncio.to_thread(persist,app,key,'completed',data)
             return {'state':'completed','open_before':len(receipts)+len(data.get('excluded_refunds',[])),'remaining_open':len(remaining),'matched':data['matched']}
         return await click(app,key,page,allowed,first,day,data)
+

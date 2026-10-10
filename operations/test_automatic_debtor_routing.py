@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from operations import automatic_debtor_routing as a, bacs_debtor_transfer as m, metorik_bacs_evidence as e
 from operations.test_plisio_debtor_transfer import fixture
-from operations import customer_only_routing as c
+from operations import customer_only_routing as c, routing_completion
 
 
 class ScopeTests(unittest.TestCase):
@@ -103,9 +103,11 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         app=Mock(DATABASE_URL='configured');app._db_connect.return_value=conn
         api=AsyncMock();api.limits={'remaining':500};api.rows.return_value=[]
         from operations import backfill_debtor_routing as b
-        with patch.object(a.policy,'initialize'),patch.object(a.policy,'activate_once'),patch.object(a.policy,'wait_for_start',return_value=False),patch.object(a.cleanup,'discover_batch',AsyncMock()),patch.object(a.cleanup,'status',return_value={}),patch.object(a,'initialize'),patch.object(b,'initialize'),patch.object(a.runtime,'recover_once'),patch.object(a.runtime,'deferred',return_value=False),patch.object(a.runtime,'queue_counts',return_value={}),patch.object(a.Path,'open',MagicMock()),patch.object(a.fcntl,'flock'),patch.object(a,'AutomaticExact',return_value=api),patch.object(a,'validate_routes',AsyncMock(return_value='00000000-0000-0000-0000-000000000001')),patch.object(b,'process_pending',AsyncMock(return_value=None)),patch.object(a,'enqueue') as enqueue:
+        with patch.object(a.policy,'initialize'),patch.object(a.policy,'activate_once'),patch.object(a.policy,'wait_for_start',return_value=False),patch.object(a.cleanup,'discover_batch',AsyncMock()),patch.object(a.cleanup,'status',return_value={}),patch.object(a,'initialize'),patch.object(b,'initialize'),patch.object(a.runtime,'recover_once'),patch.object(a.runtime,'deferred',return_value=False),patch.object(a.runtime,'queue_counts',return_value={}),patch.object(a.Path,'open',MagicMock()),patch.object(a.fcntl,'flock'),patch.object(a,'AutomaticExact',return_value=api),patch.object(a,'validate_routes',AsyncMock(return_value='00000000-0000-0000-0000-000000000001')),patch.object(b,'process_pending',AsyncMock(return_value=None)),patch.object(a,'enqueue') as enqueue,patch.object(routing_completion,'record') as completion:
             await a.cycle(app)
         enqueue.assert_called_once()
+        completion.assert_called_once()
+        self.assertIs(completion.call_args.args[0],conn)
         self.assertEqual(enqueue.call_args.args[3],start)
         sqls=[call.args[0] for call in conn.execute.call_args_list]
         self.assertTrue(any("WHERE state='pending'" in sql for sql in sqls))

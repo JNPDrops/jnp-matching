@@ -559,6 +559,9 @@ async def cycle(app):
             summary = await run(app, conn, api, now)
             conn.execute('UPDATE jnp_allocation_maintenance SET summary=%s::jsonb', (json.dumps(summary),))
             STATUS.update(summary)
+            if summary.get('state')=='ready' and not task_drain.requested():
+                from operations.processing_completion import record
+                record(conn,'maintenance',now,summary)
         except MaintenanceDrained:
             STATUS['state'] = 'draining'
         except BudgetDeferred:
@@ -642,3 +645,4 @@ async def review_page(request: Request):
     from app import main
     return main.templates.TemplateResponse(request=request, name='bank_review.html', context=data,
         headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+

@@ -673,7 +673,8 @@ def parse_payments(content, expected_count, expected_ids=None, *, utc_to_amsterd
             raise AcquisitionStopped('order_reference_conflict')
         selected.append({'payment_id':row['paymentid'],'merchant':b.MERCHANT,
             'date':paid.isoformat(),'amount':str(value),'status':row['lastpaymentstatus'],
-            'order':next(iter(order_values),None)})
+            'order':next(iter(order_values),None),
+            'source_time_utc':payment_timestamp(row['paymenttime']).replace(tzinfo=timezone.utc).isoformat() if utc_to_amsterdam else None})
         statuses[row['lastpaymentstatus']] += 1
     if expected_ids is not None and ({payment for _,payment in seen}!=set(expected_ids)
                                     or len(expected_ids)!=len(source)):
@@ -1048,3 +1049,4 @@ async def run(task_id=None):
 
 if __name__=='__main__' and sys.argv[1:]==['--worker']:
     print(json.dumps(asyncio.run(worker(json.loads(sys.stdin.read(200000)))),sort_keys=True))
+

@@ -215,6 +215,9 @@ async def upload(app,conn,api,day,data,store=None):
     xml=base64.b64decode(data['xml'],validate=True)
     require(hashlib.sha256(xml).hexdigest()==data['xml_sha256'],'xml_changed')
     token=await app._access_token()
+    from operations import routing_completion
+    from operations.fibonatix_daily_source import bounds
+    data['routing_before_import']=routing_completion.require_recent(conn,bounds(day)[1])
     claimed=store.claim()
     require(bool(claimed),'previous_write_reconcile_only')
     data['write_audit']=fence.audit_metadata()
@@ -322,3 +325,4 @@ async def run(app,job):
     finally:
         if locked:conn.execute('SELECT pg_advisory_unlock(397775226)')
         conn.close()
+

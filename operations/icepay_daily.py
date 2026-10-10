@@ -113,7 +113,7 @@ class API:
     async def get(self,resource,params=None,url=None):
         import httpx
         from operations.bacs_debtor_transfer import TLS_CONTEXT
-        require(resource in {'financial/Journals','crm/Accounts','financial/GLAccounts','financialtransaction/TransactionLines','read/financial/ReceivablesList'},'invalid_read_resource')
+        require(resource in {'salesentry/SalesEntries','financial/Journals','crm/Accounts','financial/GLAccounts','financialtransaction/TransactionLines','read/financial/ReceivablesList'},'invalid_read_resource')
         url=url or f'{BASE}/api/v1/{DIVISION}/{resource}';u=urlsplit(url)
         require(u.scheme=='https' and u.netloc=='start.exactonline.nl' and u.path==f'/api/v1/{DIVISION}/{resource}' and not u.fragment and self.calls<45,'read_scope_or_budget')
         await asyncio.sleep(max(0,2-(time.monotonic()-self.last)))
@@ -250,6 +250,9 @@ async def run(app,job):
         require(not task_drain.requested(),'worker_draining')
         token=await app._access_token()
         require(api.quota.get('daily',0)>200 and api.quota.get('minute',0)>8,'write_budget_low')
+        from operations import routing_completion
+        from operations.fibonatix_daily_source import bounds
+        data['routing_before_import']=routing_completion.require_recent(conn,bounds(day)[1])
         require(conn.execute("UPDATE jnp_icepay_daily_imports SET write_requested=true,state='upload_requested',updated_at=now() WHERE division=%s AND processing_date=%s AND state='prepared' AND write_requested=false RETURNING division",(DIVISION,day)).fetchone(),'write_already_requested')
         data['write_audit']=fence.audit_metadata();save('upload_requested',data)
         import httpx
@@ -269,3 +272,4 @@ async def run(app,job):
     finally:
         if locked:conn.execute("SELECT pg_advisory_unlock(hashtextextended('jnp:3977752:icepay:receipts',0))")
         conn.close()
+

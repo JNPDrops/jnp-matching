@@ -250,6 +250,9 @@ async def run(app,job):
         require(not task_drain.requested(),'worker_draining')
         token=await app._access_token()
         require(api.quota.get('daily',0)>200 and api.quota.get('minute',0)>8,'write_budget_low')
+        from operations import routing_completion
+        from operations.fibonatix_daily_source import bounds
+        data['routing_before_import']=routing_completion.require_recent(conn,bounds(day)[1])
         require(conn.execute("UPDATE jnp_icepay_daily_imports SET write_requested=true,state='upload_requested',updated_at=now() WHERE division=%s AND processing_date=%s AND state='prepared' AND write_requested=false RETURNING division",(DIVISION,day)).fetchone(),'write_already_requested')
         data['write_audit']=fence.audit_metadata();save('upload_requested',data)
         import httpx
@@ -269,3 +272,4 @@ async def run(app,job):
     finally:
         if locked:conn.execute("SELECT pg_advisory_unlock(hashtextextended('jnp:3977752:icepay:receipts',0))")
         conn.close()
+

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from operations import icepay_automatic as automatic, icepay_jobs
-from operations import worker_coordination as coordination, worker_write_fence as fence
+from operations import worker_coordination as coordination, worker_write_fence as fence, routing_completion
 
 
 def snapshot():
@@ -57,7 +57,7 @@ class ReceiptScopeTests(unittest.TestCase):
 
 
 class NativeActionTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, failed_readback=False):
+    async def exercise(self, failed_readback=False, routing_blocked=False):
         events = []
         app = SimpleNamespace(DATABASE_URL='synthetic', DIVISION=3977752)
         lease = SimpleNamespace(database_url='synthetic', division=3977752, role='icepay',
@@ -71,8 +71,14 @@ class NativeActionTests(unittest.IsolatedAsyncioTestCase):
             if failed_readback: raise ValueError('readback_failed')
             return snapshot(), [{'order': 'TD123'}]
         def persist(app, job, state, summary, evidence): events.append(state)
+        def routing_check(*args):
+            events.append('routing_checked')
+            if routing_blocked:
+                raise routing_completion.RoutingNotReady('no_successful_routing_cycle')
+            return {'id': 1}
         with fence.owner_scope(lease), \
              patch.object(automatic, 'require_native_allowed'), \
+             patch.object(routing_completion, 'check_app', side_effect=routing_check), \
              patch.object(automatic, 'persist', side_effect=persist), \
              patch.object(automatic, 'open_receipts', side_effect=readback), \
              patch.object(coordination, '_budget_database_call', side_effect=lambda url, fn, *a: events.append(fn.__name__)):
@@ -84,9 +90,16 @@ class NativeActionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_button_only_settled_after_durable_readback(self):
         events, lease, result, page = await self.exercise()
-        self.assertEqual(events, ['click_requested', 'admit_write', 'native_click', 'readback', 'completed', 'settle_write'])
+        self.assertEqual(events, ['routing_checked', 'click_requested', 'admit_write', 'native_click', 'readback', 'completed', 'settle_write'])
         self.assertEqual(result['remaining_open'], 1)
         page.locator.assert_called_once_with('#btnAutomatic')
+        self.assertFalse(lease.lost.is_set())
+
+    async def test_unfinished_routing_prevents_native_click(self):
+        events, lease, result, page = await self.exercise(routing_blocked=True)
+        self.assertEqual(events, ['routing_checked'])
+        self.assertIsNone(result)
+        page.locator.return_value.click.assert_not_awaited()
         self.assertFalse(lease.lost.is_set())
 
     async def test_unknown_result_blocks_replay(self):

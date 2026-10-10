@@ -14,6 +14,7 @@ from operations import processing_completion as completion
 from operations import routing_completion
 from operations import task_drain, agent_jobs
 from operations.worker_write_fence import current_owner
+from operations.processing_icepay_source import capture as icepay_source
 
 
 async def import_stage(app,job,stage):
@@ -66,6 +67,7 @@ async def report_stage(app,job,stage):
 # This registry deliberately does not claim a source/native adapter is ready
 # merely because a historical one-off module exists. Readiness exposes gaps.
 ADAPTERS={
+    'icepay_source':icepay_source,
     'fibonatix_import':import_stage,'icepay_import':import_stage,
     'routing':continuous_stage,'woo_rules':continuous_stage,
     'tax':continuous_stage,'maintenance':continuous_stage,'report':report_stage,

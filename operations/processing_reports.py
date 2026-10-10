@@ -14,7 +14,9 @@ def report_data(day,start,end,stages):
     expected={stage for stage,_ in coordinator.STAGES if stage!='report'}
     if set(states)!=expected or any(state not in coordinator.TERMINAL for state in states.values()):
         raise ValueError('relevant_day_work_not_terminal')
-    status='complete' if all(state=='verified' for state in states.values()) else 'incomplete'
+    source_incomplete=any(evidence.get('unprocessed_source_items',0)>0 or evidence.get('unprocessed_refunds',0)>0
+        for stage,_,evidence in stages if stage.endswith('_source'))
+    status='complete' if all(state=='verified' for state in states.values()) and not source_incomplete else 'incomplete'
     return {'state':status,'processing_date':day.isoformat(),
         'window_start':start.isoformat(),'window_end':end.isoformat(),
         'generated_at':datetime.now(timezone.utc).isoformat(),

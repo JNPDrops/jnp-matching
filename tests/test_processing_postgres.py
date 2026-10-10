@@ -166,3 +166,22 @@ class ProcessingPostgresTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'lease_unavailable'):
                 completion.record(c,'woo-rules',boundary,{'queue_drained':True})
         self.assertEqual(c.execute('SELECT count(*) FROM jnp_processing_completions').fetchone()[0],1)
+
+    def test_icepay_source_claim_is_not_replayed_after_a_process_restart(self):
+        from operations import processing_icepay_source as source
+        schedule.register_due(self.conn,date(2026,10,10),datetime(2026,10,10,9,tzinfo=schedule.ZONE))
+        key='jnp:3977752:batch:2026-10-10T0900'
+        app=SimpleNamespace(DIVISION=3977752,_db_connect=self.connection)
+        lease=uuid4()
+        self.conn.execute('CREATE TABLE jnp_worker_roles(division int,role text,lease_id uuid,active_owner text,draining boolean,lease_until timestamptz)')
+        self.conn.execute("INSERT INTO jnp_worker_roles VALUES(3977752,'icepay',%s,'worker-icepay',false,now()+interval '2 minutes')",(lease,))
+        owner=SimpleNamespace(role='icepay',division=3977752,lease_id=lease,owner='worker-icepay')
+        with patch.object(source,'current_owner',return_value=owner):
+            _,prior=source.claim(app,key)
+            self.assertIsNone(prior)
+            with self.assertRaisesRegex(ValueError,'previous_source_attempt_requires_review'):
+                source.claim(app,key)
+            source.finish(app,key,'verified',{'candidates':[],'summary':{'source_rows':0}})
+            _,prior=source.claim(app,key)
+            self.assertEqual(prior['candidates'],[])
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM jnp_processing_sources').fetchone()[0],1)

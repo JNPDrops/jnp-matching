@@ -24,3 +24,8 @@ class ReportGateTests(unittest.TestCase):
 
     def test_only_all_verified_evidence_is_complete(self):
         self.assertEqual(report_data(*self.args,self.stages)['state'],'complete')
+
+    def test_acquired_but_unprocessed_source_exception_keeps_report_incomplete(self):
+        for evidence in ({'unprocessed_source_items':1},{'unprocessed_refunds':1}):
+            stages=[(stage,state,evidence if stage=='icepay_source' else old) for stage,state,old in self.stages]
+            self.assertEqual(report_data(*self.args,stages)['state'],'incomplete')

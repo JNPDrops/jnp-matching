@@ -141,8 +141,8 @@ checks before requesting a full release again.
   remain. The observer never runs another financial rule writer.
 - The strict processing dispatcher is connected to the three queue roles in
   this branch. Imports, continuous completion observation and terminal report
-  storage have adapters. `missing_adapters()` still identifies four essential
-  gaps: both fresh PSP source adapters and both scoped native Automatically
+  storage have adapters. `missing_adapters()` still identifies three essential
+  gaps: fresh Paragon acquisition and both scoped native Automatically
   adapters. This is not an activatable full release.
 - An uncertain current-stage command no longer suppresses independent work and
   its incomplete report. A later batch still waits behind an unresolved prior
@@ -175,6 +175,20 @@ timeouts, including its diagnostic and reset calls. This does not establish an
 expired Render account session or a Paragon authentication failure. The plugin
 still supports read-only Render/GitHub operations, but has no shell action; it
 cannot replace the unavailable shell for private durable state/preflight checks.
+
+The generic ICEPAY cutoff source adapter now wraps the existing proven daily
+portal acquisition without invoking its old one-off CLI authorization. Its own
+batch claim is durable and requires the executing ICEPAY role lease. It retains
+the raw export, account/date/count/timezone proofs and source digest; cutoff
+selection excludes the boundary exactly and excludes non-OK PSP statuses.
+Unknown separate-policy items do not erase independent positive receipts, and
+the report remains incomplete while an item/refund requires policy/window review.
+A source capture still proves no import. This wrapper is synthetically tested,
+not production-preflight verified. Interrupted source attempts are not replayed.
+
+Revision d31878d8f25d45c22538d7b20af7b893d421601c passed the full isolated PostgreSQL
+CI suite: 590 tests and 12 pytest subtests. Subsequent ICEPAY source additions
+require their own full CI result.
 
 No production environment change, role drain, merge, deployment, financial
 write, native matching action or email transmission was performed during this

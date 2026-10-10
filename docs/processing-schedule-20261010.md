@@ -1,0 +1,83 @@
+# Unattended processing: implementation checkpoint
+
+Status: **draft, incomplete, not safe to deploy as the full requested feature**.
+The additions in this branch do not enable scheduled financial processing.
+
+## Accepted schedule
+
+Europe/Amsterdam: 09:00 / 13:00 / 17:00 / 21:00, with immutable exclusive
+cutoffs 08:00 / 12:00 / 16:00 / 20:00 on the same calendar date. The 01:00
+slot covers the entire preceding calendar date. The source window begins at
+that processing day's local midnight. Overlapping observations are intentional;
+PSP transaction identity, not a window boundary, determines deduplication.
+Late source changes and incomplete older days need fresh separate revisions.
+
+The new registration module keeps every missed slot and its original cutoff.
+It does not change or reuse completed daily imports. Calendar dates rather than
+24-hour subtraction handle the 23/25-hour days around clock changes.
+
+## Routing prerequisite implemented in this branch
+
+The existing router's normal interval remains 60 seconds, with a 15-second
+poll while processing its queue (subject to shared API budget). A scan cursor
+alone is not success. Only reaching the successful end of a cycle with the
+current assigned routing lease writes a completion record.
+
+The existing generic daily Fibonatix/ICEPAY upload paths now check a successful
+cycle completed within 15 minutes, and coverage through the day cutoff, before
+claiming a new financial upload. The PSP native Automatically paths check recent
+routing and pending/uncertain queue entries for their selected references.
+The global ICEPAY wrong-order safeguard remains unchanged.
+
+This does not yet prove the current Exact debtor for every selected invoice.
+That readback and trustworthy exclusion of affected invoice/payment chains are
+still required before replacing the global safeguard. Merely excluding a bank
+receipt can leave its invoice available as a wrong counterparty to another receipt.
+
+## Notification component
+
+`processing_alerts.py` provides a deduplicated durable outbox, TLS SMTP sending,
+and explicit uncertain-delivery state. It never sends provider errors, tokens or
+transaction payloads. It requires an existing sender account configured through
+JNP_SMTP_HOST, JNP_SMTP_PORT (default TLS 465), JNP_SMTP_USER,
+JNP_SMTP_PASSWORD, JNP_ALERT_FROM and JNP_ALERT_TO. Set the recipient to the
+address authorized by the user in the conversation. Do not commit credentials.
+No email has been sent. Sender wiring/configuration is not complete.
+
+## Blocking work before activation
+
+1. Add reusable bounded fresh Paragon acquisition under the assigned Fibonatix
+   role. Main currently has source validation and consumes stored exports, but
+   no `daily_source` Fibonatix dispatcher. Preserve source versions.
+2. Add separate intraday PSP import storage and validation using the new batch
+   key, cutoff and source revision. Current daily adapters explicitly reject
+   the current day and their primary keys allow one original import per day.
+   Do not delete these safeguards or repurpose historical imports.
+3. Wire the durable schedule into one existing assigned worker; implement
+   dependency progression using verified adapter results, not queued/completed
+   job labels alone. Respect the existing global chain lock and role write fences.
+4. Add completion boundaries for continuous Woo, tax and maintenance work;
+   perform current own-invoice debtor readback before native matching. Preserve
+   the user's allowance for a fully settled swap as an auditable exception,
+   never infer settlement from an empty UI list.
+5. Wire failure/missing-start/deadline alerts to the outbox and poll its sender.
+   A second existing worker must watch the coordinator heartbeat; a dead
+   coordinator cannot send its own missed-run alert. Retain platform alerts.
+6. Configure/test existing email delivery to the approved recipient. Do not
+   create a new provider account or infrastructure without authorization.
+7. Verify database migrations and adapter/worker integration tests, drain affected
+   roles, deploy routing instrumentation first, prove its live completion record,
+   then deploy consumers. Preserve all prior uncertain and completed operations.
+8. Run a live read-only preflight and bounded authorized batch; verify source
+   completeness, Exact readback, downstream gates and final report. Retire the
+   paused chat executor only after autonomous processing is proven.
+
+Current execution access blocker: Render Web Shell requires authentication and
+the MCP PostgreSQL query route cannot reach the private-only database. Keep its
+external allowlist closed. Never deploy merely to force a restart or drain.
+
+## Validation performed
+
+Synthetic tests cover local cutoffs, daylight-saving transitions, delayed slots,
+timezone-equivalent identity, routing freshness and cutoff coverage, and safe
+notification construction. These tests do not establish production readiness.

@@ -152,9 +152,13 @@ async def automatic_click(app, job, page, before, summary):
     require(not task_drain.requested(), 'worker_draining')
     require_native_allowed(app)
     from operations import routing_completion
+    from operations.automatic_invoice_gate import verify
+    from operations.icepay_daily import API
+    invoice_proof=await verify(API(app),checked_rows(before),'109419')
     routing_proof=await asyncio.to_thread(routing_completion.check_app,app,None,
         [r['order'] for r in checked_rows(before)])
-    evidence = {'before': before, 'routing_before_automatically': routing_proof}
+    evidence = {'before': before, 'routing_before_automatically': routing_proof,
+                'own_invoice_before_automatically': invoice_proof}
     summary.update(automatic_attempted=True)
     await asyncio.to_thread(persist, app, job['job_id'], 'click_requested', summary, evidence)
     async def submit_native():

@@ -113,7 +113,7 @@ class API:
     async def get(self,resource,params=None,url=None):
         import httpx
         from operations.bacs_debtor_transfer import TLS_CONTEXT
-        require(resource in {'financial/Journals','crm/Accounts','financial/GLAccounts','financialtransaction/TransactionLines','read/financial/ReceivablesList'},'invalid_read_resource')
+        require(resource in {'salesentry/SalesEntries','financial/Journals','crm/Accounts','financial/GLAccounts','financialtransaction/TransactionLines','read/financial/ReceivablesList'},'invalid_read_resource')
         url=url or f'{BASE}/api/v1/{DIVISION}/{resource}';u=urlsplit(url)
         require(u.scheme=='https' and u.netloc=='start.exactonline.nl' and u.path==f'/api/v1/{DIVISION}/{resource}' and not u.fragment and self.calls<45,'read_scope_or_budget')
         await asyncio.sleep(max(0,2-(time.monotonic()-self.last)))

@@ -368,6 +368,9 @@ async def cycle(app_module):
                 STATUS['state']='processing_queue' if ready or not saved['done'] else 'watching'
                 if early and not ready and saved['done']:
                     STATUS.update(state='immediate_cleanup_complete',next_attempt_at=policy.START_AT.isoformat())
+                from operations import routing_completion, worker_write_fence
+                routing_completion.record(conn, worker_write_fence.current_owner(),
+                    {'state': STATUS['state'], 'queues': runtime.queue_counts(conn)})
                 runtime.event('cycle_complete',applied_since_start=STATUS['applied_since_start'],
                               last_scan=STATUS['last_scan'],cleanup=STATUS['cleanup'],queues=runtime.queue_counts(conn))
         except (customer_only.BudgetDeferred, SharedBudgetDeferred):
@@ -465,3 +468,4 @@ def main():
 
 
 if __name__=='__main__':main()
+
